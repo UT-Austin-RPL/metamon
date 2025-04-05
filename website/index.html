@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Metamon: Human-Level Competitive Pokémon</title>
+    <link rel="icon" type="image/x-icon" href="static/img/icons/pokeball.png">
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Inter:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+
+        .hero-section {
+            background-color: #fff5f5;
+            padding: 2rem 0;
+            margin-bottom: 4rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+
+        .title-image {
+            width: 50%;
+            max-width: 500px;
+            margin: -2rem auto 1rem;
+            display: block;
+        }
+
+        h2 {
+            font-family: 'Press Start 2P', cursive;
+            font-size: 1.2rem;
+            text-align: center;
+            font-weight: normal;
+            max-width: 800px;
+            margin: 0 auto 2rem;
+            line-height: 1.8;
+        }
+
+        .authors-list {
+            text-align: center;
+            margin-bottom: 1.5rem;
+            font-size: 1.4rem;
+            color: #000000;
+            font-weight: 500;
+            line-height: 1.8;
+            font-family: 'Inter', sans-serif;
+            letter-spacing: -0.02em;
+        }
+
+        .author-link {
+            color: #000000;
+            text-decoration: none;
+            transition: color 0.2s;
+            font-weight: 500;
+            padding-bottom: 2px;
+            border-bottom: 2px solid transparent;
+        }
+
+        .author-link:hover {
+            color: #e53e3e;
+            border-bottom: 2px solid #e53e3e;
+        }
+
+        .author-superscript {
+            color: #e53e3e;
+            font-size: 0.8em;
+            vertical-align: super;
+            font-weight: 600;
+        }
+
+        .affiliation {
+            text-align: center;
+            font-size: 1.3rem;
+            color: #BF5700;
+            margin-bottom: 0.5rem;
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            opacity: 0.9;
+            padding: 0.5rem 1rem;
+            display: inline-block;
+            position: relative;
+            left: 50%;
+            transform: translateX(-50%);
+            border-radius: 4px;
+        }
+
+        .equal-contribution {
+            text-align: center;
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 2rem;
+            font-family: 'Inter', sans-serif;
+            font-style: italic;
+        }
+
+        .button-container {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .button {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.5rem 1.6rem;
+            border: 2px solid #000;
+            border-radius: 2rem;
+            text-decoration: none;
+            color: #000;
+            background: #fff;
+            font-family: 'Press Start 2P', cursive;
+            font-size: 1.1rem;
+            transition: all 0.2s;
+            gap: 0.6rem;
+            line-height: 1.4;
+        }
+
+        .button:hover {
+            background: #f0f0f0;
+        }
+
+        .button svg {
+            width: 22px;
+            height: 22px;
+            margin-bottom: 2px;
+        }
+
+        .arxiv-logo {
+            width: 16px;
+            height: 16px;
+            margin-top: 2px;
+        }
+
+        .banner-video {
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto 3rem;
+            display: block;
+            border: 4px solid #000;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .video-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin: 2rem auto;
+            max-width: 1200px;
+            padding: 0 2rem;
+        }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .video-title {
+            text-align: center;
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            font-weight: bold;
+        }
+
+        video {
+            width: 100%;
+            border: 4px solid #ddd;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+            aspect-ratio: 16/9;
+        }
+
+        .section {
+            max-width: 1200px;
+            margin: 4rem auto;
+            padding: 0 2rem;
+        }
+
+        .section-title {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-size: 2.5rem;
+            margin-bottom: 1.5rem;
+            color: #000;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .section-content {
+            font-size: 1.4rem;
+            line-height: 1.8;
+            color: #2d3748;
+            text-align: justify;
+            margin-bottom: 2rem;
+        }
+
+        .figure-container {
+            margin: 2rem auto;
+            text-align: center;
+        }
+
+        .figure-container img {
+            max-width: 100%;
+            border-radius: 8px;
+        }
+
+        .figure-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin: 2rem auto;
+        }
+
+        .figure-grid img {
+            width: 100%;
+            border-radius: 8px;
+        }
+
+        .arch-figure {
+            max-width: 50%;
+        }
+
+        .sound-toggle {
+            position: absolute;
+            bottom: 1rem;
+            right: 1rem;
+            background: rgba(0, 0, 0, 0.6);
+            border: none;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background-color 0.2s;
+        }
+
+        .sound-toggle:hover {
+            background: rgba(0, 0, 0, 0.8);
+        }
+
+        .sound-toggle svg {
+            width: 24px;
+            height: 24px;
+            fill: white;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="hero-section">
+        <div class="container">
+            <img src="static/img/metamon_pokemon_font.PNG" alt="Metamon" class="title-image">
+            <h2>Human-Level Competitive Pokémon via Scalable Offline Reinforcement Learning with Transformers</h2>
+
+            <div class="authors-list">
+                <a href="https://jakegrigsby.github.io/" class="author-link">Jake Grigsby</a>,
+                <a href="https://www.linkedin.com/in/justinsasek/" class="author-link">Justin Sasek</a><span
+                    class="author-superscript">*</span>,
+                <a href="https://xieleo5.github.io/" class="author-link">Yuqi Xie</a><span
+                    class="author-superscript">*</span>,
+                <a href="#" class="author-link">Steven Zheng</a><span class="author-superscript">*</span>,
+                <a href="https://cs.utexas.edu/~yukez" class="author-link">Yuke Zhu</a>
+            </div>
+
+            <div class="affiliation">
+                The University of Texas at Austin
+            </div>
+
+            <div class="equal-contribution">
+                <span style="color: #e53e3e;">*</span> Equal Contribution
+            </div>
+
+            <div class="button-container">
+                <a href="arxiv.link" class="button">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path
+                            d="M14 2H6C4.89 2 4 2.89 4 4V20C4 21.11 4.89 22 6 22H18C19.11 22 20 21.11 20 20V8L14 2ZM18 20H6V4H13V9H18V20Z"
+                            fill="currentColor" />
+                    </svg>
+                    <span>Paper</span>
+                </a>
+                <a href="github.link" class="button">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path
+                            d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"
+                            fill="currentColor" />
+                    </svg>
+                    <span>Code</span>
+                </a>
+            </div>
+
+            <div class="video-container">
+                <video class="banner-video" autoplay loop playsinline muted controls>
+                    <source src="static/video/metamon_twitter_v2.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                <button class="sound-toggle" onclick="toggleSound(this)" aria-label="Toggle sound">
+                    <svg viewBox="0 0 24 24" class="volume-icon">
+                        <path
+                            d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h3 class="section-title"></h3>
+        <p class="section-content">
+            Competitive Pokémon Singles (CPS) is a complex turn-based strategy game that combines the long
+            planning horizons of chess, the imperfect information and stochasticity of poker, and enough named
+            entities and niche gameplay mechanics to fill an encyclopedia. Players design and control teams of Pokémon
+            to deal
+            damage to their opponent until the last player with healthy Pokémon wins. CPS is an
+            exciting RL problem because it requires reasoning under uncertainty in a vast state space.
+        </p>
+
+        <p class="section-content">
+            CPS is played on <a href="https://pokemonshowdown.com/" target="_blank">Pokémon Showdown</a>,
+            a popular website that simulates the mechanics of every "generation" of the best-selling video game
+            franchise.
+            We focus on the highly competitive world of Pokémon's <b>first four generations, where battles are
+                longest and reveal the least information about the opponent's team</b>.
+        </p>
+
+        <p class="section-content">
+            The videos below show our final model playing the most popular ruleset of all four generations against an
+            LLM-Agent method called
+            <a href="https://arxiv.org/abs/2402.01118" target="_blank">PokéLLMon</a>. Our policy learns to play entirely
+            from data without Pokémon heuristics or model-based search.
+        </p>
+        <div class="video-grid">
+            <div class="video-container">
+                <div class="video-title">Generation 1 "OverUsed" (OU) </div>
+                <video controls>
+                    <source src="static/video/gen1ou-vs-pokellmon_fast.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <div class="video-container">
+                <div class="video-title">Generation 2 OU </div>
+                <video controls>
+                    <source src="static/video/gen2ou-vs-pokellmon_fast.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <div class="video-container">
+                <div class="video-title">Generation 3 OU </div>
+                <video controls>
+                    <source src="static/video/gen3ou-vs-pokellmon_fast.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <div class="video-container">
+                <div class="video-title">Generation 4 OU </div>
+                <video controls>
+                    <source src="static/video/gen4ou-vs-pokellmon_fast.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+        </div>
+
+        <p class="section-content">
+            These videos are sampled from a match of 300 battles with a win rate of 95%, but don't blame the LLM,
+            because most competitive humans would lose too! This page provides a short summary of how this agent was
+            trained and where future work might go from here. For much more information, please check out our paper.
+        </p>
+    </div>
+
+    <div class="section">
+        <h3 class="section-title">Building an Offline RL Dataset of Human Battles</h3>
+        <p class="section-content">
+
+            Pokémon Showdown (PS) stores turn-by-turn "replays" of battles spanning more than a decade. The PS replay
+            dataset
+            is an exciting source of naturally occurring data. However, there is a critical
+            problem: CPS decisions are made from the partially observed point-of-view of one of the two competing
+            players, but PS replays record the perspective of a spectator who has access to information
+            about neither team. We develop a pipeline to reconstruct the first-person
+            perspective of an agent from PS replays,
+            thereby unlocking a dataset of real human battles spanning more than a decade that
+            grows larger every day. We are able to reconstruct more than 475k human
+            demonstrations (with shaped rewards) from battles dating back to 2014.
+        </p>
+        <div class="figure-container">
+            <img src="static/img/data_distribution_v2.png" alt="Data Distribution">
+        </div>
+    </div>
+
+    <div class="section">
+        <h3 class="section-title">Model-Free Pokémon with Transformers</h3>
+        <p class="section-content">
+            Our dataset enables a general perspective on the Pokémon Showdown AI problem that has previously been
+            impractical: that
+            sequence models might be able to learn to play without explicit search or heuristics by using model-free RL
+            and long-term memory to infer their opponent's team and tendencies. Our experiments take this perspective to
+            its extreme and create a case study in the process of training and evaluating large policies. We develop a
+            suite of heuristic and imitation learning (IL) opponents for offline
+            evaluation with procedurally generated Pokémon teams. With these opponents as a benchmark, we evaluate
+            Transformers of up to 200M parameters trained by IL and offline RL. We then explore the idea that our
+            models would benefit from training on intentionally unrealistic ("synthetic") self-play datasets that do not
+            attempt to
+            recreate the unknown distribution of teams and opponents in online battles.
+
+        </p>
+        <div class="figure-container">
+            <img src="static/img/Figure1_v2.png" alt="Model Overview">
+        </div>
+    </div>
+
+    <div class="section">
+        <h3 class="section-title">Human-Level Agents</h3>
+        <p class="section-content">
+            We train and evaluate a total of 20 agents against a variety of opponents including custom heuristics, RNN
+            imitation learning policies, a strong open-source
+            heuristic search engine, an LLM-Agent, and each other.
+
+
+        </p>
+        <div class="figure-grid">
+            <img src="static/img/vs_foul_play_final.png" alt="Battle Analysis">
+            <img src="static/img/pokellmon_main (1).png" alt="Performance Results">
+        </div>
+
+        <div class="figure-container">
+            <img src="static/img/head2head_vs_large_il_final.png" alt="Head-to-Head vs Large IL Final">
+        </div>
+        <p class="section-content">
+            Finally, we compete against human players by queuing for ranked battles on Pokémon Showdown. Our best agents
+            rise into the top 10% of active usernames and onto the global leaderboards. You can watch replays of
+            hundreds
+            of our battles via links in the paper.
+        </p>
+        <div class="figure-container">
+            <img src="static/img/player_distributions (1).png" alt="Player Distributions">
+        </div>
+
+        <p class="section-content">
+            Our work enables a scalable offline RL approach to Competitive Pokémon and demonstrates that sequence
+            models trained on historical gameplay can be competitive with humans in the challenging setting of
+            Generations 1-4.
+            Our dataset will continue to grow over time and may be of broader
+            interest in offline RL as a way to evaluate new research on a complex task. We hope our dataset and baseline
+            models will inspire research interest in Early-Generation Pokémon. Alternative learning updates,
+            architectures,
+            and large-scale self-play techniques may create a path to super-human performance.
+        </p>
+    </div>
+
+    <script>
+        function toggleSound(button) {
+            const video = button.previousElementSibling;
+            const icon = button.querySelector('.volume-icon');
+            if (video.muted) {
+                video.muted = false;
+                icon.innerHTML = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>';
+            } else {
+                video.muted = true;
+                icon.innerHTML = '<path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>';
+            }
+        }
+    </script>
+</body>
+
+</html>
