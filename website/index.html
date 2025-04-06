@@ -181,6 +181,14 @@
             aspect-ratio: 16/9;
         }
 
+        @media (max-width: 768px) {
+            .video-grid {
+                grid-template-columns: 1fr;
+                /* Change to single column on smaller screens */
+            }
+        }
+
+
         .section {
             max-width: 1200px;
             margin: 4rem auto;
@@ -202,6 +210,12 @@
             color: #2d3748;
             text-align: justify;
             margin-bottom: 2rem;
+        }
+
+        @media (max-width: 768px) {
+            .section-content {
+                font-size: 1.2rem;
+            }
         }
 
         .figure-container {
