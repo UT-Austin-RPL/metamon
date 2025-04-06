@@ -212,6 +212,18 @@
             margin-bottom: 2rem;
         }
 
+        .site-footer {
+            text-align: center;
+            padding: 2rem 0;
+            font-size: 1rem;
+            color: #666;
+        }
+
+        .site-footer a {
+            color: inherit;
+            text-decoration: underline;
+        }
+
         @media (max-width: 768px) {
             .section-title {
                 font-size: 2rem;
@@ -219,6 +231,10 @@
 
             .section-content {
                 font-size: 1.2rem;
+            }
+
+            .site-footer {
+                font-size: 0.8rem;
             }
         }
 
@@ -477,9 +493,8 @@
         </p>
     </div>
 
-    <footer style="text-align: center; padding: 2rem 0; font-size: 1rem; color: #666;">
-        © 2025 <a href="https://rpl.cs.utexas.edu/" target="_blank" rel="noopener noreferrer"
-            style="color: inherit; text-decoration: underline;">
+    <footer class="site-footer">
+        © 2025 <a href="https://rpl.cs.utexas.edu/" target="_blank" rel="noopener noreferrer">
             UT Austin Robot Perception and Learning Lab
         </a>
     </footer>
