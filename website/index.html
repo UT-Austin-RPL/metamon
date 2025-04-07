@@ -621,7 +621,7 @@
             clearTimeout(inactivityTimeout);
             inactivityTimeout = setTimeout(() => {
                 wrapper.classList.add('idle');
-            }, 500);
+            }, 1000);
         }
 
         ['mousemove', 'touchstart'].forEach(event => {
