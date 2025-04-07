@@ -169,7 +169,7 @@
 
         .video-title {
             text-align: center;
-            font-size: 1.5rem;
+            font-size: 1.3rem;
             margin-bottom: 1rem;
             font-weight: bold;
         }
@@ -222,10 +222,25 @@
             pointer-events: none;
         }
 
+        .custom-link {
+            color: #ff5c8a;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s ease;
+        }
+
+        .custom-link:hover {
+            color: #e04673;
+        }
+
         @media (max-width: 768px) {
             .video-grid {
                 grid-template-columns: 1fr;
                 /* Change to single column on smaller screens */
+            }
+
+            .video-title {
+                font-size: 1.15rem;
             }
         }
 
@@ -413,7 +428,8 @@
         </p>
 
         <p class="section-content">
-            CPS is played on <a href="https://pokemonshowdown.com/" target="_blank">Pokémon Showdown</a>,
+            CPS is played on <a href="https://pokemonshowdown.com/" target="_blank" class="custom-link">Pokémon
+                Showdown</a>,
             a popular website that simulates the mechanics of every "generation" of the best-selling video game
             franchise.
             We focus on the highly competitive world of Pokémon's <b>first four generations, where battles are
@@ -423,7 +439,8 @@
         <p class="section-content">
             The videos below show our final model playing the most popular ruleset of all four generations against an
             LLM-Agent method called
-            <a href="https://arxiv.org/abs/2402.01118" target="_blank">PokéLLMon</a>. Our policy learns to play entirely
+            <a href="https://arxiv.org/abs/2402.01118" target="_blank" class="custom-link">PokéLLMon</a>. Our policy
+            learns to play entirely
             from data without Pokémon heuristics or model-based search.
         </p>
         <div class="video-grid">
