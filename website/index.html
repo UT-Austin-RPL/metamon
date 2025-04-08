@@ -258,7 +258,7 @@
         }
 
         table {
-            width: 50%;
+            width: 80%;
             margin: auto;
             border-collapse: separate;
             border-spacing: 0;
@@ -297,10 +297,16 @@
             transform: scale(1.15);
         }
 
+        .wrap-text {
+            display: inline-block;
+            max-width: 400px;
+            white-space: normal;
+        }
+
         @media (max-width: 768px) {
             table {
-                width: 80%;
-                font-size: 1.2rem;
+                width: 100%;
+                font-size: 1.1rem;
             }
         }
 
@@ -356,7 +362,7 @@
             }
 
             .section-content {
-                font-size: 1.3rem;
+                font-size: 1.15rem;
             }
 
             .site-footer {
@@ -486,7 +492,7 @@
 
             <div class="video-container idle">
                 <video id="bannerVideo" class="banner-video" autoplay loop playsinline muted>
-                    <source src="static/video/metamon_twitter_v6.mp4" type="video/mp4">
+                    <source src="static/video/metamon_twitter_v6_compressed.mp4" type="video/mp4">
                     Your browser does not support the video tag.
                 </video>
                 <button class="sound-toggle" onclick="toggleSound(this)" aria-label="Toggle sound">
@@ -696,7 +702,7 @@
     <div class="section">
         <h4 class="section-title">Watch Replays on Pokémon Showdown</h4>
 
-        <table style="width: 90%;">
+        <table>
             <tr>
                 <th colspan="1" style="font-size: 1.5em;">Username</th>
                 <th colspan="1" style="font-size: 1.5em;">Model</th>
@@ -712,10 +718,10 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=SmallSparks" target="_blank" class="custom-link"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=SmallSparks" target="_blank" class="custom-link"
                         style="font-size: 1.2em;">Small-IL</a><br>
-                    <span>15M imitation learning model</span><br>
-                    <span>trained on 1M human demonstrations</span>
+                    <span class="wrap-text">15M imitation learning model trained on 1M human demonstrations</span>
                 </td>
             </tr>
             <tr>
@@ -729,10 +735,10 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=DittoIsAllYouNeed" target="_blank"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=DittoIsAllYouNeed" target="_blank"
                         class="custom-link" style="font-size: 1.2em;">Large-IL</a><br>
-                    <span>200M imitation learning model</span><br>
-                    <span>trained on 1M human demonstrations</span>
+                    <span class="wrap-text">200M imitation learning model trained on 1M human demonstrations</span>
                 </td>
             </tr>
             <tr>
@@ -746,10 +752,10 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=Montezuma2600" target="_blank" class="custom-link"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=Montezuma2600" target="_blank" class="custom-link"
                         style="font-size: 1.2em;">Large-RL</a><br>
-                    <span>200M actor-critic model</span><br>
-                    <span>trained on 1M human demonstrations</span>
+                    <span class="wrap-text">200M actor-critic model trained on 1M human demonstrations</span>
                 </td>
             </tr>
             <tr>
@@ -763,10 +769,11 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=Metamon1" target="_blank" class="custom-link"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=Metamon1" target="_blank" class="custom-link"
                         style="font-size: 1.2em;">SyntheticRL-V0</a><br>
-                    <span>200M actor-critic model</span><br>
-                    <span>trained on 1M human + 1M diverse self-play battles</span>
+                    <span class="wrap-text">200M actor-critic model trained on 1M human + 1M diverse self-play
+                        battles</span>
                 </td>
             </tr>
             <tr>
@@ -780,10 +787,11 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=TheDeadlyTriad" target="_blank"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=TheDeadlyTriad" target="_blank"
                         class="custom-link" style="font-size: 1.2em;">SyntheticRL-V1</a><br>
-                    <span>200M actor-critic model</span><br>
-                    <span>trained on 1M human + 2M diverse self-play battles</span>
+                    <span class="wrap-text">200M actor-critic model trained on 1M human + 2M diverse self-play
+                        battles</span>
                 </td>
             </tr>
             <tr>
@@ -797,10 +805,10 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=ABitterLesson" target="_blank" class="custom-link"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=ABitterLesson" target="_blank" class="custom-link"
                         style="font-size: 1.2em;">SyntheticRL-V1 + Self-Play</a><br>
-                    <span>SyntheticRL-V1 fine-tuned on</span><br>
-                    <span>2M extra battles against itself</span>
+                    <span class="wrap-text">SyntheticRL-V1 fine-tuned on 2M extra battles against itself</span>
                 </td>
             </tr>
             <tr>
@@ -814,10 +822,11 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=QPrime" target="_blank" class="custom-link"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=QPrime" target="_blank" class="custom-link"
                         style="font-size: 1.2em;">SyntheticRL-V1++</a><br>
-                    <span>SyntheticRL-V1 fine-tuned on</span><br>
-                    <span>2M extra battles against diverse opponents</span>
+                    <span class="wrap-text">SyntheticRL-V1 fine-tuned on 2M extra battles against diverse
+                        opponents</span>
                 </td>
             </tr>
             <tr>
@@ -831,13 +840,15 @@
                             style="width: 40%; height: auto; max-width: 800px;">
                     </a>
                 </td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=MetamonII" target="_blank" class="custom-link"
+                <td>
+                    <a href="https://replay.pokemonshowdown.com/?user=MetamonII" target="_blank" class="custom-link"
                         style="font-size: 1.2em;">SyntheticRL-V2</a><br>
-                    <span>Final 200M actor-critic model with value classification</span><br>
-                    <span>trained on 1M human + 4M diverse self-play battles</span>
+                    <span class="wrap-text">Final 200M actor-critic model with value classification trained on 1M human
+                        + 4M diverse self-play battles</span>
                 </td>
             </tr>
         </table>
+
         <br><br><br><br>
         <p class="section-content">
             Our work enables a data-driven approach to Competitive Pokémon and demonstrates that sequence
