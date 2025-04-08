@@ -329,8 +329,8 @@
         }
 
         .section-content {
-            font-size: 1.3rem;
-            line-height: 1.8;
+            font-size: 1.5rem;
+            line-height: 1.6;
             color: #2d3748;
             text-align: justify;
             margin-bottom: 2rem;
@@ -356,7 +356,7 @@
             }
 
             .section-content {
-                font-size: 1.2rem;
+                font-size: 1.3rem;
             }
 
             .site-footer {
@@ -426,9 +426,9 @@
 
             <div class="authors-list">
                 <a href="https://jakegrigsby.github.io/" class="author-link">Jake Grigsby</a>,
-                <a href="https://www.linkedin.com/in/justinsasek/" class="author-link">Justin Sasek</a><span
-                    class="author-superscript">*</span>,
                 <a href="https://xieleo5.github.io/" class="author-link">Yuqi Xie</a><span
+                    class="author-superscript">*</span>,
+                <a href="https://www.linkedin.com/in/justinsasek/" class="author-link">Justin Sasek</a><span
                     class="author-superscript">*</span>,
                 <a href="#" class="author-link">Steven Zheng</a><span class="author-superscript">*</span>,
                 <a href="https://cs.utexas.edu/~yukez" class="author-link">Yuke Zhu</a>
@@ -460,6 +460,20 @@
                     </svg>
                     <span>Dataset</span>
                 </a>
+                <a href="https://huggingface.co/jakegrigsby/metamon" target="_blank" class="button">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="6" cy="12" r="2" fill="currentColor" />
+                        <circle cx="12" cy="6" r="2" fill="currentColor" />
+                        <circle cx="12" cy="18" r="2" fill="currentColor" />
+                        <circle cx="18" cy="12" r="2" fill="currentColor" />
+                        <line x1="6" y1="12" x2="12" y2="6" stroke="currentColor" stroke-width="1.5" />
+                        <line x1="6" y1="12" x2="12" y2="18" stroke="currentColor" stroke-width="1.5" />
+                        <line x1="12" y1="6" x2="18" y2="12" stroke="currentColor" stroke-width="1.5" />
+                        <line x1="12" y1="18" x2="18" y2="12" stroke="currentColor" stroke-width="1.5" />
+                    </svg>
+                    <span>Models</span>
+                </a>
+                </a>
                 <a href="https://github.com/UT-Austin-RPL/metamon/tree/main" target="_blank" class="button">
                     <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                         <path
@@ -472,7 +486,7 @@
 
             <div class="video-container idle">
                 <video id="bannerVideo" class="banner-video" autoplay loop playsinline muted>
-                    <source src="static/video/metamon_twitter_v4_compressed.mp4" type="video/mp4">
+                    <source src="static/video/metamon_twitter_v6.mp4" type="video/mp4">
                     Your browser does not support the video tag.
                 </video>
                 <button class="sound-toggle" onclick="toggleSound(this)" aria-label="Toggle sound">
@@ -496,12 +510,12 @@
     <div class="section">
         <h3 class="section-title"></h3>
         <p class="section-content">
-            Competitive Pokémon Singles (CPS) is a complex turn-based strategy game that combines the long
-            planning horizons of chess, the imperfect information and stochasticity of poker, and enough named
-            entities and niche gameplay mechanics to fill an encyclopedia. Players design and control teams of Pokémon
-            to deal
-            damage to their opponent until the last player with healthy Pokémon wins. CPS is an
-            exciting RL problem because it requires reasoning under uncertainty in a vast state space.
+            Competitive Pokémon Singles (CPS) is a complex turn-based strategy game that combines the long planning
+            horizons of chess, the imperfect information and stochasticity of poker, and enough named entities and niche
+            gameplay mechanics to fill an encyclopedia. Players design and control teams of Pokémon to deal damage to
+            their opponent until the last player with healthy Pokémon wins. CPS is an exciting RL problem because it
+            requires reasoning under uncertainty in a vast state space. Our work turns Pokémon into a platform to study
+            sequence model policies trained on large datasets!
         </p>
 
         <p class="section-content">
@@ -509,16 +523,13 @@
                 Showdown</a>,
             a popular website that simulates the mechanics of every "generation" of the best-selling video game
             franchise.
-            We focus on the highly competitive world of Pokémon's <b>first four generations, where battles are
-                longest and reveal the least information about the opponent's team</b>.
+            We focus on the highly competitive world of Pokémon's first four generations, where battles are
+            longest and reveal the least information about the opponent's team.
         </p>
 
         <p class="section-content">
-            The videos below show our final model playing the most popular ruleset of all four generations against an
-            LLM-Agent method called
-            <a href="https://arxiv.org/abs/2402.01118" target="_blank" class="custom-link">PokéLLMon</a>. Our policy
-            learns to play entirely
-            from data without Pokémon heuristics or model-based search.
+            The videos below show our final model playing the most popular ruleset of all four generations. It learned
+            to play entirely from data without Pokémon heuristics or model-based search.
         </p>
         <div class="video-grid">
             <div class="video-container">
@@ -608,9 +619,8 @@
         </div>
 
         <p class="section-content">
-            These videos are sampled from a match of 300 battles with a win rate of 95%, but don't blame the LLM,
-            because most competitive humans would lose too! This page provides a short summary of how this agent was
-            trained and where future work might go from here. For much more information, please check out our paper.
+            This page provides a short summary of how this agent was trained and where future work might go from here.
+            For much more information, please check out our paper.
         </p>
     </div>
 
@@ -625,7 +635,7 @@
             players, but PS replays record the perspective of a spectator who has access to information
             about neither team. We develop a pipeline to reconstruct the first-person
             perspective of an agent from PS replays,
-            thereby unlocking a dataset of real human battles spanning more than a decade that
+            thereby unlocking a dataset of real human battles that
             grows larger every day. We are able to reconstruct more than 475k human
             demonstrations (with shaped rewards) from battles dating back to 2014.
         </p>
@@ -637,17 +647,15 @@
     <div class="section">
         <h3 class="section-title">Model-Free Pokémon with Transformers</h3>
         <p class="section-content">
-            Our dataset enables a general perspective on the Pokémon Showdown AI problem that has previously been
-            impractical: that
+            Our dataset enables a general perspective on the Pokémon AI problem: that
             sequence models might be able to learn to play without explicit search or heuristics by using model-free RL
-            and long-term memory to infer their opponent's team and tendencies. Our experiments take this perspective to
-            its extreme and create a case study in the process of training and evaluating large policies. We develop a
-            suite of heuristic and imitation learning (IL) opponents for offline
-            evaluation with procedurally generated Pokémon teams. With these opponents as a benchmark, we evaluate
+            and long-term memory to infer their opponent's team and tendencies. We develop a
+            suite of heuristic and imitation learning (IL) opponents with procedurally generated Pokémon teams. With
+            these opponents as a benchmark, we evaluate
             Transformers of up to 200M parameters trained by IL and offline RL. We then explore the idea that our
-            models would benefit from training on intentionally unrealistic ("synthetic") self-play datasets that do not
-            attempt to
-            recreate the unknown distribution of teams and opponents in online battles.
+            models would benefit from retraining on intentionally unrealistic ("synthetic") self-play datasets that do
+            not
+            attempt to recreate the teams and opponents we might see in online battles.
 
         </p>
         <div class="figure-container">
@@ -676,90 +684,171 @@
             Finally, we compete against human players by queuing for ranked battles on Pokémon Showdown. Our best agents
             rise into the top 10% of active usernames and onto the global leaderboards. You can watch replays of
             hundreds
-            of our battles via links in the paper.
+            of our battles via links below!
         </p>
         <div class="figure-container">
             <img src="static/img/player_distributions (1).png" alt="Player Distributions">
         </div>
 
+
+    </div>
+
+    <div class="section">
+        <h4 class="section-title">Watch Replays on Pokémon Showdown</h4>
+
+        <table style="width: 90%;">
+            <tr>
+                <th colspan="1" style="font-size: 1.5em;">Username</th>
+                <th colspan="1" style="font-size: 1.5em;">Model</th>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        SmallSparks
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=SmallSparks" target="_blank">
+                        <img src="static/img/preschooler.png" alt="SmallSparks"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=SmallSparks" target="_blank" class="custom-link"
+                        style="font-size: 1.2em;">Small-IL</a><br>
+                    <span>15M imitation learning model</span><br>
+                    <span>trained on 1M human demonstrations</span>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        DittoIsAllYouNeed
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=DittoIsAllYouNeed" target="_blank">
+                        <img src="static/img/clown.png" alt="DittoIsAllYouNeed"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=DittoIsAllYouNeed" target="_blank"
+                        class="custom-link" style="font-size: 1.2em;">Large-IL</a><br>
+                    <span>200M imitation learning model</span><br>
+                    <span>trained on 1M human demonstrations</span>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        Montezuma2600
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=Montezuma2600" target="_blank">
+                        <img src="static/img/bugcatcher-gen3rs.png" alt="Montezuma2600"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=Montezuma2600" target="_blank" class="custom-link"
+                        style="font-size: 1.2em;">Large-RL</a><br>
+                    <span>200M actor-critic model</span><br>
+                    <span>trained on 1M human demonstrations</span>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        Metamon1
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=Metamon1" target="_blank">
+                        <img src="static/img/rancher.png" alt="Metamon1"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=Metamon1" target="_blank" class="custom-link"
+                        style="font-size: 1.2em;">SyntheticRL-V0</a><br>
+                    <span>200M actor-critic model</span><br>
+                    <span>trained on 1M human + 1M diverse self-play battles</span>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        TheDeadlyTriad
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=TheDeadlyTriad" target="_blank">
+                        <img src="static/img/sailor-gen1rb.png" alt="TheDeadlyTriad"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=TheDeadlyTriad" target="_blank"
+                        class="custom-link" style="font-size: 1.2em;">SyntheticRL-V1</a><br>
+                    <span>200M actor-critic model</span><br>
+                    <span>trained on 1M human + 2M diverse self-play battles</span>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        ABitterLesson
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=ABitterLesson" target="_blank">
+                        <img src="static/img/red-gen1main.png" alt="ABitterLesson"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=ABitterLesson" target="_blank" class="custom-link"
+                        style="font-size: 1.2em;">SyntheticRL-V1 + Self-Play</a><br>
+                    <span>SyntheticRL-V1 fine-tuned on</span><br>
+                    <span>2M extra battles against itself</span>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        QPrime
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=QPrime" target="_blank">
+                        <img src="static/img/fisherman-gen1rb.png" alt="QPrime"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=QPrime" target="_blank" class="custom-link"
+                        style="font-size: 1.2em;">SyntheticRL-V1++</a><br>
+                    <span>SyntheticRL-V1 fine-tuned on</span><br>
+                    <span>2M extra battles against diverse opponents</span>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <div
+                        style="font-family: 'Press Start 2P', cursive; text-align: center; margin-bottom: 0.5rem; font-size: 0.8em;">
+                        MetamonII
+                    </div>
+                    <a href="https://replay.pokemonshowdown.com/?user=MetamonII" target="_blank">
+                        <img src="static/img/sailor-gen3rs.png" alt="MetamonII"
+                            style="width: 40%; height: auto; max-width: 800px;">
+                    </a>
+                </td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=MetamonII" target="_blank" class="custom-link"
+                        style="font-size: 1.2em;">SyntheticRL-V2</a><br>
+                    <span>Final 200M actor-critic model with value classification</span><br>
+                    <span>trained on 1M human + 4M diverse self-play battles</span>
+                </td>
+            </tr>
+        </table>
+        <br><br><br><br>
         <p class="section-content">
-            Our work enables a scalable offline RL approach to Competitive Pokémon and demonstrates that sequence
+            Our work enables a data-driven approach to Competitive Pokémon and demonstrates that sequence
             models trained on historical gameplay can be competitive with humans in the challenging setting of
             Generations 1-4.
             Our dataset will continue to grow over time and may be of broader
             interest in offline RL as a way to evaluate new research on a complex task. We hope our dataset and baseline
             models will inspire research interest in Early-Generation Pokémon. Alternative learning updates,
             architectures,
-            and large-scale self-play techniques may create a path to super-human performance.
+            and large-scale self-play techniques may create a path to super-human performance!
         </p>
-    </div>
-
-    <div class="section">
-        <h3 class="section-title">Watch Replays on Pokémon Showdown</h3>
-
-        <table>
-            <tr>
-                <th colspan="2">Models</th>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=SmallSparks" target="_blank">
-                        <img src="static/img/preschooler.png" alt="SmallSparks">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=SmallSparks" target="_blank"
-                        class="custom-link">Small-IL</a></td>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=DittoIsAllYouNeed" target="_blank">
-                        <img src="static/img/clown.png" alt="DittoIsAllYouNeed">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=DittoIsAllYouNeed" target="_blank"
-                        class="custom-link">Large-IL</a></td>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=Montezuma2600" target="_blank">
-                        <img src="static/img/bugcatcher-gen3rs.png" alt="Montezuma2600">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=Montezuma2600" target="_blank"
-                        class="custom-link">Large-RL</a></td>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=Metamon1" target="_blank">
-                        <img src="static/img/rancher.png" alt="Metamon1">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=Metamon1" target="_blank"
-                        class="custom-link">SyntheticRL-V0</a></td>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=TheDeadlyTriad" target="_blank">
-                        <img src="static/img/sailor-gen1rb.png" alt="TheDeadlyTriad">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=TheDeadlyTriad" target="_blank"
-                        class="custom-link">SyntheticRL-V1</a></td>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=ABitterLesson" target="_blank">
-                        <img src="static/img/red-gen1main.png" alt="ABitterLesson">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=ABitterLesson" target="_blank"
-                        class="custom-link">SyntheticRL-V1 + Self-Play</a></td>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=QPrime" target="_blank">
-                        <img src="static/img/fisherman-gen1rb.png" alt="QPrime">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=QPrime" target="_blank"
-                        class="custom-link">SyntheticRL-V1++</a></td>
-            </tr>
-            <tr>
-                <td><a href="https://replay.pokemonshowdown.com/?user=MetamonII" target="_blank">
-                        <img src="static/img/sailor-gen3rs.png" alt="MetamonII">
-                    </a></td>
-                <td><a href="https://replay.pokemonshowdown.com/?user=MetamonII" target="_blank"
-                        class="custom-link">SyntheticRL-V2</a></td>
-            </tr>
-        </table>
-
-
     </div>
 
     <footer class="site-footer">
