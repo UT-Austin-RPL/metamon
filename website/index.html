@@ -244,6 +244,52 @@
             }
         }
 
+        table {
+            width: 60%;
+            margin: auto;
+            border-collapse: separate;
+            border-spacing: 0;
+            border: 1px solid black;
+            border-radius: 12px;
+            overflow: hidden;
+            text-align: center;
+            font-size: 1.1rem;
+            line-height: 1.8;
+            color: #2d3748;
+        }
+
+        th,
+        td {
+            padding: 10px 20px;
+            border-bottom: 1px solid black;
+        }
+
+        th {
+            background-color: #fff5f5;
+            font-size: 1.3rem;
+            line-height: 1.8;
+            color: #2d3748;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        a img {
+            width: 96px;
+            height: 96px;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        .footnote {
+            text-align: center;
+            font-size: 0.9em;
+            margin-top: 10px;
+            font-style: italic;
+            color: #555;
+        }
+
 
         .section {
             max-width: 1200px;
@@ -458,12 +504,12 @@
                 </button>
                 <div class="video-controls">
                     <button id="playPauseBtn" aria-label="Play/Pause">
-                      <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-                        <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
-                      </svg>
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                            <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
+                        </svg>
                     </button>
                     <input type="range" id="progressBar" min="0" max="100" value="0" step="0.1" />
-                  </div>
+                </div>
             </div>
             <div class="video-container">
                 <div class="video-title">Generation 2 OU </div>
@@ -479,12 +525,12 @@
                 </button>
                 <div class="video-controls">
                     <button id="playPauseBtn" aria-label="Play/Pause">
-                      <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-                        <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
-                      </svg>
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                            <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
+                        </svg>
                     </button>
                     <input type="range" id="progressBar" min="0" max="100" value="0" step="0.1" />
-                  </div>
+                </div>
             </div>
             <div class="video-container">
                 <div class="video-title">Generation 3 OU </div>
@@ -500,12 +546,12 @@
                 </button>
                 <div class="video-controls">
                     <button id="playPauseBtn" aria-label="Play/Pause">
-                      <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-                        <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
-                      </svg>
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                            <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
+                        </svg>
                     </button>
                     <input type="range" id="progressBar" min="0" max="100" value="0" step="0.1" />
-                  </div>
+                </div>
             </div>
             <div class="video-container">
                 <div class="video-title">Generation 4 OU </div>
@@ -521,12 +567,12 @@
                 </button>
                 <div class="video-controls">
                     <button id="playPauseBtn" aria-label="Play/Pause">
-                      <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-                        <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
-                      </svg>
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                            <path id="playPauseIcon" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /> <!-- Pause icon -->
+                        </svg>
                     </button>
                     <input type="range" id="progressBar" min="0" max="100" value="0" step="0.1" />
-                  </div>
+                </div>
             </div>
         </div>
 
@@ -615,6 +661,61 @@
             architectures,
             and large-scale self-play techniques may create a path to super-human performance.
         </p>
+    </div>
+
+    <div class="section">
+        <h3 class="section-title">Watch Replays on Pokémon Showdown</h3>
+
+        <table>
+            <tr>
+                <th colspan="2">Model Name</th>
+            </tr>
+            <tr>
+                <td>Small-IL</td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=SmallSparks" target="_blank"><img
+                            src="static/img/adaman.png" alt="SmallSparks"></a></td>
+            </tr>
+            <tr>
+                <td>Large-IL</td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=DittoIsAllYouNeed" target="_blank"><img
+                            src="static/img/gloria.png" alt="DittoIsAllYouNeed"></a></td>
+            </tr>
+            <tr>
+                <td>Large-RL</td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=Montezuma2600" target="_blank"><img
+                            src="static/img/cynthia-gen7.png" alt="Montezuma2600"></a></td>
+            </tr>
+            <tr>
+                <td>SyntheticRL-V0</td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=Metamon1" target="_blank"><img
+                            src="static/img/chase.png" alt="Metamon1"></a></td>
+            </tr>
+            <tr>
+                <td>SyntheticRL-V1</td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=TheDeadlyTriad" target="_blank"><img
+                            src="static/img/akari.png" alt="TheDeadlyTriad"></a></td>
+            </tr>
+            <tr>
+                <td>SyntheticRL-V1 + Self-Play</td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=ABitterLesson" target="_blank"><img
+                            src="static/img/hop.png" alt="ABitterLesson"></a></td>
+            </tr>
+            <tr>
+                <td>SyntheticRL-V1++</td>
+                <td><a href="https://replay.pokemonshowdown.com/?user=QPrime" target="_blank"><img
+                            src="static/img/sordward.png" alt="QPrime"></a></td>
+            </tr>
+            <tr>
+                <td>SyntheticRL-V2</td>
+                <td><a href="https://replay.pokemonshowdown.comv/?user=MetamonII" target="_blank"><img
+                            src="static/img/mustard-master.png" alt="MetamonII"></a></td>
+            </tr>
+        </table>
+
+        <div class="footnote">
+            Icon artwork by <strong>Brumirage</strong>
+        </div>
+
     </div>
 
     <footer class="site-footer">
