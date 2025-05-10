@@ -1,6 +1,6 @@
 from functools import lru_cache
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Optional, List
 from abc import ABC, abstractmethod
 
@@ -81,6 +81,12 @@ def consistent_move_order(moves):
     return sorted(moves, key=key)
 
 
+@lru_cache(9)
+def hidden_power_reference(gen: int) -> Move:
+    # we will map all hidden powers to this move
+    return Move(move_id="hiddenpower", gen=gen)
+
+
 @dataclass
 class UniversalMove:
     name: str
@@ -89,7 +95,8 @@ class UniversalMove:
     base_power: int
     accuracy: float
     priority: int
-    pp: int
+    current_pp: int
+    max_pp: int
 
     def __post_init__(self):
         for name, should_be in self.__annotations__.items():
@@ -131,7 +138,8 @@ class UniversalMove:
             base_power=0,
             accuracy=1.0,
             priority=0,
-            pp=0,
+            current_pp=0,
+            max_pp=0,
         )
 
     @classmethod
@@ -140,7 +148,8 @@ class UniversalMove:
         # a different pp tracker
         universal_move = cls.from_Move(move)
         if move is not None:
-            universal_move.pp = move.pp
+            universal_move.current_pp = move.pp
+            universal_move.max_pp = move.maximum_pp
         return universal_move
 
     @classmethod
@@ -148,14 +157,22 @@ class UniversalMove:
         if move is None:
             return cls.blank_move()
         assert isinstance(move, Move)
+        if move.id.startswith("hiddenpower"):
+            # we map every hidden power to the typeless version
+            # because the types don't show up in replays
+            reference = hidden_power_reference(move._gen)
+        else:
+            reference = move
         return cls(
-            name=move.id,
-            category=move.category.name,
-            base_power=move.base_power,
-            move_type=move.type.name,
-            priority=move.priority,
-            accuracy=move.accuracy,
-            pp=move.current_pp,
+            name=reference.id,
+            category=reference.category.name,
+            base_power=reference.base_power,
+            move_type=reference.type.name,
+            priority=reference.priority,
+            accuracy=reference.accuracy,
+            # always use `move` for pp tracking
+            current_pp=move.current_pp,
+            max_pp=move.max_pp,
         )
 
 
@@ -193,6 +210,12 @@ class UniversalPokemon:
             ):
                 actually_is = type(self.__dict__[name])
                 raise TypeError(f"UniversalPokemon `{name}` has type {actually_is}")
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        args = data.copy()
+        args["moves"] = [UniversalMove(**m) for m in data["moves"]]
+        return cls(**args)
 
     @staticmethod
     def universal_items(item_rep: Optional[str | ReplayNothing]) -> str:
@@ -477,55 +500,22 @@ class UniversalState:
             battle_lost=battle.lost if battle.lost else False,
             opponents_remaining=opponents_remaining,
         )
-
-    # fmt: on
-
-    def to_numpy(self) -> dict[str, np.ndarray]:
-        print("in universal state!!!!")
-        player_str = (
-            f"<player> {self.player_active_pokemon.get_string_features(active=True)}"
-        )
-        numerical = [
-            self.opponents_remaining / 6.0
-        ] + self.player_active_pokemon.get_numerical_features(active=True)
-
-        # consistent move order
-        move_str, move_num = "", -1
-        for move_num, move in enumerate(
-            consistent_move_order(self.player_active_pokemon.moves)
-        ):
-            move_str += f" <move> {move.get_string_features(active=True)}"
-            numerical += move.get_numerical_features(active=True)
-
-        while move_num < 3:
-            move_str += f" <move> {UniversalMove.get_pad_string(active=True)}"
-            numerical += UniversalMove.get_pad_numerical(active=True)
-            move_num += 1
-
-        # consistent switch order
-        switch_str, switch_num = "", -1
-        for switch_num, switch in enumerate(
-            consistent_pokemon_order(self.available_switches)
-        ):
-            switch_str += f" <switch> {switch.get_string_features(active=False)}"
-            numerical += switch.get_numerical_features(active=False)
-        while switch_num < 4:
-            switch_str += f" <switch> {UniversalPokemon.get_pad_string(active=False)}"
-            numerical += UniversalPokemon.get_pad_numerical(active=False)
-            switch_num += 1
-
-        force_switch = "<forcedswitch>" if self.forced_switch else "<anychoice>"
-        opponent_str = f"<opponent> {self.opponent_active_pokemon.get_string_features(active=True)}"
-        numerical += self.opponent_active_pokemon.get_numerical_features(active=True)
-        global_str = f"<conditions> {self.weather} {self.player_conditions} {self.opponent_conditions}"
-        prev_move_str = f"<player_prev> {self.player_prev_move.get_string_features(active=False)} <opp_prev> {self.opponent_prev_move.get_string_features(active=False)}"
-
-        text = np.array(
-            f"<{self.format}> {force_switch} {player_str} {move_str.strip()} {switch_str.strip()} {opponent_str} {global_str} {prev_move_str}",
-            dtype=np.str_,
-        )
-        numbers = np.array(numerical, dtype=np.float32)
-        return {"text": text, "numbers": numbers}
+    
+    def to_dict(self) -> dict:
+        return asdict(self)
+    
+    @classmethod
+    def from_dict(cls, data: dict):
+        args = data.copy()
+        # convert nested Pokemon objects
+        args["player_active_pokemon"] = UniversalPokemon.from_dict(data["player_active_pokemon"])
+        args["opponent_active_pokemon"] = UniversalPokemon.from_dict(data["opponent_active_pokemon"])
+        args["available_switches"] = [UniversalPokemon.from_dict(p) for p in data["available_switches"]]
+        # convert nested Move objects
+        args["player_prev_move"] = UniversalMove(**args["player_prev_move"])
+        args["opponent_prev_move"] = UniversalMove(**args["opponent_prev_move"])
+        # create UniversalState from the processed dict
+        return cls(**args)
 
 
 def replaystate_action_to_idx(

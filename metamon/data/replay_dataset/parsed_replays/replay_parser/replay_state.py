@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from metamon.data.replay_dataset.parsed_replays.replay_parser.exceptions import *
+
 from poke_env.data import to_id_str
 from poke_env.data.gen_data import GenData
 from poke_env.environment import Effect as PEEffect
@@ -27,6 +28,16 @@ class Nothing(Enum):
     NO_ABILITY = auto()
     NO_WEATHER = auto()
     NO_STATUS = auto()
+
+
+def _one_hidden_power(move_name: str) -> str:
+    # used to map all hidden power moves to the same name
+    if move_name.startswith("Hidden Power"):
+        return "Hidden Power"
+    elif move_name.startswith("hiddenpower"):
+        return "hiddenpower"
+    else:
+        return move_name
 
 
 @dataclass
@@ -68,6 +79,7 @@ class Move(PEMove):
     def __init__(self, name: str, gen: int):
         # in an attempt to handle `choice` messages that give names in a case/space insensitive format,
         # we'll go from the name parsed from the replay --> poke_env id --> poke_env's official move name
+        name = _one_hidden_power(name)
         self.lookup_name = to_id_str(name)
         try:
             super().__init__(move_id=self.lookup_name, gen=gen)
@@ -102,6 +114,7 @@ class Pokemon:
         self.had_name = name
         self.unique_id: str = str(uuid.uuid4())
         self.lvl = lvl
+        self.gen = gen
 
         # pokedex lookup
         pokedex = GenData.from_gen(gen).pokedex
@@ -369,6 +382,41 @@ class Pokemon:
             f"\t\thp={self.current_hp}/{self.max_hp}\n",
         ]
         return ",\n".join(items)
+
+    def fill_from_PokemonSet(self, pokemon_set):
+        if not self.name == pokemon_set.name:
+            raise ValueError("other must have the same name")
+        item = pokemon_set.item
+        if item == pokemon_set.NO_ITEM:
+            item = Nothing.NO_ITEM
+        elif item == pokemon_set.MISSING_ITEM:
+            item = None
+        self.had_item = item
+        ability = pokemon_set.ability
+        if ability == pokemon_set.NO_ABILITY:
+            ability = Nothing.NO_ABILITY
+        elif ability == pokemon_set.MISSING_ABILITY:
+            ability = None
+        self.had_ability = ability
+        pokemon_set_moves = set(
+            _one_hidden_power(move)
+            for move in pokemon_set.moves
+            if (
+                move != pokemon_set.MISSING_MOVE
+                and move != "Struggle"
+                and move != pokemon_set.NO_MOVE
+            )
+        )
+        moves_to_add = pokemon_set_moves - set(self.had_moves.keys())
+        while len(self.had_moves.keys()) < 4 and moves_to_add:
+            choice = moves_to_add.pop()
+            new_move = Move(name=choice, gen=self.gen)
+            self.had_moves[new_move.name] = new_move
+        if self.max_hp is None:
+            assert self.current_hp is None
+            self.max_hp = 100
+            self.current_hp = 100
+        return self
 
 
 @dataclass

@@ -1,86 +1,105 @@
 import os
-import random
+import json
 from typing import Optional
+from datetime import datetime
+from collections import defaultdict
 
 import torch
 from torch.utils.data import Dataset
-import numpy as np
+import tqdm
 
-from metamon.data.tokenizer import PokemonTokenizer, get_tokenizer
+from metamon.interface import ObservationSpace, RewardFunction, UniversalState
 
 
 class ParsedReplayDataset(Dataset):
     def __init__(
         self,
         dset_root: str,
-        max_seq_len: int,
-        formats: list[str],
-        tokenizer: PokemonTokenizer,
-        max_size: Optional[int] = None,
+        observation_space: ObservationSpace,
+        reward_function: RewardFunction,
+        formats: Optional[list[str]] = None,
         wins_losses_both: str = "both",
-        dset_split: str = "train",
-        verbose: bool = True,
-        as_numpy: bool = False,
+        min_rating: Optional[int] = None,
+        max_rating: Optional[int] = None,
+        min_date: Optional[datetime] = None,
+        max_date: Optional[datetime] = None,
+        verbose: bool = False,
     ):
         assert dset_root is not None and os.path.exists(dset_root)
-        assert dset_split in ["train", "val"]
-        assert wins_losses_both in ["wins", "losses", "both"]
-        self.max_seq_len = max_seq_len
-        self.dset_split = dset_split
-        self.tokenizer = tokenizer
+        formats = formats or [
+            f"gen{g}{t}" for g in range(1, 5) for t in ["ou", "uu", "nu", "ubers"]
+        ]
+        self.observation_space = observation_space
+        self.reward_function = reward_function
         self.filenames = []
+
+        def _rating_to_int(rating: str) -> int:
+            try:
+                return int(rating)
+            except ValueError:
+                return 1000
+
+        bar = lambda it, desc: (
+            it if not verbose else tqdm.tqdm(it, desc=desc, colour="red")
+        )
+
         for format in formats:
-            path = os.path.join(dset_root, format, dset_split)
-            for filename in os.listdir(path):
-                if wins_losses_both == "wins" and not "WIN" in filename:
+            path = os.path.join(dset_root, format)
+            for filename in bar(os.listdir(path), desc=f"Finding {format} battles"):
+                if not filename.endswith(".json"):
                     continue
-                elif wins_losses_both == "losses" and not "LOSS" in filename:
-                    continue
-                if formats and not any(f in filename for f in formats):
+                battle_id, rating, p1_name, _, p2_name, mm_dd_yyyy, result = filename[
+                    :-5
+                ].split("_")
+                rating = _rating_to_int(rating)
+                date = datetime.strptime(mm_dd_yyyy, "%m-%d-%Y")
+                battle_id = (
+                    battle_id.replace("[", "").replace("]", "").replace(" ", "").lower()
+                )
+                if (
+                    format not in battle_id
+                    or (min_rating is not None and rating < min_rating)
+                    or (max_rating is not None and rating > max_rating)
+                    or (min_date is not None and date < min_date)
+                    or (max_date is not None and date > max_date)
+                    or (wins_losses_both == "wins" and result != "WIN")
+                    or (wins_losses_both == "losses" and result != "LOSS")
+                ):
                     continue
                 self.filenames.append(os.path.join(path, filename))
 
-        if max_size is not None:
-            random.shuffle(self.filenames)
-            self.filenames = self.filenames[:max_size]
-
-        self.as_numpy = as_numpy
-        self.verbose = verbose
-        if self.verbose:
-            print(
-                f"Dataset {dset_split} split contains {len(self.filenames)} replays..."
-            )
+        if verbose:
+            print(f"Dataset contains {len(self.filenames)} battles")
 
     def __len__(self):
         return len(self.filenames)
 
     def __getitem__(self, i):
-        try:
-            # temporary ugliness until we stop interrupting replay parser runs mid pickle
-            with np.load(self.filenames[i]) as replay:
-                obs_text = replay["obs_text"]
-                obs_num = replay["obs_num"]
-                actions = replay["actions"]
-                rewards = replay["rewards"]
-        except:
-            if self.verbose:
-                print(f"Skipping replay {self.filenames[i]} due to loading error.")
-            return self[i + 1]
-        obs_tokens = np.stack([self.tokenizer.tokenize(o) for o in obs_text], axis=0)
-        length = obs_tokens.shape[0]
-        dones = np.zeros_like(rewards, dtype=bool)
+        breakpoint()
+        with open(self.filenames[i], "r") as f:
+            data = json.load(f)
+        states = [UniversalState.from_dict(s) for s in data["states"]]
+        obs = [self.observation_space.state_to_obs(s) for s in states]
+        actions = torch.LongTensor(data["actions"])
+        rewards = torch.Tensor(
+            [
+                self.reward_function(s_t, s_t1)
+                for s_t, s_t1 in zip(states[:-1], states[1:])
+            ]
+        )
+        dones = torch.zeros_like(rewards, dtype=bool)
         dones[-1] = True
+        return obs, actions, rewards, dones
 
-        idx = random.randrange(0, max(obs_tokens.shape[0] - self.max_seq_len, 1))
-        end = min(idx + self.max_seq_len, length - 1)
-        t = slice(idx, end)
-        t1 = slice(idx + 1, end + 1)
-        tensor = lambda seq: torch.from_numpy(seq) if not self.as_numpy else seq
 
-        obs_t = tensor(obs_tokens[t]), tensor(obs_num[t])
-        obs_t1 = tensor(obs_tokens[t1]), tensor(obs_num[t1])
-        rewards = tensor(rewards[t1])
-        dones = tensor(dones[t1])
-        actions = tensor(actions[t])
+if __name__ == "__main__":
+    from metamon.interface import DefaultObservationSpace, DefaultShapedReward
 
-        return obs_t, actions, rewards, obs_t1, dones
+    dset = ParsedReplayDataset(
+        dset_root="/mnt/nfs_client/jake/metamon_parsed_hf_replays",
+        observation_space=DefaultObservationSpace(),
+        reward_function=DefaultShapedReward(),
+        verbose=True,
+    )
+    print(len(dset))
+    obs, actions, rewards, dones = dset[0]

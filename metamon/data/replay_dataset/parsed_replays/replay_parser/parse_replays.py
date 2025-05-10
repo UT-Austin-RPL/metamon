@@ -15,34 +15,29 @@ from metamon.data.replay_dataset.parsed_replays.replay_parser.exceptions import 
     BackwardException,
     ForwardException,
     InvalidActionIndex,
-    ToNumpyError,
 )
 from metamon.data.replay_dataset.parsed_replays.replay_parser.replay_state import (
     Action,
     ReplayState,
 )
+from metamon.data.team_prediction.predictor import TeamPredictor, NaiveUsagePredictor
 
 
 class ReplayParser:
     def __init__(
         self,
-        output_dir: str,
-        train_test_split: float = 0.8,
+        replay_output_dir: Optional[str] = None,
+        team_output_dir: Optional[str] = None,
         verbose: bool = False,
         sleep_on_handled_exception: int = 0.1,
-        reward_function: Optional[interface.RewardFunction] = None,
-        observation_space: Optional[interface.ObservationSpace] = None,
+        team_predictor: Optional[TeamPredictor] = None,
     ):
-        self.output_dir = output_dir
+        self.output_dir = replay_output_dir
+        self.team_output_dir = team_output_dir
         self.verbose = verbose
-        assert 0.0 <= train_test_split <= 1.0
-        self.train_test_split = train_test_split
         self.sleep_on_handled_exception = sleep_on_handled_exception
         self.error_history = {"Forward": {}, "Backward": {}}
-        self.reward_function = reward_function or interface.DefaultShapedReward()
-        self.observation_space = (
-            observation_space or interface.DefaultObservationSpace()
-        )
+        self.team_predictor = team_predictor or NaiveUsagePredictor()
 
     def summarize_errors(self):
         return {
@@ -104,59 +99,52 @@ class ReplayParser:
         self, states: list[ReplayState], actions: list[Action]
     ):
         universal_states = []
-        obs_seq = {key: [] for key in self.observation_space.gym_space.keys()}
         action_idxs = []
 
         for state, action in zip(states, actions):
             universal_state = interface.UniversalState.from_ReplayState(state)
             action_idx = interface.replaystate_action_to_idx(state, action)
-            obs = self.observation_space.state_to_obs(universal_state)
-            for obs_key, obs_val in obs.items():
-                obs_seq[obs_key].append(obs_val)
             if action_idx is None:
-                raise InvalidActionIndex(obs, action)
+                raise InvalidActionIndex(state, action)
             action_idxs.append(action_idx)
             universal_states.append(universal_state)
 
-        rewards = [0.0]
-        for prev_state, state in zip(universal_states, universal_states[1:]):
-            rewards.append(self.reward_function(prev_state, state))
-
-        obs_seq = {key: np.array(val) for key, val in obs_seq.items()}
-        action_idxs = np.array(action_idxs, dtype=np.int32)
-        rewards = np.array(rewards, dtype=np.float32)
-        return obs_seq, action_idxs, rewards
+        return universal_states, action_idxs
 
     def povreplay_to_seq(self, replay: backward.POVReplay):
         states, actions = self.povreplay_to_state_action(replay)
-        obs, action_idxs, rewards = self.state_action_to_obs_action_reward(
+        universal_states, action_idxs = self.state_action_to_obs_action_reward(
             states, actions
         )
-        return obs, action_idxs, rewards
+        return universal_states, action_idxs
 
     def save_to_disk(
         self,
         replay: backward.POVReplay,
-        to_train_set: bool,
         time_played: datetime,
         player_username: str,
         opponenent_username: str,
     ):
-        obs_seq, actions, rewards = self.povreplay_to_seq(replay)
+        universal_states, action_idxs = self.povreplay_to_seq(replay)
+        won = "WIN" if replay.winner else "LOSS"
+        filename = f"{replay.gameid}_{replay.rating}_{player_username}_vs_{opponenent_username}_{time_played.strftime('%m-%d-%Y')}_{won}"
         if self.output_dir is not None:
-            won = "WIN" if replay.winner else "LOSS"
-            filename = f"{replay.gameid}_{replay.rating}_{player_username}_vs_{opponenent_username}_{time_played.strftime('%m-%d-%Y')}_{won}.npz"
-            split = "train" if to_train_set else "val"
-            path = os.path.join(self.output_dir, split)
+            path = self.output_dir
             if not os.path.exists(path):
                 os.makedirs(path)
-            with open(os.path.join(path, filename), "wb") as f:
-                np.savez_compressed(
-                    f,
-                    **obs_seq,
-                    actions=actions,
-                    rewards=rewards,
-                )
+            output_json = {
+                "states": [state.to_dict() for state in universal_states],
+                "actions": action_idxs,
+            }
+            with open(os.path.join(path, f"{filename}.json"), "w") as f:
+                json.dump(output_json, f)
+
+        if self.team_output_dir is not None:
+            path = self.team_output_dir
+            if not os.path.exists(path):
+                os.makedirs(path)
+            with open(os.path.join(path, f"{filename}.{replay.format}_team"), "w") as f:
+                f.write(replay.revealed_team.to_str())
 
     def add_exception_to_history(self, e, path):
         if isinstance(e, ForwardException):
@@ -177,6 +165,8 @@ class ReplayParser:
             pool.imap_unordered(self.parse_replay, file_paths), total=len(file_paths)
         ):
             pass
+        pool.close()
+        pool.join()
 
     def parse_replay(self, path: str):
         # read replay data from disk
@@ -192,7 +182,7 @@ class ReplayParser:
         time_played = datetime.fromtimestamp(int(data["uploadtime"]))
         replay = forward.ParsedReplay(
             gameid=os.path.basename(path).replace(".json", ""),
-            format=data["format"],
+            format=data["formatid"],
             time_played=time_played,
         )
         log = self.clean_log(data)
@@ -202,20 +192,19 @@ class ReplayParser:
             replay = forward.forward_fill(replay, log, verbose=self.verbose)
 
             # backward fill
-            replay_from_p1, replay_from_p2 = backward.backward_fill(replay)
-
-            # save as IL/RL experience
-            to_train_set = random.random() < self.train_test_split
+            replay_from_p1, replay_from_p2 = backward.backward_fill(
+                replay,
+                team_predictor=self.team_predictor,
+            )
+            # save
             self.save_to_disk(
                 replay_from_p1,
-                to_train_set,
                 time_played=time_played,
                 player_username=p1_username,
                 opponenent_username=p2_username,
             )
             self.save_to_disk(
                 replay_from_p2,
-                to_train_set,
                 time_played=time_played,
                 player_username=p2_username,
                 opponenent_username=p1_username,

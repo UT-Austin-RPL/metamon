@@ -22,7 +22,7 @@ class UnfinishedMessageException(ForwardException):
         )
 
 
-class TeamTooLarge(ForwardException):
+class UnusualTeamSize(ForwardException):
     def __init__(self, size: int):
         super().__init__(f"Playing with {size} pokemon on a team.")
 
@@ -205,7 +205,12 @@ class ForceSwitchMishandled(BackwardException):
 
 
 class InvalidActionIndex(BackwardException):
-    def __init__(self, obs_text, action):
+    def __init__(self, state, action):
+        super().__init__(f"Action `{action}` is not a valid choice in state `{state}`")
+
+
+class InconsistentTeamPrediction(BackwardException):
+    def __init__(self, team1, team2):
         super().__init__(
-            f"Action `{action}` is not a valid choice in state with text description `{obs_text}`"
+            f"Team `{team1}` is not consistent with predicted team `{team2}`"
         )

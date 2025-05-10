@@ -77,21 +77,20 @@ class TeamBuilder:
     def generate_new_team(self, pokemon=None):
         self.current_team = []
 
-        def _try_add(pokemon):
-            try:
-                self.current_team.append(self.generate_moveset(pokemon))
-                return
-            except KeyError:
-                raise PokemonStatsLookupError(pokemon, self.format)
-
         # is pokemon is a list
         if type(pokemon) == list and len(pokemon) > 0:
             for p in pokemon:
-                _try_add(p)
+                try:
+                    self.current_team.append(self.generate_moveset(p))
+                except Exception as e:
+                    raise PokemonStatsLookupError(p, self.format)
             if len(self.current_team) > 0:
                 pokemon = self.current_team[-1]["name"]
         elif type(pokemon) == str:
-            _try_add(pokemon)
+            try:
+                self.current_team.append(self.generate_moveset(pokemon))
+            except Exception as e:
+                raise PokemonStatsLookupError(pokemon, self.format)
         if len(self.current_team) == 0:
             # select first pokemon purely random, top cut to 100
             pokemon = self.get_random_pm()
@@ -268,10 +267,3 @@ def same_team_members(team1, team2):
     names1 = [x["name"] for x in team1]
     names2 = [x["name"] for x in team2]
     return set(names1) == set(names2)
-
-
-if __name__ == "__main__":
-    tb = TeamBuilder("gen1ou", "/home/jake/pokemon-showdown")
-    for i in range(1000):
-        team = tb.generate_new_team()
-    print(tb.team_to_str(team))

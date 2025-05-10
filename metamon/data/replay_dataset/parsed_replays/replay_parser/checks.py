@@ -151,7 +151,7 @@ def check_noun_spelling(replay):
                 if isinstance(val, str):
                     if to_id_str(val) == val:
                         raise ForwardVerify(
-                            f"Potential to_id_str --> Proper Name mismatch: {val}"
+                            f"Potential to_id_str --> Proper Name mismatch: {val}, sometimes caused by all-lowercase logs"
                         )
 
 
@@ -176,22 +176,8 @@ def check_filled_mon(pokemon):
         raise BackwardException(f"Pokemon info has not been filled: {p}")
 
     moveset_size = len(pokemon.moves)
-    if moveset_size < 3:
-        # there is usually a good reason for 3 moves, but less than that and we're worried about
-        # the backward accuracy
-        if pokemon.name in {
-            "Unown",
-            "Ditto",
-            "Abra",
-            "Weedle",
-            "Metapod",
-            "Caterpie",
-            "Magikarp",
-        }:
-            pass
-        else:
-            raise TooFewMoves(p)
-    elif moveset_size > 4:
+
+    if moveset_size > 4:
         raise TooManyMoves(p)
 
     # sanity check on annonying spelling changes across move names

@@ -20,7 +20,7 @@ And infers missing information to produce training data like:
 
 More information and discussion in Appendix D of the paper.
 
-**If you would like to train on your own set of Showdown replay logs, and/or would like to change the observation or reward function of existing replays, you will need run the replay parser**. Please be warned that it is poorly documented and requires significant Pokémon knowledge to debug/improve/extend. It is not really expected that this part of the codebase will be used externally. However, you can open an issue and I will get back to you. Updates are expected:
+Please be warned that it is poorly documented and requires significant Pokémon knowledge to debug/improve/extend. It is not really expected that this part of the codebase will be used externally. However, you can open an issue and I will get back to you. Updates are expected:
 
 ### Roadmap
 - Improved team inference logic (beyond all-time averages of Showdown usage stats)
