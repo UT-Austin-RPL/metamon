@@ -504,6 +504,198 @@ class SyntheticRLV2(PretrainedModel):
         )
 
 
+@pretrained_model()
+class SleepLoop4V1_Epoch0(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v1",
+            model_name="sleep-loop4-v1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v1.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=0,
+        )
+
+
+@pretrained_model()
+class SleepLoop4V1_Epoch2(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v1",
+            model_name="sleep-loop4-v1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v1.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=2,
+        )
+
+
+@pretrained_model()
+class SleepLoop4V1_Epoch4(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v1",
+            model_name="sleep-loop4-v1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v1.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=4,
+        )
+
+
+@pretrained_model()
+class SleepLoop4V3_Epoch0(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v3",
+            model_name="sleep-loop4-v3",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v2_aggressive.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=0,
+        )
+
+
+@pretrained_model()
+class SleepLoop4V3_Epoch2(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v3",
+            model_name="sleep-loop4-v3",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v2_aggressive.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=2,
+        )
+
+
+@pretrained_model()
+class SleepLoop4V3_Epoch4(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v3",
+            model_name="sleep-loop4-v3",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v2_aggressive.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=4,
+        )
+
+
+@pretrained_model()
+class SleepLoop5V1_Epoch0(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop5_v1",
+            model_name="sleep-loop5-v1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v2_aggressive.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=0,
+        )
+
+
+@pretrained_model()
+class SleepLoop5V1_Epoch2(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop5_v1",
+            model_name="sleep-loop5-v1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v2_aggressive.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=2,
+        )
+
+
+@pretrained_model()
+class SleepLoop5V1_Epoch4(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop5_v1",
+            model_name="sleep-loop5-v1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="sleep_selfplay_v2_aggressive.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=4,
+        )
+
+
+@pretrained_model()
+class BinaryLoop4V1_Epoch0(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_binary_loop4_v1",
+            model_name="binary-loop4-testv1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="vanilla_selfplay_damped_conservative.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("BinaryReward"),
+            default_checkpoint=0,
+        )
+
+
+@pretrained_model()
+class BinaryLoop4V1_Epoch2(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_binary_loop4_v1",
+            model_name="binary-loop4-testv1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="vanilla_selfplay_damped_conservative.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("BinaryReward"),
+            default_checkpoint=2,
+        )
+
+
+@pretrained_model()
+class BinaryLoop4V1_Epoch4(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_binary_loop4_v1",
+            model_name="binary-loop4-testv1",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="vanilla_selfplay_damped_conservative.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("BinaryReward"),
+            default_checkpoint=4,
+        )
+
+
 ###################################
 ## PokéAgent Challenge Policies ###
 ###################################

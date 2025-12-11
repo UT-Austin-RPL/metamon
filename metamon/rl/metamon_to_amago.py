@@ -695,25 +695,26 @@ class MetamonAMAGOExperiment(amago.Experiment):
         kl_coef_decay_factor: float = 0.9,
         min_lr: float = 1e-6,
         max_lr: float = 1e-3,
+        dd_adapt_interval: int = 100,  # KL window length for adaptation
         **kwargs,
     ):
-        # Debug: Print dynamic damping parameter
-        print(f"[DEBUG] MetamonAMAGOExperiment.__init__ called with use_dynamic_damping={use_dynamic_damping}", flush=True)
+        # Debug: Print dynamic damping parameter (commented out to reduce log spam)
+        # print(f"[DEBUG] MetamonAMAGOExperiment.__init__ called with use_dynamic_damping={use_dynamic_damping}", flush=True)
 
         super().__init__(*args, **kwargs)
-        print("[DEBUG] super().__init__() completed, policy exists:", hasattr(self, 'policy'), flush=True)
+        # print("[DEBUG] super().__init__() completed, policy exists:", hasattr(self, 'policy'), flush=True)
 
         # Dynamic damping state
         from collections import deque
         self.dd_state = None
         self.dd_config = None
-        self.dd_adapt_interval = 100  # Adapt controller every N steps
+        self.dd_adapt_interval = dd_adapt_interval  # Adapt controller every N steps (gin-configurable)
         self.kl_window = deque(maxlen=self.dd_adapt_interval)  # Sliding window of last N KL values
         self.dd_step_counter = 0  # Track steps for periodic adaptation
 
         if use_dynamic_damping:
             from metamon.rl.dynamic_damping import DynamicDampingConfig
-            print(f"[DEBUG] Creating DynamicDampingConfig...", flush=True)
+            # print(f"[DEBUG] Creating DynamicDampingConfig...", flush=True)
             self.dd_config = DynamicDampingConfig(
                 enabled=True,
                 kl_coef_init=kl_coef_init,
@@ -733,44 +734,45 @@ class MetamonAMAGOExperiment(amago.Experiment):
                 min_lr=min_lr,
                 max_lr=max_lr,
             )
-            print(f"[DEBUG] dd_config created: {self.dd_config}", flush=True)
+            # print(f"[DEBUG] dd_config created: {self.dd_config}", flush=True)
             # Note: dd_state will be initialized in start() after policy is created
         else:
-            print(f"[DEBUG] use_dynamic_damping=False, skipping dd_config creation", flush=True)
+            pass
+            # print(f"[DEBUG] use_dynamic_damping=False, skipping dd_config creation", flush=True)
 
     def start(self):
         """Override start to initialize dynamic damping after policy is created."""
-        print("[DEBUG] start() called", flush=True)
+        # print("[DEBUG] start() called", flush=True)
         super().start()
-        print("[DEBUG] super().start() completed", flush=True)
+        # print("[DEBUG] super().start() completed", flush=True)
 
         # Initialize dynamic damping state now that policy exists
         if self.dd_config is not None and self.dd_config.enabled:
             from metamon.rl.dynamic_damping import DynamicDampingState
-            print("[DEBUG] Initializing DynamicDampingState...", flush=True)
+            # print("[DEBUG] Initializing DynamicDampingState...", flush=True)
             self.dd_state = DynamicDampingState(
                 base_model=self.policy,
                 config=self.dd_config,
             )
-            print(f"[Dynamic Damping] Initialized with kl_coef={self.dd_state.kl_coef:.4f}, "
-                  f"ent_coef={self.dd_state.ent_coef:.4f}", flush=True)
+            # print(f"[Dynamic Damping] Initialized with kl_coef={self.dd_state.kl_coef:.4f}, "
+            #       f"ent_coef={self.dd_state.ent_coef:.4f}", flush=True)
 
     def init_policy(self):
         """Initialize policy and optionally enable dynamic damping."""
-        print("[DEBUG] init_policy() CALLED", flush=True)
+        # print("[DEBUG] init_policy() CALLED", flush=True)
         out = super().init_policy()
-        print("[DEBUG] super().init_policy() COMPLETED", flush=True)
+        # print("[DEBUG] super().init_policy() COMPLETED", flush=True)
 
-        # Debug: Check if dynamic damping is configured
-        print(f"[DEBUG] dd_config is None: {self.dd_config is None}", flush=True)
-        if self.dd_config is not None:
-            print(f"[DEBUG] dd_config.enabled: {self.dd_config.enabled}", flush=True)
+        # Debug: Check if dynamic damping is configured (commented out to reduce log spam)
+        # print(f"[DEBUG] dd_config is None: {self.dd_config is None}", flush=True)
+        # if self.dd_config is not None:
+        #     print(f"[DEBUG] dd_config.enabled: {self.dd_config.enabled}", flush=True)
 
         # Initialize dynamic damping if configured
         if self.dd_config is not None and self.dd_config.enabled:
             self._init_dynamic_damping()
-        else:
-            print("[WARNING] Dynamic damping NOT initialized - check gin config!", flush=True)
+        # else:
+        #     print("[WARNING] Dynamic damping NOT initialized - check gin config!", flush=True)
 
         return out
 
@@ -836,11 +838,11 @@ class MetamonAMAGOExperiment(amago.Experiment):
             # Add KL metrics to loss dict for logging
             loss_dict.update(kl_metrics)
 
-            # Debug: Print metrics being logged
-            if log_step:
-                print(f"[DEBUG] Damping metrics: KL={kl_metrics.get('KL Divergence', 'N/A'):.4f}, "
-                      f"Entropy={kl_metrics.get('Policy Entropy', 'N/A'):.4f}, "
-                      f"Keys in loss_dict: {list(kl_metrics.keys())}")
+            # Debug: Print metrics being logged (commented out to reduce log spam)
+            # if log_step:
+            #     print(f"[DEBUG] Damping metrics: KL={kl_metrics.get('KL Divergence', 'N/A'):.4f}, "
+            #           f"Entropy={kl_metrics.get('Policy Entropy', 'N/A'):.4f}, "
+            #           f"Keys in loss_dict: {list(kl_metrics.keys())}")
 
             # Track KL for adaptive control (sliding window of last N steps)
             if "KL Divergence" in kl_metrics:
@@ -852,17 +854,17 @@ class MetamonAMAGOExperiment(amago.Experiment):
                     mean_kl = float(np.mean(self.kl_window))
                     self.dd_state.adapt_from_observed_kl(self.optimizer, mean_kl)
 
-                    # ALWAYS print adaptation (not just on log_step)
-                    print(f"[Dynamic Damping] Adapted at step {self.dd_step_counter}: "
-                          f"mean_kl={mean_kl:.4f}, kl_coef={self.dd_state.kl_coef:.4f}, "
-                          f"lr={self.optimizer.param_groups[0]['lr']:.6f}", flush=True)
+                    # Adaptation print (commented out to reduce log spam)
+                    # print(f"[Dynamic Damping] Adapted at step {self.dd_step_counter}: "
+                    #       f"mean_kl={mean_kl:.4f}, kl_coef={self.dd_state.kl_coef:.4f}, "
+                    #       f"lr={self.optimizer.param_groups[0]['lr']:.6f}", flush=True)
 
                     # Reset step counter, keep window rolling (deque auto-manages size)
                     self.dd_step_counter = 0
-        else:
-            if log_step:
-                print(f"[DEBUG] Damping NOT enabled: dd_state={self.dd_state is not None}, "
-                      f"config.enabled={self.dd_config.enabled if self.dd_config else 'N/A'}")
+        # else:
+        #     if log_step:
+        #         print(f"[DEBUG] Damping NOT enabled: dd_state={self.dd_state is not None}, "
+        #               f"config.enabled={self.dd_config.enabled if self.dd_config else 'N/A'}")
 
         return loss_dict
 

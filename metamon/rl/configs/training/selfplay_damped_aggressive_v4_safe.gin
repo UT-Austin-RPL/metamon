@@ -1,0 +1,155 @@
+# Ultra-Safe Filtered-BC Finetuning for Aggressive Sleep (v4)
+#
+# Philosophy: "Critic warmup + minimal policy polish"
+# This is the safest possible finetuning mode: NO DPG/PPO, PURE filtered BC.
+#
+# After v3 collapsed despite ultra-conservative settings, we're going to:
+#   1. Remove ALL policy gradient signal (online_coeff = 0.0)
+#   2. Actor ONLY moves via filtered BC on high-advantage offline actions
+#   3. Critic learns freely under the new reward function
+#   4. Extremely strict KL constraints (target 0.008)
+#   5. Tiny learning rate with strong damping
+#
+# This is essentially "critic warmup" with the gentlest possible policy refinement.
+# If this doesn't work, the problem is not the training config.
+#
+# Key changes from v3 (which collapsed):
+#   - Data mix: 0.25 DPG → 0.0 DPG (NO POLICY GRADIENT)
+#   - Data mix: 0.75 BC → 1.0 BC (PURE FILTERED BC)
+#   - KL target: 0.010 → 0.008 (stricter)
+#   - KL init: 0.40 → 0.60 (much stronger damping)
+#   - KL max: 1.00 → 1.20 (higher ceiling for safety)
+#   - Critic weight: 2.0 → 1.5 (balanced, not overpowering)
+#   - KL tolerance: 1.25 → 1.25 (keep tight band)
+#   - Adaptation: 25 → 1 step (react immediately)
+#   - Growth factor: 1.8 → 1.8 (keep aggressive brake)
+
+import amago.agent
+
+# =========================
+# Reward scaling
+# =========================
+agent.Agent.reward_multiplier = 0.05
+agent.MultiTaskAgent.reward_multiplier = 0.05
+
+agent.Agent.tau = .004
+agent.MultiTaskAgent.tau = .004
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 3
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 3
+
+# =========================
+# Data mix: PURE filtered BC on offline buffer
+# =========================
+# Actor *only* moves via filtered behavior cloning on offline data.
+# No DPG / on-policy PPO term at all.
+agent.Agent.online_coeff  = 0.0   # NO DPG
+agent.MultiTaskAgent.online_coeff  = 0.0
+
+agent.Agent.offline_coeff = 1.0   # ALL actor signal from FBC
+agent.MultiTaskAgent.offline_coeff = 1.0
+
+# Advantage-filtered BC: imitate only clearly good actions.
+# Binary filter: A > threshold (tuned so ~20-40% kept)
+agent.Agent.fbc_filter_func = @agent.binary_filter
+agent.MultiTaskAgent.fbc_filter_func = @agent.binary_filter
+
+# =========================
+# Optimizer / critic emphasis
+# =========================
+MetamonAMAGOExperiment.l2_coeff = 5e-5
+
+# Tiny LR: strong-policy finetune, not training from scratch
+MetamonAMAGOExperiment.learning_rate = 3e-6
+MetamonAMAGOExperiment.lr_warmup_steps = 500
+MetamonAMAGOExperiment.max_lr = 6e-6
+MetamonAMAGOExperiment.min_lr = 1e-6
+
+MetamonAMAGOExperiment.grad_clip = 0.3
+
+# Critic still matters, but not overpowering
+# Value learning happens freely, actor just polishes via safe BC
+MetamonAMAGOExperiment.critic_loss_weight = 1.5
+
+# =========================
+# Dynamic Damping (KL): VERY strict
+# =========================
+MetamonAMAGOExperiment.use_dynamic_damping = True
+
+# Strong finetune constraints: stay very close to starting policy
+MetamonAMAGOExperiment.target_kl_per_step = 0.008
+MetamonAMAGOExperiment.kl_tolerance       = 1.25   # band ≈ [0.006, 0.010]
+
+# Start heavily damped; allow going even stiffer if KL spikes
+MetamonAMAGOExperiment.kl_coef_init = 0.6
+MetamonAMAGOExperiment.kl_coef_max  = 1.2
+
+# Make sure controller reacts quickly
+# dd_adapt_interval controls both window size AND adaptation frequency
+# Must be >= 10 for adaptation to trigger (hardcoded check in code)
+MetamonAMAGOExperiment.dd_adapt_interval   = 10     # adapt every 10 steps (minimum)
+
+# When KL is high: hit the brakes hard
+MetamonAMAGOExperiment.kl_coef_growth_factor = 1.8
+MetamonAMAGOExperiment.lr_shrink_factor      = 0.5
+
+# When KL is low: relax slowly
+MetamonAMAGOExperiment.kl_coef_decay_factor  = 0.97
+MetamonAMAGOExperiment.lr_grow_factor        = 1.05
+
+# No power-law decay; controller only
+MetamonAMAGOExperiment.kl_power_alpha    = 0.0
+MetamonAMAGOExperiment.kl_schedule_steps = 1_000_000
+
+# =========================
+# Entropy schedule (unchanged)
+# =========================
+MetamonAMAGOExperiment.ent_coef_init = 0.02
+MetamonAMAGOExperiment.ent_coef_min  = 0.003
+MetamonAMAGOExperiment.ent_power_alpha = 0.3
+MetamonAMAGOExperiment.ent_schedule_steps = 1_000_000
+
+# =========================
+# Expected Behavior
+# =========================
+# During training, you should observe:
+#   1. damping/kl_coef: Starts at 0.60, adapts every window via controller
+#   2. damping/ent_coef: Starts at 0.02, decays gently toward 0.003
+#   3. KL Divergence: Stays around 0.008, NEVER exceeds 0.02
+#   4. damping/lr: Adjusts reactively based on KL behavior
+#   5. Policy Entropy: Trends downward slowly, stays healthy (> 1.0)
+#   6. offline/bc_loss: Only loss driving actor updates
+#   7. offline/fbc_approval_rate: Should be 20-40% (good actions filtered)
+#   8. Critic loss: Stabilizes as value function learns new reward
+#   9. Actor grad norm: NON-ZERO throughout (if zero, filter too strict)
+#
+# Success indicators:
+#   - KL stays ≤ 0.02 throughout all epochs
+#   - FBC approval rate in [0.2, 0.4] range
+#   - Win rate improves gradually
+#   - Sleep move usage increases
+#   - Policy entropy stays > 1.0
+#   - Actor/critic grad norms both non-zero
+#
+# Red flags:
+#   - KL > 0.02 persistently: Should be impossible with these settings
+#   - Entropy < 0.5: Policy collapsed (extremely unlikely)
+#   - FBC approval rate < 0.1: Filter too aggressive, no learning signal
+#   - FBC approval rate > 0.6: Filter too loose, imitating bad actions
+#   - No improvement after 2 epochs: May need tiny DPG (0.1) in v5
+#
+# Why this should work:
+#   - Critic-heavy: critic_loss_weight = 1.5, learns new reward freely
+#   - Actor safe: Only imitates high-advantage actions (no risky exploration)
+#   - Strict KL: Target 0.008 with strong damping keeps policy near checkpoint
+#   - Tiny LR: Even if damping fails, update magnitude is small
+#   - No DPG: No policy gradient to cause instability
+#
+# If this collapses, the problem is NOT the training config but rather:
+#   - Reward function design (AggressiveShapedRewardSleep incompatible)
+#   - Data quality (offline buffer has distribution issues)
+#   - Base checkpoint (DampedBinarySuperV1_Epoch4 unstable)
+#   - Implementation bug in dynamic damping or FBC

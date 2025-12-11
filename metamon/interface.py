@@ -952,6 +952,53 @@ class AggressiveShapedReward(RewardFunction):
 
 
 @register_reward_function()
+class AggressiveShapedRewardSleep(RewardFunction):
+    """
+    Variant of AggressiveShapedReward with additional incentive for putting opponent to sleep.
+
+    Uses +200 / 0 sparse reward for win/loss (encourages aggressive play).
+    Removes status shaping except for sleep, which gets +1 reward.
+    """
+
+    def __call__(self, last_state: UniversalState, state: UniversalState) -> float:
+        active_now = state.player_active_pokemon
+        active_prev = None
+        for pokemon in [
+            last_state.player_active_pokemon,
+            *last_state.available_switches,
+        ]:
+            if pokemon.base_species == active_now.base_species:
+                active_prev = pokemon
+                break
+        hp_gain = 0.0 if active_prev is None else active_now.hp_pct - active_prev.hp_pct
+        opp_now = state.opponent_active_pokemon
+        opp_prev = last_state.opponent_active_pokemon
+        if opp_now.base_species == opp_prev.base_species:
+            damage_done = opp_prev.hp_pct - opp_now.hp_pct
+            # Bonus for putting opponent to sleep
+            gave_sleep = float(
+                opp_now.status == "slp" and opp_prev.status == "nostatus"
+            )
+        else:
+            damage_done = 0.0
+            gave_sleep = 0.0
+        lost_pokemon = float(
+            len(last_state.available_switches) > len(state.available_switches)
+        )
+        removed_pokemon = float(
+            last_state.opponents_remaining > state.opponents_remaining
+        )
+        victory = float(state.battle_won)
+        reward = (
+            1.0 * (damage_done + hp_gain)
+            + 1.0 * gave_sleep
+            + 2.0 * (removed_pokemon - lost_pokemon)
+            + 200.0 * victory
+        )
+        return reward
+
+
+@register_reward_function()
 class BinaryReward(RewardFunction):
     """A sparse variant of the default reward function."""
 
