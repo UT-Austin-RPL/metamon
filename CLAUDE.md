@@ -95,7 +95,12 @@ Located in `metamon/interface.py`:
 
 2. **AggressiveShapedReward** - Removes status shaping, makes rewards +200/+0
 
-3. **BinaryReward** - Sparse: only +/- 100 for win/loss
+3. **AggressiveShapedRewardSleep** - Variant of AggressiveShapedReward
+   - +200/0 for win/loss (aggressive, no loss penalty)
+   - +1 reward for putting opponent to sleep
+   - Keeps damage/HP shaping (±1.0) and KO differential (±2.0)
+
+4. **BinaryReward** - Sparse: only +/- 100 for win/loss
 
 ## Observation Spaces
 
@@ -105,6 +110,48 @@ Located in `metamon/interface.py`:
 4. **OpponentMoveObservationSpace** - Includes revealed opponent moves
 
 All can be tokenized using vocabs in `metamon/tokenizer/`.
+
+---
+
+## Experiment Skills System
+
+**Location**: `.claude/skills/` - Team memory for experiment knowledge
+
+The metamon repository uses a **skills-based knowledge preservation system** to capture experiment insights and prevent knowledge loss. Skills document successful approaches, failed attempts, and hyperparameter decisions to accelerate future research.
+
+### Using Skills
+
+**Before starting experiments**:
+```bash
+/advise <your experiment description>
+```
+Claude will search the skills registry and surface relevant past experiments, failure patterns, and recommended configurations.
+
+**After completing experiments**:
+```bash
+/retrospective
+```
+Claude will extract insights from the conversation and generate a structured skill file documenting what worked, what failed, and key learnings.
+
+### Available Skills
+
+**Training Workflows**:
+- `selfplay-loop-workflow` - Gen1 OU self-play loop (Generate → Filter → Train → League)
+
+**Configuration**:
+- `dynamic-damping-config-selection` - Choosing gin configs for dynamic damping
+- `reward-scale-matching` - Matching reward_multiplier to reward function scale
+
+**Troubleshooting**:
+- `format-filtering-troubleshooting` - Fixing data loading / format filtering issues
+
+### Creating New Skills
+
+Use `/retrospective` after experiments to auto-generate skills, or manually create following `.claude/SKILL_TEMPLATE.md`. Skills should:
+- Document specific failures in detail (most valuable)
+- Include copy-paste ready commands
+- Specify exact hyperparameters tested
+- Provide concrete success criteria
 
 ---
 
@@ -184,8 +231,49 @@ Data must be in format-specific subdirectories: `data_dir/gen1ou/*.json.lz4`
 
 ### Existing Gen1 OU Data
 
-- Location: `/home/eddie/nash_phase0/trajectories/gen1ou/`
-- Size: 1,104 replays (ready to use)
+- Nash Phase 0: `/home/eddie/metamon/other/nash_phase0/trajectories/gen1ou/` (1,104 replays)
+- Super Dataset Loop 3: `/home/eddie/metamon/trajectories/super_dataset_loop3/gen1ou/` (25,072 replays)
+
+---
+
+## Recent Training: Aggressive Sleep Strategy
+
+**Goal**: Train a Gen1 OU specialist that prioritizes sleep-inducing moves
+
+**Setup**:
+- Base model: `DampedBinarySuperV1_Epoch4`
+- Dataset: 25,072 offline trajectories from super_dataset_loop3
+- Reward: `AggressiveShapedRewardSleep` (+200/0 win/loss, +1 sleep bonus)
+- Observation: `ExpandedObservationSpace` (includes PP, tera types, sleep/freeze flags)
+- Training: 5 epochs with BC-heavy offline finetuning
+
+**Training Command**:
+```bash
+python -u -m metamon.rl.finetune_from_hf \
+    --run_name "aggressive-sleep-loop3v1" \
+    --finetune_from_model DampedBinarySuperV1_Epoch4 \
+    --custom_replay_dir ~/metamon/trajectories/super_dataset_loop3/ \
+    --custom_replay_sample_weight 1.0 \
+    --formats gen1ou \
+    --train_gin_config selfplay_damped_aggressive.gin \
+    --reward_function AggressiveShapedRewardSleep \
+    --epochs 5 \
+    --save_dir ~/metamon/models/gen1_aggressive_sleep_loop3 \
+    --eval_gens 1 \
+    --log
+```
+
+**Key Configuration** (`selfplay_damped_aggressive.gin`):
+- **Reward scale**: `reward_multiplier = 0.05` (handles +200/0 scale)
+- **Data mix**: BC-heavy (75%) with small DPG (25%) for offline stability
+- **KL target**: 0.015 (slightly looser than conservative 0.01)
+- **Damping**: Starts at 0.20 with controller-driven adaptation (no decay)
+
+**What to Monitor**:
+- KL divergence should stay around 0.015 (range 0.01-0.0225)
+- Sleep move usage should increase over training
+- Policy entropy should stay > 1.0 (no collapse)
+- Win rate should improve gradually
 
 ---
 

@@ -306,6 +306,95 @@ python -m metamon.rl.train_vanilla_selfplay \
 
 ---
 
+## Advanced: Aggressive Sleep Strategy Training
+
+**New Training Mode**: Offline finetuning with custom reward function to prioritize sleep moves
+
+### Setup
+
+This approach uses a large offline dataset (25k+ battles) with a specialized reward function that incentivizes putting opponents to sleep, combined with BC-heavy training for stability.
+
+**Key Features**:
+- **Reward**: `AggressiveShapedRewardSleep` (+200/0 win/loss, +1 sleep bonus)
+- **Observation**: `ExpandedObservationSpace` (adds PP tracking, sleep/freeze flags, tera types)
+- **Training**: Pure offline with BC-heavy (75%) + small DPG (25%)
+- **Damping**: Conservative with looser KL target (0.015) for offline adaptation
+
+### Training Command
+
+```bash
+python -u -m metamon.rl.finetune_from_hf \
+    --run_name "aggressive-sleep-loop3v1" \
+    --finetune_from_model DampedBinarySuperV1_Epoch4 \
+    --custom_replay_dir ~/metamon/trajectories/super_dataset_loop3/ \
+    --custom_replay_sample_weight 1.0 \
+    --formats gen1ou \
+    --train_gin_config selfplay_damped_aggressive.gin \
+    --reward_function AggressiveShapedRewardSleep \
+    --epochs 5 \
+    --save_dir ~/metamon/models/gen1_aggressive_sleep_loop3 \
+    --eval_gens 1 \
+    --log
+```
+
+### Configuration Details
+
+The `selfplay_damped_aggressive.gin` config is specifically tuned for offline BC training:
+
+**Reward Scaling**:
+```gin
+agent.Agent.reward_multiplier = 0.05  # Handles +200/0 scale
+```
+Old effective: 100 × 0.1 = 10
+New effective: 200 × 0.05 = 10 (matched!)
+
+**Data Mix** (inverted from online training):
+```gin
+agent.Agent.online_coeff = 0.25   # Small DPG signal
+agent.Agent.offline_coeff = 0.75  # Heavy BC for stability
+```
+
+**Dynamic Damping** (slightly looser for offline):
+```gin
+MetamonAMAGOExperiment.target_kl_per_step = 0.015  # was 0.01
+MetamonAMAGOExperiment.kl_tolerance = 1.5          # was 1.25
+MetamonAMAGOExperiment.kl_coef_init = 0.20         # was 0.30
+```
+
+### What This Achieves
+
+1. **Stable offline learning**: BC-heavy prevents catastrophic forgetting
+2. **Sleep specialization**: +1 reward bonus shapes policy toward sleep moves
+3. **Aggressive play**: +200/0 win/loss encourages taking risks
+4. **Observation improvements**: ExpandedObservationSpace adds PP and status tracking
+
+### Monitoring
+
+Key metrics to watch during training:
+
+| Metric | Target Range | Red Flag |
+|--------|-------------|----------|
+| KL Divergence | 0.01 - 0.0225 | > 0.025 |
+| Policy Entropy | > 1.0 | < 0.5 |
+| BC Loss | Decreasing | Flat/increasing |
+| Sleep Move Usage | Increasing | Flat |
+| Win Rate | Gradual improvement | Drops |
+
+### When to Use This Approach
+
+✅ **Use when**:
+- You have a large offline dataset (10k+ battles)
+- You want to specialize for specific strategies (e.g., sleep, stall)
+- You need stability (no on-policy rollouts available)
+- Fine-tuning from a strong pretrained model
+
+❌ **Don't use when**:
+- Starting from scratch (use online training first)
+- Dataset is small (< 5k battles)
+- Need general-purpose policy (use DefaultShapedReward)
+
+---
+
 ## Summary
 
 ✅ **Use existing production scripts**: `generate_selfplay_data.py`, `filter_selfplay_data.py`, `self_play_tournament.py`
@@ -317,5 +406,7 @@ python -m metamon.rl.train_vanilla_selfplay \
 ✅ **Monitor metrics**: KL, entropy, LR to tune hyperparameters
 
 ✅ **Compare approaches**: Run both baseline and damped experiments
+
+✅ **Advanced**: Use `selfplay_damped_aggressive.gin` for specialized offline training with custom rewards
 
 Good luck with your Gen1 OU self-play experiments! 🚀
