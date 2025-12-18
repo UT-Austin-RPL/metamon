@@ -40,7 +40,7 @@ def run_training_steps(num_steps=10, with_validation=False):
         '--num_envs', '5',
         '--parsed_replay_dir', '/home/eddie/metamon_cache/parsed-replays',
         '--formats', 'gen1ou',
-        '--buffer_dir', '/home/eddie/nash_phase0/trajectories',
+        '--buffer_dir', '/home/eddie/metamon/other/nash_phase0/trajectories',
         '--log_to_wandb', 'False',
         '--save_dir', '/tmp/metamon_cache_test',
         '--val_interval', '9999999',  # Disable validation runs

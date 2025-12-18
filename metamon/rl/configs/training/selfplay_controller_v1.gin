@@ -1,0 +1,139 @@
+# Conservative Selfplay with Active Dynamic Damping (selfplay_controller_v1.gin)
+#
+# Key differences from sleep_selfplay_v2_aggressive.gin:
+#   - MUCH tighter KL target: 0.008 (vs 0.012) → controller actually triggers
+#   - Tighter tolerance: 1.1 (vs 1.25) → narrower "OK band" [0.0072, 0.0088]
+#   - Stronger initial damping: kl_coef_init = 1.0 (vs 0.6)
+#   - More aggressive LR braking: lr_shrink = 0.35 (vs 0.5)
+#   - Slower LR regrowth: lr_grow = 1.03 (vs 1.05)
+#   - Reduced DPG: online_coeff = 0.05 (vs 0.15) for safer exploration
+#   - Lower max LR: 5e-6 (vs 8e-6) to prevent overshooting
+#
+# Philosophy:
+#   v2_aggressive had the controller sitting idle because KL stayed in the
+#   [0.0096, 0.015] band. That meant constant kl_coef=0.6 with no adaptation.
+#   Result: policy drifted at ~1×target every step, but degraded after epoch 1.
+#
+#   This config makes the controller WORK:
+#     - Tighter target means current KL (~0.01–0.012) is now TOO HIGH
+#     - Controller increases kl_coef and shrinks LR until KL drops
+#     - Result: smaller, safer updates while critic adapts to new data
+#
+#   We also reduce DPG from 0.15 → 0.05 because even bounded KL can cause
+#   damage if the critic is miscalibrated on the 200k trajectory regime.
+#
+# Recommended usage:
+#   - Start with this config from the beginning (no separate warmup phase)
+#   - If epoch 1 still degrades, set online_coeff = 0.0 for first 30-40% of training
+#   - Monitor: KL should drop below 0.009 after controller kicks in
+#   - Win rate should NOT decrease after epoch 1
+#
+# NOTE: Assumes AggressiveShapedRewardSleep reward function.
+
+import amago.agent
+
+# =========================
+# Reward scaling (softened)
+# =========================
+agent.Agent.reward_multiplier = 0.05
+agent.MultiTaskAgent.reward_multiplier = 0.05
+
+agent.Agent.tau = .004
+agent.MultiTaskAgent.tau = .004
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 3
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 3
+
+# =========================
+# Data mix: Filtered BC (85%) + Gentle DPG (5%)
+# =========================
+# IMPORTANT: Reduced DPG to 0.05 (from 0.15) for safer exploration
+# If epoch 1 still degrades, try online_coeff = 0.0 for initial training
+agent.Agent.online_coeff  = 0.05   # Gentle DPG, not aggressive
+agent.MultiTaskAgent.online_coeff  = 0.05
+
+agent.Agent.offline_coeff = 0.85   # Primary signal from FBC
+agent.MultiTaskAgent.offline_coeff = 0.85
+
+# Advantage-filtered BC: imitate only clearly good actions
+agent.Agent.fbc_filter_func = @agent.binary_filter
+agent.MultiTaskAgent.fbc_filter_func = @agent.binary_filter
+
+# =========================
+# Optimizer (more conservative)
+# =========================
+MetamonAMAGOExperiment.l2_coeff = 5e-5
+
+# Same warmup schedule, but lower max LR to prevent overshooting
+MetamonAMAGOExperiment.learning_rate = 1e-6
+MetamonAMAGOExperiment.lr_warmup_steps = 10000  # Same as v2_aggressive
+MetamonAMAGOExperiment.max_lr = 5e-6            # Reduced from 8e-6
+MetamonAMAGOExperiment.min_lr = 1e-6
+
+MetamonAMAGOExperiment.grad_clip = 0.3
+
+# Critic learns selfplay returns under same reward
+MetamonAMAGOExperiment.critic_loss_weight = 1.5
+
+# =========================
+# Dynamic Damping (KL): MUCH TIGHTER - Controller Actually Engages
+# =========================
+MetamonAMAGOExperiment.use_dynamic_damping = True
+
+# TIGHTER target + tolerance => controller triggers on current KL levels
+MetamonAMAGOExperiment.target_kl_per_step = 0.008    # From 0.012 - much tighter
+MetamonAMAGOExperiment.kl_tolerance       = 1.1      # From 1.25 - narrower band
+                                                     # OK band: [0.0072, 0.0088]
+
+# STRONGER initial damping; allow going even stiffer if KL spikes
+MetamonAMAGOExperiment.kl_coef_init = 1.0            # From 0.6 - stronger start
+MetamonAMAGOExperiment.kl_coef_max  = 1.5            # From 1.2 - can go higher
+
+# Controller adaptation frequency
+MetamonAMAGOExperiment.dd_adapt_interval   = 10     # Check every 10 training steps
+
+# When KL is high: HARDER braking (aggressive shrink, slow regrowth)
+MetamonAMAGOExperiment.kl_coef_growth_factor = 1.8   # Same as v2
+MetamonAMAGOExperiment.lr_shrink_factor      = 0.35  # From 0.5 - hit brakes HARD
+MetamonAMAGOExperiment.lr_grow_factor        = 1.03  # From 1.05 - regrow SLOWLY
+
+# When KL is low: relax slowly (same as v2)
+MetamonAMAGOExperiment.kl_coef_decay_factor  = 0.97
+
+# No power-law decay; controller only
+MetamonAMAGOExperiment.kl_power_alpha    = 0.0
+MetamonAMAGOExperiment.kl_schedule_steps = 1_000_000
+
+# =========================
+# Entropy schedule (unchanged)
+# =========================
+MetamonAMAGOExperiment.ent_coef_init = 0.02
+MetamonAMAGOExperiment.ent_coef_min  = 0.003
+
+MetamonAMAGOExperiment.ent_power_alpha = 0.3
+MetamonAMAGOExperiment.ent_schedule_steps = 1_000_000
+
+# =========================
+# Expected behavior with active controller
+# =========================
+#   - First 10k steps: LR ramps 1e-6 → 5e-6
+#   - KL Divergence: starts ~0.01–0.012 (above target band [0.0072, 0.0088])
+#   - Controller TRIGGERS: increases kl_coef, shrinks LR
+#   - KL should drop below 0.009 as controller adapts
+#   - Policy makes smaller, safer updates while critic adapts
+#   - After KL stabilizes in-band, controller slowly relaxes
+#   - Win rate should NOT decrease after epoch 1 (key success metric)
+#
+# Red flags:
+#   - KL stays persistently > 0.012: DPG still too strong, set online_coeff = 0.0
+#   - kl_coef hits 1.5 repeatedly: data regime or critic badly miscalibrated
+#   - Win rate still decreases: revert to pure BC (online_coeff = 0.0)
+#   - FBC approval rate < 0.1 or > 0.6: advantage threshold needs tuning
+#
+# Next steps if this works:
+#   - If stable, can try online_coeff = 0.08 or 0.10 for slightly more exploration
+#   - If still conservative, try target_kl_per_step = 0.009 or 0.010
+#   - Monitor controller_active_pct metric to see how often it's braking

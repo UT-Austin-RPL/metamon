@@ -56,7 +56,7 @@ except Exception as e:
 # Test 3: Check checkpoint files
 print("[3/4] Checking checkpoint files...")
 try:
-    checkpoint_dir = os.path.expanduser("~/metamon_checkpoints/Gen1BinaryRewardV0/ckpts/policy_weights")
+    checkpoint_dir = os.path.expanduser("~/metamon/models/metamon_checkpoints/Gen1BinaryRewardV0/ckpts/policy_weights")
 
     if os.path.exists(checkpoint_dir):
         checkpoints = sorted([f for f in os.listdir(checkpoint_dir) if f.startswith("policy_epoch_")])

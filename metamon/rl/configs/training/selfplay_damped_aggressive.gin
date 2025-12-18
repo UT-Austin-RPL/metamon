@@ -1,0 +1,149 @@
+# Aggressive Sleep-Focused Dynamic Damping for Offline Finetuning
+#
+# This configuration is designed for offline finetuning on a fixed replay buffer
+# with AggressiveShapedRewardSleep (+200/0 win/loss, +1 sleep bonus).
+#
+# Key differences from vanilla_selfplay_damped_conservative.gin:
+#   1. Reward multiplier dramatically reduced (0.05) to handle +200/0 scale
+#   2. Data mix inverted: BC-heavy (0.75) with small DPG signal (0.25)
+#   3. Slightly looser KL constraints to allow learning from offline data
+#   4. Pure offline training (no on-policy rollouts)
+#
+# Design principles:
+#   - STABILITY first: BC-heavy prevents catastrophic forgetting
+#   - Reward scale matched: 200 * 0.05 = 10 (same effective scale as before)
+#   - Damping still strong but slightly looser for offline adaptation
+#   - Controller-driven KL adaptation (no automatic decay)
+#
+# Expected behavior:
+#   - Policy learns to prioritize sleep moves without collapsing
+#   - KL stays around 0.015 (slightly higher than conservative mode)
+#   - BC loss dominates early, DPG signal refines late
+#   - Stable, gradual improvement over 5 epochs
+
+import amago.agent
+
+# =========================
+# Reward Shaping: Re-scale for AggressiveShapedRewardSleep
+# =========================
+# Old effective scale: 100 * 0.1 = 10
+# New env scale: 200 * 0.05 = 10 (matched!)
+# This keeps gradient magnitudes in the same ballpark
+agent.Agent.reward_multiplier = 0.05
+agent.MultiTaskAgent.reward_multiplier = 0.05
+
+# Target network update rate
+agent.Agent.tau = .004
+agent.MultiTaskAgent.tau = .004
+
+# Number of actions sampled for value estimation
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 3
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 3
+
+# =========================
+# Data Mix: BC-Heavy Offline Training
+# =========================
+# Pure offline setting (no on-policy rollouts)
+# Emphasize filtered behavior cloning for stability
+# Keep small DPG signal for policy improvement
+agent.Agent.online_coeff = 0.25          # DPG weight (was 0.75)
+agent.MultiTaskAgent.online_coeff = 0.25
+
+agent.Agent.offline_coeff = 0.75         # BC weight (was 0.25)
+agent.MultiTaskAgent.offline_coeff = 0.75
+
+# Keep advantage filtering - sign of A still works with new reward scale
+agent.Agent.fbc_filter_func = @agent.binary_filter
+agent.MultiTaskAgent.fbc_filter_func = @agent.binary_filter
+
+# =========================
+# Core Optimizer Settings
+# =========================
+MetamonAMAGOExperiment.l2_coeff = 5e-5
+
+# Conservative learning rates for pretrained policy finetuning
+MetamonAMAGOExperiment.learning_rate = 1e-5      # Base LR
+MetamonAMAGOExperiment.lr_warmup_steps = 500     # Short warmup
+MetamonAMAGOExperiment.max_lr = 2e-5             # Conservative ceiling
+MetamonAMAGOExperiment.min_lr = 1e-6             # Floor
+
+MetamonAMAGOExperiment.grad_clip = 0.3           # Tight gradient clipping
+
+# Critic loss weight: matches original Metamon and Ataraxos regime
+# (value loss ~O(1), balanced with policy loss), starting at 3 and may ramp down to 1
+MetamonAMAGOExperiment.critic_loss_weight = 3.0 
+
+# =========================
+# Dynamic Damping (KL): Slightly Looser for Offline Learning
+# =========================
+MetamonAMAGOExperiment.use_dynamic_damping = True
+
+# Slightly looser KL target for offline finetuning
+# (was 0.01 in conservative mode)
+MetamonAMAGOExperiment.target_kl_per_step = 0.015
+MetamonAMAGOExperiment.kl_tolerance = 1.5        # Wider acceptable band [0.01, 0.0225]
+
+# Strong damping to prevent policy collapse
+# Raised back to 0.30 after collapse with 0.20
+MetamonAMAGOExperiment.kl_coef_init = 0.30
+MetamonAMAGOExperiment.kl_coef_max = 0.60
+
+# KL adaptation window: shorter window for faster response to instability
+# Reduced from 100 to 50 after policy collapse
+MetamonAMAGOExperiment.dd_adapt_interval = 6
+
+# POWER-LAW SCHEDULE DISABLED
+# No automatic decay - controller handles all adaptation
+MetamonAMAGOExperiment.kl_power_alpha = 0.0       # NO DECAY
+MetamonAMAGOExperiment.kl_schedule_steps = 1_000_000
+
+# Controller: small, cautious adjustments
+MetamonAMAGOExperiment.lr_shrink_factor = 0.5     # Halve LR when KL too high
+MetamonAMAGOExperiment.lr_grow_factor = 1.07      # Grow slowly when stable (was 1.05)
+
+MetamonAMAGOExperiment.kl_coef_growth_factor = 1.4   # Gentle increase if KL high (was 1.5)
+MetamonAMAGOExperiment.kl_coef_decay_factor = 0.96   # Gentle decrease if KL low (was 0.95)
+
+# =========================
+# Dynamic Damping (Entropy): Keep Conservative Settings
+# =========================
+MetamonAMAGOExperiment.ent_coef_init = 0.02
+MetamonAMAGOExperiment.ent_coef_min = 0.003
+
+# Gentle entropy decay
+MetamonAMAGOExperiment.ent_power_alpha = 0.3
+MetamonAMAGOExperiment.ent_schedule_steps = 1_000_000
+
+# =========================
+# Expected Behavior
+# =========================
+# During training, you should observe:
+#   1. damping/kl_coef: Starts at 0.30 (strong), only controller adjusts (no decay)
+#   2. damping/ent_coef: Starts at 0.02, decays gently toward 0.003
+#   3. KL Divergence: Stays around 0.015 (looser than conservative 0.01)
+#   4. damping/lr: Adjusts reactively based on KL behavior
+#   5. Policy Entropy: Trends downward but stays healthy (> 1.0)
+#   6. offline/bc_loss: Dominates early training (BC-heavy regime)
+#   7. Win rate: Improves gradually as policy learns sleep-focused strategy
+#   8. Adaptation frequency: Every 50 steps (faster response than 100)
+#
+# Success indicators:
+#   - No catastrophic KL spikes (>> 0.025)
+#   - Sleep move usage increases over training
+#   - Policy performance improves steadily without collapse
+#   - BC loss decreases, indicating successful imitation of filtered data
+#   - Critic loss stabilizes
+#   - Controller adapts quickly to prevent instability (50-step window)
+#
+# Red flags:
+#   - KL >> 0.02 persistently: Increase kl_coef_init further or decrease learning_rate
+#   - Entropy < 0.5: Policy collapsed - restart with even higher kl_coef_init (0.40+)
+#   - Win rate drops: BC weight too low or reward scale mismatch
+#   - No learning progress: KL too tight - increase target_kl_per_step to 0.02
+#
+# Changes from v1 (which collapsed):
+#   - kl_coef_init: 0.20 → 0.30 (stronger initial damping)
+#   - dd_adapt_interval: 100 → 50 (faster reaction to instability)
