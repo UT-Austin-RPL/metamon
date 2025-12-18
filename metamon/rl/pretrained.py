@@ -649,6 +649,54 @@ class SleepLoop5V1_Epoch4(LocalPretrainedModel):
 
 
 @pretrained_model()
+class SleepLoop5Controller_Epoch0(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_control_sleep_loop5",
+            model_name="sleep-loop5-control",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="selfplay_controller_v1.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=0,
+        )
+
+
+@pretrained_model()
+class SleepLoop5Controller_Epoch2(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_control_sleep_loop5",
+            model_name="sleep-loop5-control",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="selfplay_controller_v1.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=2,
+        )
+
+
+@pretrained_model()
+class SleepLoop5Controller_Epoch4(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/home/eddie/metamon/models/gen1_control_sleep_loop5",
+            model_name="sleep-loop5-control",
+            model_gin_config="synthetic_multitaskagent.gin",
+            train_gin_config="selfplay_controller_v1.gin",
+            tokenizer=get_tokenizer("allreplays-v3"),
+            observation_space=get_observation_space("DefaultObservationSpace"),
+            action_space=get_action_space("MinimalActionSpace"),
+            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
+            default_checkpoint=4,
+        )
+
+
+@pretrained_model()
 class BinaryLoop4V1_Epoch0(LocalPretrainedModel):
     def __init__(self):
         super().__init__(

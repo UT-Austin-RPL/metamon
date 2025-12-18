@@ -7,7 +7,7 @@
 #
 # Philosophy:
 #   - Mix filtered BC (85%) with DPG (15%) for more aggressive adaptation
-#   - Proper warmup (2k steps) lets critic adapt before actor takes big steps
+#   - Proper warmup (10k steps) lets critic adapt before actor takes big steps
 #   - Dynamic damping remains primary safety mechanism
 #
 # NOTE: This gin assumes the same AggressiveShapedRewardSleep reward function is used
