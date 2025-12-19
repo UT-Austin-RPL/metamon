@@ -163,6 +163,9 @@ class AnalyticsEngine:
         """
         Calculate win rate by lead Pokemon.
 
+        Excludes battles where the opponent has the same lead
+        to avoid 50% win rate bias from mirror matchups.
+
         Args:
             exclude_mirrors: Exclude mirror matches
             min_battles: Minimum battles required
@@ -183,6 +186,7 @@ class AnalyticsEngine:
                 AVG(num_turns) as avg_turns
             FROM battles
             WHERE player_lead != 'Unknown'
+              AND player_lead != opponent_lead
             {mirror_filter}
             GROUP BY player_lead
             HAVING COUNT(*) >= {min_battles}
@@ -305,6 +309,9 @@ class AnalyticsEngine:
         """
         Get usage statistics for each species.
 
+        Excludes battles where the opponent also has the target species
+        to avoid 50% win rate bias from mirror matchups.
+
         Returns:
             DataFrame with: [species, appearances, avg_win_rate, avg_turns]
         """
@@ -315,7 +322,8 @@ class AnalyticsEngine:
                 SELECT
                     unnest(player_team_species) as species,
                     result,
-                    num_turns
+                    num_turns,
+                    opponent_team_species
                 FROM battles
                 WHERE 1=1
                 {mirror_filter}
@@ -328,6 +336,7 @@ class AnalyticsEngine:
                 AVG(num_turns) as avg_turns
             FROM species_battles
             WHERE species != 'Unknown'
+              AND NOT list_contains(opponent_team_species, species)
             GROUP BY species
             ORDER BY appearances DESC
         """
@@ -337,10 +346,13 @@ class AnalyticsEngine:
     def lead_matchup_matrix(
         self,
         exclude_mirrors: bool = True,
-        min_battles: int = 5
+        min_battles: int = 10
     ) -> pd.DataFrame:
         """
         Calculate win rate matrix for lead matchups.
+
+        Aggregates from both battle perspectives to ensure symmetry.
+        For mirror matchups (same lead vs same lead), enforces 50% win rate.
 
         Returns:
             DataFrame with player leads as rows, opponent leads as columns
@@ -364,22 +376,92 @@ class AnalyticsEngine:
             row = {'player_lead': player_lead}
 
             for opp_lead in lead_names:
-                query = f"""
-                    SELECT
-                        COUNT(*) as total,
-                        CAST(SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) AS FLOAT) /
-                            NULLIF(SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) + SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END), 0) as win_rate
-                    FROM battles
-                    WHERE player_lead = '{player_lead}'
-                      AND opponent_lead = '{opp_lead}'
-                      {mirror_filter}
-                """
+                # For mirror matchups, force 50% win rate
+                if player_lead == opp_lead:
+                    row[opp_lead] = 0.5
+                else:
+                    # Aggregate from BOTH perspectives to handle asymmetric data
+                    query = f"""
+                        WITH perspective_a AS (
+                            SELECT
+                                COUNT(*) as total,
+                                SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                                SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as losses
+                            FROM battles
+                            WHERE player_lead = '{player_lead}'
+                              AND opponent_lead = '{opp_lead}'
+                              {mirror_filter}
+                        ),
+                        perspective_b AS (
+                            SELECT
+                                COUNT(*) as total,
+                                SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as opp_wins,
+                                SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as opp_losses
+                            FROM battles
+                            WHERE player_lead = '{opp_lead}'
+                              AND opponent_lead = '{player_lead}'
+                              {mirror_filter}
+                        )
+                        SELECT
+                            COALESCE((SELECT wins FROM perspective_a), 0) + COALESCE((SELECT opp_losses FROM perspective_b), 0) as total_wins,
+                            COALESCE((SELECT losses FROM perspective_a), 0) + COALESCE((SELECT opp_wins FROM perspective_b), 0) as total_losses,
+                            COALESCE((SELECT total FROM perspective_a), 0) + COALESCE((SELECT total FROM perspective_b), 0) as total_battles
+                    """
 
-                result = self.conn.execute(query).fetchone()
-                win_rate = result[1] if result and result[0] >= min_battles else None
+                    result = self.conn.execute(query).fetchone()
+                    total_wins, total_losses, total_battles = result
 
-                row[opp_lead] = win_rate
+                    if total_battles >= min_battles and (total_wins + total_losses) > 0:
+                        win_rate = total_wins / (total_wins + total_losses)
+                        row[opp_lead] = win_rate
+                    else:
+                        row[opp_lead] = None
 
             results.append(row)
 
         return pd.DataFrame(results)
+
+    def get_lead_variations_for_teams(
+        self,
+        team_hashes: Optional[List[str]] = None,
+        exclude_mirrors: bool = True
+    ) -> pd.DataFrame:
+        """
+        Get lead variation statistics for teams.
+
+        Shows which leads were used with each team and their performance.
+
+        Args:
+            team_hashes: Optional list of team hashes to filter (all teams if None)
+            exclude_mirrors: Exclude mirror matches
+
+        Returns:
+            DataFrame with: [team_hash, team_species, player_lead, lead_usage_count, lead_win_rate]
+        """
+        mirror_filter = "AND player_team_hash != opponent_team_hash" if exclude_mirrors else ""
+        team_filter = ""
+
+        if team_hashes:
+            # Safely escape team hashes for SQL
+            hash_list = ", ".join([f"'{h}'" for h in team_hashes])
+            team_filter = f"AND player_team_hash IN ({hash_list})"
+
+        query = f"""
+            SELECT
+                player_team_hash as team_hash,
+                player_team_species as team_species,
+                player_lead,
+                COUNT(*) as lead_usage_count,
+                SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as lead_wins,
+                CAST(SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) AS FLOAT) /
+                    NULLIF(SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) + SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END), 0) as lead_win_rate
+            FROM battles
+            WHERE player_team_hash != 'empty'
+              AND player_lead != 'Unknown'
+            {mirror_filter}
+            {team_filter}
+            GROUP BY player_team_hash, player_team_species, player_lead
+            ORDER BY player_team_hash, lead_usage_count DESC
+        """
+
+        return self.conn.execute(query).df()

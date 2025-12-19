@@ -400,7 +400,10 @@ class PokeEnvWrapper(OpenAIGymEnv):
             ):
                 # build a long filename that matches the format of the parsed replay dataset
                 result = "WIN" if info["won"] == 1 else "LOSS"
-                battle_id = "".join(str(random.randint(0, 9)) for _ in range(10))
+                # Use the actual Showdown battle ID to enable matching both perspectives
+                # battle_tag format: "battle-gen1ou-12345" -> extract just the number
+                showdown_battle_id = self.current_battle.battle_tag.split('-')[-1]
+                battle_id = showdown_battle_id
                 timestamp = datetime.now().strftime("%m-%d-%Y-%H:%M:%S")
                 opponent_name = (
                     self.metamon_opponent_name or self.current_battle.opponent_username

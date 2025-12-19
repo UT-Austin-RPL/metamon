@@ -12,6 +12,7 @@ from .parser import TrajectoryParser, BattleRecord
 from .database import TeamAnalyticsDB
 from .analytics import AnalyticsEngine
 from .export import TeamExporter
+from .impute_teams import impute_opponent_teams
 
 __all__ = [
     "TrajectoryParser",
@@ -19,4 +20,5 @@ __all__ = [
     "TeamAnalyticsDB",
     "AnalyticsEngine",
     "TeamExporter",
+    "impute_opponent_teams",
 ]

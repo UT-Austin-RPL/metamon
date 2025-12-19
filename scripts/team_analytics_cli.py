@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scripts.team_analytics.parser import TrajectoryParser
 from scripts.team_analytics.database import TeamAnalyticsDB
 from scripts.team_analytics.gradio_app import TeamAnalyticsApp
+from scripts.team_analytics.impute_teams import impute_opponent_teams
 
 
 def parse_and_load(
@@ -39,6 +40,7 @@ def parse_and_load(
     db_path: str = ":memory:",
     max_workers: int = 8,
     limit: Optional[int] = None,
+    impute_opponents: bool = True,
     verbose: bool = True
 ) -> TeamAnalyticsDB:
     """
@@ -49,6 +51,7 @@ def parse_and_load(
         db_path: Path to DuckDB database file (or :memory:)
         max_workers: Number of parallel workers for parsing
         limit: Optional limit on files to parse (for testing)
+        impute_opponents: Use paired battles to impute missing opponent team data
         verbose: Print progress messages
 
     Returns:
@@ -72,6 +75,12 @@ def parse_and_load(
         sys.exit(1)
 
     print(f"\n✓ Parsed {len(records)} battle records\n")
+
+    # Step 1.5: Impute opponent teams (optional)
+    if impute_opponents:
+        print("Step 1.5: Imputing missing opponent team data...")
+        records = impute_opponent_teams(records)
+        print()
 
     # Step 2: Load into database
     print("Step 2: Loading into DuckDB...")
@@ -171,6 +180,20 @@ Examples:
     )
 
     parser.add_argument(
+        '--impute-opponents',
+        action='store_true',
+        default=True,
+        help='Impute missing opponent team data from paired battles (default: True)'
+    )
+
+    parser.add_argument(
+        '--no-impute-opponents',
+        action='store_false',
+        dest='impute_opponents',
+        help='Disable opponent team imputation'
+    )
+
+    parser.add_argument(
         '--launch',
         action='store_true',
         help='Launch Gradio web interface after loading'
@@ -218,6 +241,7 @@ Examples:
             db_path=args.db_path,
             max_workers=args.max_workers,
             limit=args.limit,
+            impute_opponents=args.impute_opponents,
             verbose=verbose
         )
     else:

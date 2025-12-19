@@ -17,7 +17,7 @@ Analyze Pokemon battle trajectories to identify team performance patterns, arche
 Dependencies:
 ```bash
 source .venv/bin/activate
-uv pip install duckdb gradio pandas
+uv pip install duckdb gradio pandas plotly
 ```
 
 ## Quick Start
