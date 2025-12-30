@@ -17,6 +17,7 @@ import amago
 import metamon
 from metamon.rl.metamon_to_amago import (
     make_placeholder_experiment,
+    MetamonDiscrete,
 )
 from metamon.interface import (
     ObservationSpace,
@@ -104,6 +105,13 @@ class PretrainedModel:
         default_checkpoint: Default checkpoint epoch to load. 40 corresponds to
             approximately 1M gradient steps with original paper training settings.
         gin_overrides: Optional dictionary of one-off gin overrides if there's a small tweak to an existing config file.
+        battle_backend: The correct default battle backend to use during evaluations of this agent.
+            Should indicate a version of the backend pokemon logic that mostly closely replicates the
+            version used to collect data and/or reconstruct replays for training.
+                'poke-env' is deprecated; maintains the original paper's models.
+                'metamon' is the lateset version
+                'pokeagent' maintains policies trained (and used as the organizer baselines) during the PokéAgent Challenge
+        action_temperature: Temperature for temperature-based sampling. Higher temperature means more exploration. Default is 1.0 (no scaling).
     """
 
     HF_REPO_ID = "jakegrigsby/metamon"
@@ -122,10 +130,12 @@ class PretrainedModel:
         hf_cache_dir: Optional[str] = None,
         default_checkpoint: int = 40,
         gin_overrides: Optional[dict] = None,
+        battle_backend: str = "metamon",
     ):
         self.model_name = model_name
         self.model_gin_config = model_gin_config
         self.train_gin_config = train_gin_config
+        self.battle_backend = battle_backend
         self.model_gin_config_path = os.path.join(
             metamon.rl.MODEL_CONFIG_DIR, self.model_gin_config
         )
@@ -185,11 +195,14 @@ class PretrainedModel:
         return checkpoint_path
 
     def initialize_agent(
-        self, checkpoint: Optional[int] = None, log: bool = False
+        self,
+        checkpoint: Optional[int] = None,
+        log: bool = False,
+        action_temperature: float = 1.0,
     ) -> amago.Experiment:
         # use the base config and the gin file to configure the model
         amago.cli_utils.use_config(
-            self.base_config,
+            self.base_config | {"MetamonDiscrete.temperature": action_temperature},
             [self.model_gin_config_path, self.train_gin_config_path],
             finalize=False,
         )
@@ -306,10 +319,12 @@ class LocalFinetunedModel(LocalPretrainedModel):
         default_checkpoint: int,
         train_gin_config: Optional[str] = None,
         reward_function: Optional[RewardFunction] = None,
+        battle_backend: Optional[str] = None,
     ):
         base_model = base_model()
         train_gin_config = train_gin_config or base_model.train_gin_config
         reward_function = reward_function or base_model.reward_function
+        battle_backend = battle_backend or base_model.battle_backend
         super().__init__(
             amago_ckpt_dir=amago_ckpt_dir,
             model_name=model_name,
@@ -320,6 +335,7 @@ class LocalFinetunedModel(LocalPretrainedModel):
             observation_space=base_model.observation_space,
             action_space=base_model.action_space,
             reward_function=reward_function,
+            battle_backend=battle_backend,
         )
 
 
@@ -337,6 +353,7 @@ class SmallIL(PretrainedModel):
             train_gin_config="il.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -349,6 +366,7 @@ class SmallILFA(PretrainedModel):
             train_gin_config="il.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -361,6 +379,7 @@ class SmallRL(PretrainedModel):
             train_gin_config="exp_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -389,6 +408,7 @@ class SmallRL_BinaryFilter(PretrainedModel):
             train_gin_config="binary_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -401,6 +421,7 @@ class SmallRL_Aug(PretrainedModel):
             train_gin_config="binary_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -413,6 +434,7 @@ class SmallRL_MaxQ(PretrainedModel):
             train_gin_config="binary_maxq_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -425,6 +447,7 @@ class MediumIL(PretrainedModel):
             train_gin_config="il.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -437,6 +460,7 @@ class MediumRL(PretrainedModel):
             train_gin_config="exp_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -449,6 +473,7 @@ class MediumRL_Aug(PretrainedModel):
             train_gin_config="exp_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -461,6 +486,7 @@ class MediumRL_MaxQ(PretrainedModel):
             train_gin_config="binary_maxq_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -473,6 +499,7 @@ class LargeRL(PretrainedModel):
             train_gin_config="exp_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -485,6 +512,7 @@ class LargeIL(PretrainedModel):
             train_gin_config="il.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -497,6 +525,7 @@ class SyntheticRLV0(PretrainedModel):
             train_gin_config="binary_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -509,6 +538,7 @@ class SyntheticRLV1(PretrainedModel):
             train_gin_config="binary_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -521,6 +551,7 @@ class SyntheticRLV1_SelfPlay(PretrainedModel):
             train_gin_config="binary_rl.gin",
             default_checkpoint=48,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -533,6 +564,7 @@ class SyntheticRLV1_PlusPlus(PretrainedModel):
             train_gin_config="binary_maxq_rl.gin",
             default_checkpoint=38,
             action_space=get_action_space("MinimalActionSpace"),
+            battle_backend="poke-env",
         )
 
 
@@ -545,252 +577,19 @@ class SyntheticRLV2(PretrainedModel):
             train_gin_config="binary_rl.gin",
             default_checkpoint=48,
             action_space=get_action_space("MinimalActionSpace"),
-        )
-
-
-@pretrained_model()
-class SleepLoop4V1_Epoch0(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v1",
-            model_name="sleep-loop4-v1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v1.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=0,
-        )
-
-
-@pretrained_model()
-class SleepLoop4V1_Epoch2(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v1",
-            model_name="sleep-loop4-v1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v1.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=2,
-        )
-
-
-@pretrained_model()
-class SleepLoop4V1_Epoch4(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v1",
-            model_name="sleep-loop4-v1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v1.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=4,
-        )
-
-
-@pretrained_model()
-class SleepLoop4V3_Epoch0(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v3",
-            model_name="sleep-loop4-v3",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v2_aggressive.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=0,
-        )
-
-
-@pretrained_model()
-class SleepLoop4V3_Epoch2(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v3",
-            model_name="sleep-loop4-v3",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v2_aggressive.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=2,
-        )
-
-
-@pretrained_model()
-class SleepLoop4V3_Epoch4(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop4_v3",
-            model_name="sleep-loop4-v3",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v2_aggressive.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=4,
-        )
-
-
-@pretrained_model()
-class SleepLoop5V1_Epoch0(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop5_v1",
-            model_name="sleep-loop5-v1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v2_aggressive.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=0,
-        )
-
-
-@pretrained_model()
-class SleepLoop5V1_Epoch2(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop5_v1",
-            model_name="sleep-loop5-v1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v2_aggressive.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=2,
-        )
-
-
-@pretrained_model()
-class SleepLoop5V1_Epoch4(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_aggressive_sleep_loop5_v1",
-            model_name="sleep-loop5-v1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="sleep_selfplay_v2_aggressive.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=4,
-        )
-
-
-@pretrained_model()
-class SleepLoop5Controller_Epoch0(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_control_sleep_loop5",
-            model_name="sleep-loop5-control",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="selfplay_controller_v1.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=0,
-        )
-
-
-@pretrained_model()
-class SleepLoop5Controller_Epoch2(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_control_sleep_loop5",
-            model_name="sleep-loop5-control",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="selfplay_controller_v1.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=2,
-        )
-
-
-@pretrained_model()
-class SleepLoop5Controller_Epoch4(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_control_sleep_loop5",
-            model_name="sleep-loop5-control",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="selfplay_controller_v1.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("AggressiveShapedRewardSleep"),
-            default_checkpoint=4,
-        )
-
-
-@pretrained_model()
-class BinaryLoop4V1_Epoch0(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_binary_loop4_v1",
-            model_name="binary-loop4-testv1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="vanilla_selfplay_damped_conservative.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("BinaryReward"),
-            default_checkpoint=0,
-        )
-
-
-@pretrained_model()
-class BinaryLoop4V1_Epoch2(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_binary_loop4_v1",
-            model_name="binary-loop4-testv1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="vanilla_selfplay_damped_conservative.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("BinaryReward"),
-            default_checkpoint=2,
-        )
-
-
-@pretrained_model()
-class BinaryLoop4V1_Epoch4(LocalPretrainedModel):
-    def __init__(self):
-        super().__init__(
-            amago_ckpt_dir="/home/eddie/metamon/models/gen1_binary_loop4_v1",
-            model_name="binary-loop4-testv1",
-            model_gin_config="synthetic_multitaskagent.gin",
-            train_gin_config="vanilla_selfplay_damped_conservative.gin",
-            tokenizer=get_tokenizer("allreplays-v3"),
-            observation_space=get_observation_space("DefaultObservationSpace"),
-            action_space=get_action_space("MinimalActionSpace"),
-            reward_function=get_reward_function("BinaryReward"),
-            default_checkpoint=4,
+            battle_backend="poke-env",
         )
 
 
 ###################################
 ## PokéAgent Challenge Policies ###
 ###################################
+
+
+"""
+"PAC-" prefixed observation spaces trigger a hack to reintroduce a bug that impacted models trained during the challenge.
+For now, this lets these policies continue to collect reasonable trajectories for the "metamon" battle backend.
+"""
 
 
 @pretrained_model()
@@ -814,13 +613,43 @@ class SmallRLGen9Beta(PretrainedModel):
             # trained for more than 24 total epochs...
             default_checkpoint=24,
             action_space=get_action_space("DefaultActionSpace"),
-            observation_space=get_observation_space("TeamPreviewObservationSpace"),
+            observation_space=get_observation_space("PAC-TeamPreviewObservationSpace"),
             tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
             # temporarily forced to flash attention until we can verify numerical stability
             # of a switch to a standard pytorch sliding window inference alternative
             gin_overrides={
                 "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": amago.nets.transformer.FlashAttention,
                 "amago.nets.transformer.FlashAttention.window_size": (32, 0),
+            },
+            battle_backend="pokeagent",
+        )
+
+
+@pretrained_model()
+class Minikazam(PretrainedModel):
+    """
+    An attempt to create an affordable starting point for finetuning.
+
+    Small RNN trained on parsed-replays v4 and ~5M self-play battles.
+
+    Detailed evals compiled here: https://docs.google.com/spreadsheets/d/1GU7-Jh0MkIKWhiS1WNQiPfv49WIajanUF4MjKeghMAc/edit?usp=sharing
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="minikazam",
+            model_gin_config="minikazam.gin",
+            train_gin_config="binary_rl.gin",
+            default_checkpoint=40,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("PAC-OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="pokeagent",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
             },
         )
 
@@ -846,8 +675,34 @@ class Abra(PretrainedModel):
             train_gin_config="binary_rl.gin",
             default_checkpoint=40,
             action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("PAC-TeamPreviewObservationSpace"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            gin_overrides={
+                "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": amago.nets.transformer.FlashAttention,
+                "amago.nets.transformer.FlashAttention.window_size": (32, 0),
+            },
+            battle_backend="pokeagent",
+        )
+
+
+@pretrained_model()
+class Kadabra(PretrainedModel):
+    """
+    A second attempt at self-play on gens1-4 & 9 that was featured in the PokéAgent Challenge.
+
+    This policy held the top organizer gen9ou rank for most of the "practice ladder" period in Summer 2025.
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="kadabra",
+            model_gin_config="medium_multitaskagent.gin",
+            train_gin_config="binary_rl.gin",
+            default_checkpoint=46,
+            action_space=get_action_space("DefaultActionSpace"),
             observation_space=get_observation_space("TeamPreviewObservationSpace"),
             tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="pokeagent",
             gin_overrides={
                 "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": amago.nets.transformer.FlashAttention,
                 "amago.nets.transformer.FlashAttention.window_size": (32, 0),
@@ -856,31 +711,195 @@ class Abra(PretrainedModel):
 
 
 @pretrained_model()
-class Minikazam(PretrainedModel):
+class Kadabra2(PretrainedModel):
     """
-    An attempt to create an affordable starting point for finetuning.
+    A third attempt at self-play on gens1-4 & 9 that was featured in the PokéAgent Challenge.
 
-    Small RNN trained on parsed-replays v4 and ~5M self-play battles.
+    Confusingly, this policy played under the username "PAC-MM-Alakazam" for most of the challange, and held
+    the top organizer gen9ou rank at the end of the Summer 2025 practice ladder. Checkpoints have been renamed
+    for public release such that the best policy with this architecture gets to be "Alakazam" :)
 
-    Detailed evals compiled here: https://docs.google.com/spreadsheets/d/1GU7-Jh0MkIKWhiS1WNQiPfv49WIajanUF4MjKeghMAc/edit?usp=sharing
+    This marks the first time where performance of policies *trained on Gen9OU* roughly match the paper policies in Gens1-4;
+    all policies below can play Gen9OU without sacrificing significant performance in Gens1-4.
     """
 
     def __init__(self):
         super().__init__(
-            model_name="minikazam",
-            model_gin_config="minikazam.gin",
-            train_gin_config="binary_rl.gin",
-            default_checkpoint=40,
+            model_name="kadabra2",
+            model_gin_config="alakazam2.gin",
+            train_gin_config="alakazam2.gin",
+            default_checkpoint=44,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("PAC-OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="pokeagent",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+
+@pretrained_model()
+class Kadabra3(PretrainedModel):
+    """
+    A fourth attempt at self-play on gens1-4 & 9 that was featured in the PokéAgent Challenge.
+
+    This policy played under the username "PAC-MM-Wildcard" or "PAC-MM-Mystery" during the qualification period.
+    If it had been pubilcly available, it would have qualified as the #2 seed in Gen1OU and #3 seed in Gen9OU.
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="kadabra3",
+            model_gin_config="alakazam2.gin",
+            train_gin_config="alakazam3.gin",
+            default_checkpoint=20,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("PAC-OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="pokeagent",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+
+@pretrained_model()
+class Kadabra4(PretrainedModel):
+    """
+    A fifth attempt at self-play on gens1-4 & 9 that was featured in the PokéAgent Challenge.
+
+    The final PokéAgent Challenge era dataset was 11.6M self-play battles + parsed-replays-v4.
+
+    This policy played under the username "PAC-MM-Mystery" or "PAC-MM-Wildcard" during the qualification period.
+    If it had been pubilcally available, it would have qualified as the #1 seed in Gen1OU and #2 seed in Gen9OU
+    (behind FoulPlay).
+
+    Most of the performance gains from Kadabra2 --> Kadabra4 are seen in diverse team evaluations (i.e., "modern_replays_v2" TeamSet).
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="kadabra4",
+            model_gin_config="alakazam4.gin",
+            train_gin_config="alakazam3.gin",
+            default_checkpoint=50,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("PAC-OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="pokeagent",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+
+@pretrained_model()
+class Alakazam(PretrainedModel):
+    """
+    This policy patches a bug (https://github.com/UT-Austin-RPL/metamon/pull/54) that impacted all PokéAgnet Challenge training runs.
+
+    We finetuned Kadabra4 on a new version of the self-play dataset that was patched to include tera types.
+    The "Kadabra*" policies now intentionally *preserve* the bug for backwards compatibility, so this policy gains a slight
+    edge when evaluated today (after the bug was patched).
+
+    This policy never appeared on the PokéAgent Challenge ladder but is called "Alakazam" because it is the last model
+    of this size (~50M params) to be trained on the PokéAgent Challenge dataset.
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="alakazam",
+            model_gin_config="alakazam4.gin",
+            train_gin_config="alakazam3.gin",
+            default_checkpoint=8,
             action_space=get_action_space("DefaultActionSpace"),
             observation_space=get_observation_space("OpponentMoveObservationSpace"),
             reward_function=get_reward_function("AggressiveShapedReward"),
             tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
         )
 
-    @property
-    def base_config(self):
-        return {"MetamonPerceiverTstepEncoder.tokenizer": self.tokenizer}
 
+@pretrained_model()
+class Superkazam(PretrainedModel):
+    """
+    Revisits the PokéAgent Challenge dataset at a model size closer to the paper's SyntheticRLV2 configuration (~140M params).
+
+    - PokéAgent Challenge self-play dataset (11.6M battles)
+    - (Human) parsed-replays-v4 (4M battles)
+
+    Evals against the most important (modern) baselines are available here: https://docs.google.com/spreadsheets/d/1lU8tQ0tnnupY28kIyK6FVtvPmxLSVT9_slLShOhRsqg/edit?usp=sharing
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="superkazam",
+            model_gin_config="superkazam.gin",
+            train_gin_config="alakazam3.gin",
+            default_checkpoint=50,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+
+@pretrained_model()
+class Kakuna(PretrainedModel):
+    """
+    The current best Metamon policy.
+
+    Superkazam, finetuned on a dataset of self-play battles collected at increased temperature for exploration and value learning (+7.8M battles).
+
+    After > 700 total games played over a span of a month, we estimate GXEs vs. humans (with "competitive" TeamSet) of:
+
+    gen1ou: ~82%
+    gen2ou: ~70%
+    gen3ou: ~63%
+    gen4ou: ~64%
+    gen9ou: ~71%
+
+    Evals against the most important (modern) metamon baselines are available here: https://docs.google.com/spreadsheets/d/1lU8tQ0tnnupY28kIyK6FVtvPmxLSVT9_slLShOhRsqg/edit?usp=sharing
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="kakuna",
+            model_gin_config="superkazam.gin",
+            train_gin_config="kakuna.gin",
+            default_checkpoint=34,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
 
 @pretrained_model()
 class SleepLoop6CriticOnly_Epoch0(LocalPretrainedModel):

@@ -184,6 +184,11 @@ class MetamonBackendBattle(pe.AbstractBattle):
                 metamon_p.had_ability = poke["baseAbility"]
             metamon_p.active_ability = poke["baseAbility"]
 
+        # get tera type, matching bug fix in poke-env update_from_request
+        tera_type = poke.get("teraType", None)
+        if tera_type is not None and metamon_p.tera_type is None:
+            metamon_p.tera_type = tera_type
+
         # update item from request
         if poke["item"] == "":
             if metamon_p.had_item is None:
@@ -698,6 +703,54 @@ class MetamonBackendBattle(pe.AbstractBattle):
     def opponent_can_dynamax(self) -> bool:
         return self._opponent_can_dynamax
 
-    # @opponent_can_dynamax.setter
-    # def opponent_can_dynamax(self, value: bool) -> Any:
-    #     self._opponent_can_dynamax = value
+
+class PokeAgentBackendBattle(MetamonBackendBattle):
+    """
+    Battle that will attempt to maintain backwards compatibility with the MetamonBackend
+    that was current during the PokéAgent Challenge, so that all the organizer baselines
+    and datasets (about to be released) can maintain their performance. If any major bugs are
+    found in MetamonBackendBattle or MetamonPlayer, we will unfix them here :)
+    """
+
+    def _update_pokemon_from_side_request(
+        self, poke: Dict[str, Any], metamon_p: Pokemon
+    ):
+        """
+        Reveal information about (our team's) pokemon from a "side" request
+        """
+
+        # update condition from request
+        current_hp, max_hp, status = self._parse_condition_from_side_request(
+            poke["condition"]
+        )
+        if status is not None:
+            metamon_p.status = status
+        if current_hp is not None:
+            metamon_p.current_hp = current_hp
+        if max_hp is not None:
+            metamon_p.max_hp = max_hp
+
+        # update ability from request
+        if poke["baseAbility"] == "noability":
+            if metamon_p.had_ability is None:
+                metamon_p.had_ability = Nothing.NO_ABILITY
+            metamon_p.active_ability = Nothing.NO_ABILITY
+        else:
+            if metamon_p.had_ability is None:
+                metamon_p.had_ability = poke["baseAbility"]
+            metamon_p.active_ability = poke["baseAbility"]
+
+        # update item from request
+        if poke["item"] == "":
+            if metamon_p.had_item is None:
+                metamon_p.had_item = Nothing.NO_ITEM
+            metamon_p.active_item = Nothing.NO_ITEM
+        else:
+            if metamon_p.had_item is None:
+                metamon_p.had_item = poke["item"]
+            metamon_p.active_item = poke["item"]
+
+        # discover initial moveset from request
+        if not metamon_p.had_moves:
+            for move in poke["moves"]:
+                metamon_p.reveal_move(Move(move, gen=self._gen))

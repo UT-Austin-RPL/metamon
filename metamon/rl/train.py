@@ -15,7 +15,7 @@ from metamon.interface import (
     RewardFunction,
 )
 from metamon.tokenizer import get_tokenizer
-from metamon.data import ParsedReplayDataset
+from metamon.data import ParsedReplayDataset, SelfPlayDataset, MetamonDataset
 from metamon.rl.metamon_to_amago import (
     MetamonAMAGOExperiment,
     MetamonAMAGODataset,
@@ -128,16 +128,41 @@ def add_cli(parser):
         help="Path to the parsed replay directory. Defaults to the official huggingface version.",
     )
     parser.add_argument(
+        "--replay_weight",
+        type=float,
+        default=1.0,
+        help="Sampling weight for the human parsed replay dataset (metamon-parsed-replays). Will be renormalized with other weights.",
+    )
+    parser.add_argument(
+        "--self_play_subsets",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Official self-play dataset (metamon-parsed-pile) subsets to include (e.g., 'pac-base', 'pac-exploratory'). If not provided, self-play data is not used.",
+    )
+    parser.add_argument(
+        "--self_play_weights",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Sampling weights for each self-play subset. Must match length of --self_play_subsets.",
+    )
+    parser.add_argument(
         "--custom_replay_dir",
         type=str,
         default=None,
-        help="Path to an optional second parsed replay dataset (e.g., self-play data you've collected).",
+        help="Path to an optional custom parsed replay dataset (e.g., additional self-play data you've collected).",
     )
     parser.add_argument(
-        "--custom_replay_sample_weight",
+        "--custom_replay_weight",
         type=float,
         default=0.25,
-        help="[0, 1] portion of each batch to sample from the custom dataset (if provided).",
+        help="Sampling weight for the custom dataset (if provided). Will be renormalized with other weights.",
+    )
+    parser.add_argument(
+        "--use_cached_filenames",
+        action="store_true",
+        help="Use cached filename index for faster startup when reusing an identical training set.",
     )
     parser.add_argument(
         "--async_env_mp_context",
@@ -150,7 +175,7 @@ def add_cli(parser):
         type=int,
         nargs="*",
         default=[1, 2, 3, 4, 9],
-        help="Generations (of OU) to play against heuristics between training epochs. Win rates usually saturate at 90\%+ quickly, so this is mostly a sanity-check. Reduce gens to save time on launch! Use `--eval_gens` (no arguments) to disable evaluation.",
+        help="Generations (of OU) to play against heuristics between training epochs. Win rates usually saturate at 90%%+ quickly, so this is mostly a sanity-check. Reduce gens to save time on launch! Use `--eval_gens` (no arguments) to disable evaluation.",
     )
     parser.add_argument(
         "--formats",
@@ -166,46 +191,138 @@ def create_offline_dataset(
     obs_space: TokenizedObservationSpace,
     action_space: ActionSpace,
     reward_function: RewardFunction,
-    parsed_replay_dir: str,
+    parsed_replay_dir: Optional[str] = None,
+    replay_weight: float = 1.0,
+    self_play_subsets: Optional[List[str]] = None,
+    self_play_weights: Optional[List[float]] = None,
     custom_replay_dir: Optional[str] = None,
-    custom_replay_sample_weight: float = 0.25,
+    custom_replay_weight: float = 0.25,
     verbose: bool = True,
     formats: Optional[List[str]] = None,
+    use_cached_filenames: bool = False,
 ) -> amago.loading.RLDataset:
+    """
+    Create a mixed offline RL dataset from multiple sources.
 
+    Args:
+        obs_space: Tokenized observation space
+        action_space: Action space
+        reward_function: Reward function
+        parsed_replay_dir: Path to parsed replays (None = download from HuggingFace)
+        replay_weight: Sampling weight for parsed replays
+        self_play_subsets: List of self-play subsets to include (e.g., ["pac-base", "pac-exploratory"])
+        self_play_weights: Sampling weights for each self-play subset (must match length of self_play_subsets)
+        custom_replay_dir: Path to custom replay directory
+        custom_replay_weight: Sampling weight for custom replays
+        verbose: Print dataset loading progress
+        formats: Battle formats to include
+        use_cached_filenames: Use cached filename index for faster startup
+
+    Returns:
+        AMAGO RLDataset (possibly a MixtureOfDatasets)
+    """
     formats = formats or metamon.SUPPORTED_BATTLE_FORMATS
+
+    # Validate self-play weights
+    if self_play_subsets is not None:
+        if self_play_weights is None:
+            # Default to equal weights
+            self_play_weights = [1.0] * len(self_play_subsets)
+        elif len(self_play_weights) != len(self_play_subsets):
+            raise ValueError(
+                f"--self_play_weights ({len(self_play_weights)}) must match "
+                f"--self_play_subsets ({len(self_play_subsets)})"
+            )
+
+    # Common dataset kwargs
     dset_kwargs = {
         "observation_space": obs_space,
         "action_space": action_space,
         "reward_function": reward_function,
-        # amago will handle sequence lengths on its side
-        "max_seq_len": None,
+        "max_seq_len": None,  # amago handles sequence lengths
         "formats": formats,
-        "verbose": verbose,  # False to hide dset setup progress bar
+        "verbose": verbose,
+        "use_cached_filenames": use_cached_filenames,
     }
-    parsed_replays_amago = MetamonAMAGODataset(
-        dset_name="Metamon Parsed Replays",
-        parsed_replay_dset=ParsedReplayDataset(
-            dset_root=parsed_replay_dir, **dset_kwargs
-        ),
-    )
-    if custom_replay_dir is not None:
-        custom_dset_amago = MetamonAMAGODataset(
-            dset_name="Custom Parsed Replays",
-            parsed_replay_dset=ParsedReplayDataset(
-                dset_root=custom_replay_dir, **dset_kwargs
-            ),
+
+    # Collect all datasets and weights
+    datasets = []
+    weights = []
+    dataset_info = []  # For pretty printing
+
+    # 1. Parsed Replays (human battles)
+    if replay_weight > 0:
+        parsed_dset = ParsedReplayDataset(dset_root=parsed_replay_dir, **dset_kwargs)
+        datasets.append(
+            MetamonAMAGODataset(
+                dset_name="Parsed Replays (Human)",
+                parsed_replay_dset=parsed_dset,
+            )
         )
-        amago_dataset = amago.loading.MixtureOfDatasets(
-            datasets=[parsed_replays_amago, custom_dset_amago],
-            sampling_weights=[
-                1 - custom_replay_sample_weight,
-                custom_replay_sample_weight,
-            ],
+        weights.append(replay_weight)
+        dataset_info.append(("Parsed Replays (Human)", len(parsed_dset), replay_weight))
+
+    # 2. Self-Play Datasets
+    if self_play_subsets is not None:
+        for subset, weight in zip(self_play_subsets, self_play_weights):
+            if weight > 0:
+                selfplay_dset = SelfPlayDataset(subset=subset, **dset_kwargs)
+                datasets.append(
+                    MetamonAMAGODataset(
+                        dset_name=f"Self-Play ({subset})",
+                        parsed_replay_dset=selfplay_dset,
+                    )
+                )
+                weights.append(weight)
+                dataset_info.append(
+                    (f"Self-Play ({subset})", len(selfplay_dset), weight)
+                )
+
+    # 3. Custom Replay Directory
+    if custom_replay_dir is not None and custom_replay_weight > 0:
+        custom_dset = MetamonDataset(dset_root=custom_replay_dir, **dset_kwargs)
+        datasets.append(
+            MetamonAMAGODataset(
+                dset_name="Custom Replays",
+                parsed_replay_dset=custom_dset,
+            )
         )
+        weights.append(custom_replay_weight)
+        dataset_info.append(("Custom Replays", len(custom_dset), custom_replay_weight))
+
+    if not datasets:
+        raise ValueError(
+            "No datasets configured! Provide at least one of: parsed replays, self-play subsets, or custom replay dir."
+        )
+
+    # Renormalize weights to sum to 1
+    total_weight = sum(weights)
+    normalized_weights = [w / total_weight for w in weights]
+
+    # Print pretty summary
+    print("\n" + "=" * 70)
+    print("TRAINING DATASET SUMMARY")
+    print("=" * 70)
+    print(f"{'Dataset':<35} {'Files':>12} {'Weight':>10} {'Norm Weight':>12}")
+    print("-" * 70)
+    total_files = 0
+    for (name, num_files, raw_weight), norm_weight in zip(
+        dataset_info, normalized_weights
+    ):
+        total_files += num_files
+        print(f"{name:<35} {num_files:>12,} {raw_weight:>10.2f} {norm_weight:>11.1%}")
+    print("-" * 70)
+    print(f"{'TOTAL':<35} {total_files:>12,} {total_weight:>10.2f} {'100.0%':>12}")
+    print("=" * 70 + "\n")
+
+    # Create final dataset
+    if len(datasets) == 1:
+        return datasets[0]
     else:
-        amago_dataset = parsed_replays_amago
-    return amago_dataset
+        return amago.loading.MixtureOfDatasets(
+            datasets=datasets,
+            sampling_weights=normalized_weights,
+        )
 
 
 def create_offline_rl_trainer(
@@ -330,6 +447,12 @@ if __name__ == "__main__":
     add_cli(parser)
     args = parser.parse_args()
 
+    metamon.print_banner()
+    print(
+        f"  Run: {args.run_name}  |  Model: {args.model_gin_config}  |  Training: {args.train_gin_config}"
+    )
+    print()
+
     # agent input/output/rewards
     obs_space = TokenizedObservationSpace(
         get_observation_space(args.obs_space), get_tokenizer(args.tokenizer)
@@ -343,9 +466,13 @@ if __name__ == "__main__":
         action_space=action_space,
         reward_function=reward_function,
         parsed_replay_dir=args.parsed_replay_dir,
+        replay_weight=args.replay_weight,
+        self_play_subsets=args.self_play_subsets,
+        self_play_weights=args.self_play_weights,
         custom_replay_dir=args.custom_replay_dir,
-        custom_replay_sample_weight=args.custom_replay_sample_weight,
+        custom_replay_weight=args.custom_replay_weight,
         formats=args.formats,
+        use_cached_filenames=args.use_cached_filenames,
     )
 
     # quick-setup for an offline RL experiment

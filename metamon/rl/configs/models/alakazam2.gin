@@ -1,0 +1,56 @@
+import amago.nets.actor_critic
+import amago.nets.traj_encoders
+import amago.nets.transformer
+import amago.agent
+import amago.experiment
+
+MetamonAMAGOExperiment.agent_type = @agent.MultiTaskAgent
+MetamonAMAGOExperiment.tstep_encoder_type = @MetamonPerceiverTstepEncoder
+MetamonAMAGOExperiment.traj_encoder_type = @traj_encoders.TformerTrajEncoder
+MetamonAMAGOExperiment.max_seq_len = 200
+
+# actor
+MultiTaskAgent.actor_type = @MetamonMaskedResidualActor
+MultiTaskAgent.pass_obs_keys_to_actor = ["illegal_actions"]
+MetamonMaskedResidualActor.activation = "leaky_relu"
+MetamonMaskedResidualActor.feature_dim = 400
+MetamonMaskedResidualActor.residual_ff_dim = 512
+MetamonMaskedResidualActor.residual_blocks = 2
+
+# critic
+MultiTaskAgent.critic_type = @actor_critic.NCriticsTwoHot
+actor_critic.NCriticsTwoHot.activation = "leaky_relu"
+actor_critic.NCriticsTwoHot.n_layers = 2
+actor_critic.NCriticsTwoHot.d_hidden = 512
+MultiTaskAgent.popart = True
+MultiTaskAgent.num_critics = 6
+actor_critic.NCriticsTwoHot.output_bins = 96
+actor_critic.NCriticsTwoHot.min_return = -100
+actor_critic.NCriticsTwoHot.max_return = 2100
+actor_critic.NCriticsTwoHot.use_symlog = False
+
+
+# Perceiver variant (optional: switch tstep_encoder_type below)
+MetamonPerceiverTstepEncoder.extra_emb_dim = 18
+MetamonPerceiverTstepEncoder.d_model = 108
+MetamonPerceiverTstepEncoder.n_layers = 5
+MetamonPerceiverTstepEncoder.n_heads = 6
+MetamonPerceiverTstepEncoder.latent_tokens = 8
+MetamonPerceiverTstepEncoder.numerical_tokens = 6
+MetamonPerceiverTstepEncoder.token_mask_aug = False
+MetamonPerceiverTstepEncoder.dropout = .05
+MetamonPerceiverTstepEncoder.max_tokens_per_turn = 128
+
+
+# amago transformer
+traj_encoders.TformerTrajEncoder.n_layers = 6
+traj_encoders.TformerTrajEncoder.n_heads = 12
+traj_encoders.TformerTrajEncoder.d_ff = 3072
+traj_encoders.TformerTrajEncoder.d_model = 768
+traj_encoders.TformerTrajEncoder.normformer_norms = True
+traj_encoders.TformerTrajEncoder.sigma_reparam = True
+traj_encoders.TformerTrajEncoder.norm = "layer"
+traj_encoders.TformerTrajEncoder.head_scaling = True
+traj_encoders.TformerTrajEncoder.activation = "leaky_relu"
+traj_encoders.TformerTrajEncoder.attention_type = @transformer.FlashAttention
+transformer.FlashAttention.window_size = (96, 0)

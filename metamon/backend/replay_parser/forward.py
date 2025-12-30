@@ -89,6 +89,7 @@ class SimProtocol:
         "-supereffective",
         "-singlemove",
         "seed",
+        "sentchoice",
         "teampreview",
         "title",
         "tier",

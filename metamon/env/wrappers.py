@@ -206,6 +206,9 @@ class PokeEnvWrapper(OpenAIGymEnv):
             Player Username, Team File, Opponent Username, Result, Turn Count, Battle ID.
         battle_backend: The Showdown state parsing backend. Options are 'poke-env' or
             'metamon'.
+        team_preview_model: Optional TeamPreviewModel to use for predicting leads during
+            team preview. Only works with battle_backend='metamon'. If None, uses random
+            team preview selection.
     """
 
     _INIT_RETRIES = 250
@@ -229,7 +232,8 @@ class PokeEnvWrapper(OpenAIGymEnv):
         turn_limit: int = 1000,
         save_trajectories_to: Optional[str] = None,
         save_team_results_to: Optional[str] = None,
-        battle_backend: str = "poke-env",
+        battle_backend: str = "metamon",
+        team_preview_model=None,
     ):
         opponent_team_set = opponent_team_set or copy.deepcopy(player_team_set)
         random_username = (
@@ -289,11 +293,19 @@ class PokeEnvWrapper(OpenAIGymEnv):
 
         if battle_backend == "poke-env":
             player_class = Player
+            # Warn if team preview model is provided with poke-env backend
+            if team_preview_model is not None:
+                warnings.warn(
+                    "team_preview_model is only supported with battle_backend='metamon'. "
+                    "The model will be ignored with battle_backend='poke-env'."
+                )
         elif battle_backend == "metamon":
             player_class = MetamonPlayer
+        elif battle_backend == "pokeagent":
+            player_class = PokeAgentPlayer
         else:
             raise ValueError(
-                f"Invalid battle backend: {battle_backend}. Options are 'poke-env' or 'metamon'."
+                f"Invalid battle backend: {battle_backend}. Options are 'poke-env', 'metamon', or 'pokeagent'."
             )
 
         super().__init__(
@@ -306,6 +318,10 @@ class PokeEnvWrapper(OpenAIGymEnv):
             start_timer_on_battle_start=start_timer_on_battle_start,
             start_challenging=start_challenging,
         )
+
+        # Set team preview model on the agent if provided and using metamon backend
+        if team_preview_model is not None and battle_backend == "metamon":
+            self.agent.team_preview_model = team_preview_model
 
     @property
     def server_configuration(self):
@@ -463,6 +479,7 @@ class BattleAgainstBaseline(PokeEnvWrapper):
         save_trajectories_to: Optional[str] = None,
         save_team_results_to: Optional[str] = None,
         battle_backend: str = "poke-env",
+        team_preview_model=None,
     ):
         super().__init__(
             battle_format=battle_format,
@@ -472,6 +489,7 @@ class BattleAgainstBaseline(PokeEnvWrapper):
             player_team_set=team_set,
             opponent_team_set=team_set,
             opponent_type=opponent_type,
+            team_preview_model=team_preview_model,
             turn_limit=turn_limit,
             save_trajectories_to=save_trajectories_to,
             save_team_results_to=save_team_results_to,
@@ -510,6 +528,7 @@ class QueueOnLocalLadder(PokeEnvWrapper):
         player_password: Optional[str] = None,
         battle_backend: str = "poke-env",
         print_battle_bar: bool = True,
+        team_preview_model=None,
     ):
         super().__init__(
             battle_format=battle_format,
@@ -527,6 +546,7 @@ class QueueOnLocalLadder(PokeEnvWrapper):
             save_trajectories_to=save_trajectories_to,
             save_team_results_to=save_team_results_to,
             battle_backend=battle_backend,
+            team_preview_model=team_preview_model,
         )
         print(f"Laddering for {num_battles} battles")
         self.print_battle_bar = print_battle_bar
@@ -569,6 +589,11 @@ class PokeAgentLadder(QueueOnLocalLadder):
     # to expand to active players... depending on who is online and what your Elo is.
     _INIT_RETRIES = 3000
 
+    # increases time to launch opponent envs before ladder loop times out ("Agent is not challenging").
+    # may need to be especially long for PokéAgent because it takes some time for your Elo search radius
+    # to expand to active players... depending on who is online and what your Elo is.
+    _INIT_RETRIES = 3000
+
     @property
     def server_configuration(self):
         return PokeAgentServerConfiguration
@@ -577,7 +602,4 @@ class PokeAgentLadder(QueueOnLocalLadder):
         assert (
             self.player_username is not None and self.player_password is not None
         ), "Username and password are required for PokéAgent laddering"
-        assert self.player_username.startswith(
-            "PAC"
-        ), "Bot usernames should start with 'PAC'"
         super().start_laddering(n_challenges)

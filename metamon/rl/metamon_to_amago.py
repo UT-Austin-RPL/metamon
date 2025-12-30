@@ -240,6 +240,59 @@ class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
 
 
 @gin.configurable
+class MetamonDiscrete(amago.nets.policy_dists.Discrete):
+    """Discrete policy with temperature-based sampling.
+
+    Extends AMAGO's Discrete PolicyOutput to add temperature scaling to the logits.
+    High-temperature sampling is a better alternative to epsilon-greedy exploration
+    for self-play in metamon due to illegal action masking.
+
+    Args:
+        d_action: Dimension of the action space.
+        temperature: Temperature for scaling logits. Default is 1.0 (no scaling).
+        clip_prob_low: Clips action probabilities to this value before
+            renormalizing. Default is 0.001.
+        clip_prob_high: Clips action probabilities to this value before
+            renormalizing. Default is 0.99.
+    """
+
+    def __init__(
+        self,
+        d_action: int,
+        clip_prob_low: float = 0.001,
+        clip_prob_high: float = 0.99,
+        temperature: float = 1.0,
+    ):
+        super().__init__(
+            d_action=d_action,
+            clip_prob_low=clip_prob_low,
+            clip_prob_high=clip_prob_high,
+        )
+        self.temperature = temperature
+
+    def forward(
+        self, vec: torch.Tensor, log_dict: Optional[dict] = None
+    ) -> amago.nets.policy_dists._Categorical:
+        scaled_logits = vec / self.temperature
+
+        dist = amago.nets.policy_dists._Categorical(logits=scaled_logits)
+        probs = dist.probs
+        clip_probs = probs.clamp(self.clip_prob_low, self.clip_prob_high)
+        safe_probs = clip_probs / clip_probs.sum(-1, keepdims=True).detach()
+        safe_dist = amago.nets.policy_dists._Categorical(probs=safe_probs)
+
+        if log_dict is not None:
+            from amago.nets.utils import add_activation_log
+
+            add_activation_log("MetamonDiscrete-probs", probs, log_dict)
+            add_activation_log(
+                "MetamonDiscrete-temperature", torch.tensor(self.temperature), log_dict
+            )
+
+        return safe_dist
+
+
+@gin.configurable
 class MetamonMaskedActor(amago.nets.actor_critic.Actor):
     """
     Default AMAGO Actor with optional logit masking of illegal actions.
@@ -273,6 +326,7 @@ class MetamonMaskedActor(amago.nets.actor_critic.Actor):
             activation=activation,
             dropout_p=dropout_p,
             continuous_dist_type=continuous_dist_type,
+            discrete_dist_type=MetamonDiscrete,
         )
         self.mask_illegal_actions = mask_illegal_actions
 
@@ -335,6 +389,7 @@ class MetamonMaskedResidualActor(amago.nets.actor_critic.ResidualActor):
             normalization=normalization,
             dropout_p=dropout_p,
             continuous_dist_type=continuous_dist_type,
+            discrete_dist_type=MetamonDiscrete,
         )
         self.mask_illegal_actions = mask_illegal_actions
 
@@ -385,7 +440,7 @@ class PSLadderAMAGOWrapper(MetamonAMAGOWrapper):
         return f"psladder_{self.env.env.username}"
 
 
-def unknown_token_mask(tokens, skip_prob: float = 0.2, batch_max_prob: float = 0.33):
+def unknown_token_mask(tokens, skip_prob: float = 0.5, batch_max_prob: float = 0.2):
     """Randomly set entries in the text component of the observation space to UNKNOWN_TOKEN.
 
     Args:
@@ -560,6 +615,9 @@ class MetamonAMAGODataset(RLDataset):
 
     def sample_random_trajectory(self) -> RLData:
         data = self.parsed_replay_dset.random_sample()
+        return self._process_data(data)
+
+    def _process_data(self, data):
         obs, action_infos, rewards, dones = data
         # amago expects discrete actions to be one-hot encoded
         num_actions = self.parsed_replay_dset.action_space.gym_space.n

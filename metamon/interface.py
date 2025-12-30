@@ -1,5 +1,6 @@
 import copy
 import re
+import warnings
 from dataclasses import dataclass, asdict
 from typing import Optional, List, Any, Set
 from abc import ABC, abstractmethod
@@ -1360,6 +1361,57 @@ class OpponentMoveObservationSpace(TeamPreviewObservationSpace):
         for i, move in enumerate(consistent_move_order(pokemon.moves)[:4]):
             moves[i] = clean_name(move.name)
         return base + moves
+
+
+@register_observation_space()
+class PatchPokeAgentTeraBug(ObservationSpace):
+    """
+    Intentionally reintroduces a bug in the "pokeagent" backend that has been fixed.
+    This allows models that should use the "pokeagent" backend to still make sound decisions
+    when using the "metamon" backend by setting all tera_type to "notype".
+    """
+
+    def __init__(self, base_obs_space: ObservationSpace):
+        self.base_obs_space = base_obs_space
+        super().__init__()
+
+    def reset(self):
+        self.base_obs_space.reset()
+
+    @property
+    def gym_space(self):
+        return self.base_obs_space.gym_space
+
+    @property
+    def tokenizable(self):
+        return self.base_obs_space.tokenizable
+
+    def state_to_obs(self, state: UniversalState):
+        patched_state = copy.deepcopy(state)
+        # patch player pokemon tera types to "notype"
+        patched_state.player_active_pokemon.tera_type = "notype"
+        for pokemon in patched_state.available_switches:
+            pokemon.tera_type = "notype"
+        return self.base_obs_space.state_to_obs(patched_state)
+
+
+# Register patched versions of observation spaces for PokeAgent Challenge compatibility
+@register_observation_space("PAC-ExpandedObservationSpace")
+class PACExpandedObservationSpace(PatchPokeAgentTeraBug):
+    def __init__(self):
+        super().__init__(ExpandedObservationSpace())
+
+
+@register_observation_space("PAC-TeamPreviewObservationSpace")
+class PACTeamPreviewObservationSpace(PatchPokeAgentTeraBug):
+    def __init__(self):
+        super().__init__(TeamPreviewObservationSpace())
+
+
+@register_observation_space("PAC-OpponentMoveObservationSpace")
+class PACOpponentMoveObservationSpace(PatchPokeAgentTeraBug):
+    def __init__(self):
+        super().__init__(OpponentMoveObservationSpace())
 
 
 class TokenizedObservationSpace(ObservationSpace):

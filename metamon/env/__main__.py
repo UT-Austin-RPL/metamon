@@ -26,7 +26,7 @@ if __name__ == "__main__":
         "--battle_backend",
         type=str,
         default="poke-env",
-        choices=["poke-env", "metamon"],
+        choices=["poke-env", "metamon", "pokeagent"],
     )
     args = parser.parse_args()
 
@@ -34,10 +34,7 @@ if __name__ == "__main__":
         battle_format=args.battle_format,
         team_set=get_metamon_teams(args.battle_format, args.team_set),
         opponent_type=GymLeader,
-        observation_space=TokenizedObservationSpace(
-            get_observation_space(args.observation_space),
-            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
-        ),
+        observation_space=get_observation_space(args.observation_space),
         action_space=DefaultActionSpace(),
         reward_function=DefaultShapedReward(),
         battle_backend=args.battle_backend,
