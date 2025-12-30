@@ -1,0 +1,13 @@
+# Controller v1 + EMA (Standard Decay)
+#
+# Combines tight KL control (controller_v1) with exponential moving average policy.
+# Used for EMA ablation experiments.
+
+include 'metamon/rl/configs/training/selfplay_controller_v1.gin'
+
+# Enable EMA with standard decay
+MetamonAMAGOExperiment.use_ema = True
+MetamonAMAGOExperiment.ema_decay = 0.999           # Standard: ~1000 step window
+MetamonAMAGOExperiment.ema_update_interval = 1     # Update every gradient step
+MetamonAMAGOExperiment.ema_warmup_steps = 0        # Start immediately
+MetamonAMAGOExperiment.ema_eval_only = True        # Training: current, Eval: EMA

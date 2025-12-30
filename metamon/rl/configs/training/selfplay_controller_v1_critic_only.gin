@@ -1,0 +1,132 @@
+# Critic-Only Warmup for Selfplay Controller V1 (selfplay_controller_v1_critic_only.gin)
+#
+# Based on: selfplay_controller_v1.gin
+#
+# Purpose:
+#   Freeze the actor and ONLY train the critic for 2 epochs to stabilize on new
+#   self-play data before resuming full actor-critic updates.
+#
+# Key differences from selfplay_controller_v1.gin:
+#   - Actor frozen: online_coeff = 0.0, offline_coeff = 0.0
+#   - Critic still active: critic_loss_weight = 1.5
+#   - KL controller disabled (no actor updates = no KL divergence to track)
+#   - Entropy regularization disabled (no actor updates)
+#
+# Recommended workflow:
+#   1. Train with this config for 2 epochs (critic warmup)
+#   2. Resume training with selfplay_controller_v1.gin for remaining epochs
+#
+# Philosophy:
+#   When the policy encounters new self-play data, the critic may be miscalibrated
+#   on the new trajectory distribution. By freezing the actor and training only the
+#   critic, we let the value function adapt to the new data regime WITHOUT the
+#   policy drifting further. This prevents the policy-critic feedback loop from
+#   causing instability.
+#
+# Expected behavior:
+#   - Actor outputs remain frozen (identical to checkpoint)
+#   - Critic loss should decrease as it adapts to new data
+#   - No policy degradation (policy isn't changing)
+#   - After 2 epochs, resume with selfplay_controller_v1.gin to fine-tune actor
+
+import amago.agent
+
+# =========================
+# Reward scaling (unchanged)
+# =========================
+agent.Agent.reward_multiplier = 0.05
+agent.MultiTaskAgent.reward_multiplier = 0.05
+
+agent.Agent.tau = .004
+agent.MultiTaskAgent.tau = .004
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 3
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 3
+
+# =========================
+# Data mix: ACTOR FROZEN (critic-only training)
+# =========================
+# Use negligible offline_coeff to keep actor_loss as tensor (prevents shape error)
+# while having virtually zero gradient impact on the actor
+agent.Agent.online_coeff  = 0.0      # No DPG - actor frozen
+agent.MultiTaskAgent.online_coeff  = 0.0
+
+agent.Agent.offline_coeff = 0.0001   # Negligible BC - effectively frozen but loss computed as tensor
+agent.MultiTaskAgent.offline_coeff = 0.0001
+
+# Keep filter func defined (unused but prevents errors)
+agent.Agent.fbc_filter_func = @agent.binary_filter
+agent.MultiTaskAgent.fbc_filter_func = @agent.binary_filter
+
+# =========================
+# Optimizer (unchanged from base config)
+# =========================
+MetamonAMAGOExperiment.l2_coeff = 5e-5
+
+# Same LR schedule as selfplay_controller_v1
+MetamonAMAGOExperiment.learning_rate = 1e-6
+MetamonAMAGOExperiment.lr_warmup_steps = 10000
+MetamonAMAGOExperiment.max_lr = 5e-6
+MetamonAMAGOExperiment.min_lr = 1e-6
+
+MetamonAMAGOExperiment.grad_clip = 0.3
+
+# Critic learns selfplay returns (ACTIVE - this is the only training signal)
+MetamonAMAGOExperiment.critic_loss_weight = 1.5
+
+# =========================
+# Dynamic Damping (KL): DISABLED (no actor updates)
+# =========================
+# Since the actor is frozen, there's no KL divergence to track or control.
+# Disable the controller entirely.
+MetamonAMAGOExperiment.use_dynamic_damping = False
+
+# Keep parameters defined to avoid errors, but they won't be used
+MetamonAMAGOExperiment.target_kl_per_step = 0.008
+MetamonAMAGOExperiment.kl_tolerance       = 1.1
+
+MetamonAMAGOExperiment.kl_coef_init = 1.0
+MetamonAMAGOExperiment.kl_coef_max  = 1.5
+
+MetamonAMAGOExperiment.dd_adapt_interval   = 10
+
+MetamonAMAGOExperiment.kl_coef_growth_factor = 1.8
+MetamonAMAGOExperiment.lr_shrink_factor      = 0.35
+MetamonAMAGOExperiment.lr_grow_factor        = 1.03
+
+MetamonAMAGOExperiment.kl_coef_decay_factor  = 0.97
+
+MetamonAMAGOExperiment.kl_power_alpha    = 0.0
+MetamonAMAGOExperiment.kl_schedule_steps = 1_000_000
+
+# =========================
+# Entropy schedule: DISABLED (no actor updates)
+# =========================
+# Entropy regularization only affects the actor, so disable it
+MetamonAMAGOExperiment.ent_coef_init = 0.0
+MetamonAMAGOExperiment.ent_coef_min  = 0.0
+
+MetamonAMAGOExperiment.ent_power_alpha = 0.0
+MetamonAMAGOExperiment.ent_schedule_steps = 1_000_000
+
+# =========================
+# Expected behavior during critic-only warmup
+# =========================
+#   - Actor outputs are frozen (no policy updates)
+#   - Critic loss should decrease as it adapts to new self-play data
+#   - No KL divergence or policy entropy changes (actor frozen)
+#   - After 2 epochs, checkpoint should have well-calibrated critic
+#   - Resume with selfplay_controller_v1.gin for actor-critic co-training
+#
+# Success criteria:
+#   - Critic loss converges or decreases steadily
+#   - No policy degradation (policy isn't changing)
+#   - Checkpoint ready for stable actor updates with v1 config
+#
+# If issues persist after resuming with v1:
+#   - Increase critic warmup to 3-4 epochs
+#   - Check if self-play data quality is poor (invalid actions, degenerate episodes)
+#   - Consider reducing online_coeff further in v1 (e.g., 0.03 or 0.0)

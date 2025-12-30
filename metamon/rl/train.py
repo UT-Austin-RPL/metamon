@@ -225,6 +225,7 @@ def create_offline_rl_trainer(
     grad_accum: int = 1,
     steps_per_epoch: int = 25_000,
     batch_size_per_gpu: int = 16,
+    ckpt_interval: int = 2,
     log: bool = False,
     wandb_project: str = WANDB_PROJECT,
     wandb_entity: str = WANDB_ENTITY,
@@ -304,7 +305,7 @@ def create_offline_rl_trainer(
         train_timesteps_per_epoch=0,
         train_batches_per_epoch=steps_per_epoch * grad_accum,
         val_interval=1,
-        ckpt_interval=2,
+        ckpt_interval=ckpt_interval,
         ## optimization ##
         batch_size=batch_size_per_gpu,
         batches_per_update=grad_accum,

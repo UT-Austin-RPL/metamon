@@ -1,0 +1,116 @@
+# EMA (Exponential Moving Average) Configuration for Policy Averaging
+#
+# Implements CFR-inspired policy averaging to prevent strategic frequency drift
+# in hidden-information game training (Gen1 OU).
+#
+# Problem addressed:
+#   - Strategic frequency drift in low-uncertainty regions
+#   - Critic confident but strategically wrong (equilibrium terms)
+#   - Policy updates break mixed strategies even when KL-damped
+#
+# Solution:
+#   - Maintain EMA of policy parameters: ema = decay * ema + (1-decay) * current
+#   - Evaluate EMA policy (stable) instead of current policy (volatile)
+#   - Standard technique in poker/hidden-info RL (DeepNash, CFR variants)
+#
+# Complementary mechanisms:
+#   - EMA: Prevents accumulation of strategic drift (this file)
+#   - Epistemic weighting: Suppresses high-σ critic noise (epistemic_aware_rl.gin)
+#   - Dynamic damping: Limits per-step policy changes (selfplay_damped_aggressive.gin)
+#
+# Expected behavior:
+#   - Epoch-0 win rate: ~40-50% (maintains frozen baseline, no catastrophic collapse)
+#   - Policy stability: EMA policy should drift less than current policy
+#   - KL to frozen: KL(ema || frozen) < KL(current || frozen) over training
+#
+# ============================================================================
+# EMA Configuration Parameters
+# ============================================================================
+
+# Enable EMA policy averaging
+MetamonAMAGOExperiment.use_ema = True
+
+# EMA decay rate (momentum parameter)
+# Higher decay = slower averaging (longer memory window)
+# Lower decay = faster averaging (shorter memory window)
+#
+# Decay     | Effective window | Use case
+# ----------|------------------|------------------------------------------
+# 0.999     | ~1000 steps      | Standard (recommended for most cases)
+# 0.9999    | ~10000 steps     | Very long memory (slow policy evolution)
+# 0.99      | ~100 steps       | Fast adaptation (quick experiments)
+#
+MetamonAMAGOExperiment.ema_decay = 0.999
+
+# Update frequency (update every N gradient steps)
+# 1 = update after every gradient step (recommended)
+# 5-10 = update less frequently (for efficiency if EMA is expensive)
+MetamonAMAGOExperiment.ema_update_interval = 1
+
+# Warmup steps (start EMA after N gradient steps)
+# 0 = start immediately (recommended - EMA is robust to early noise)
+# 5000-10000 = delayed start (if critic needs stabilization first)
+MetamonAMAGOExperiment.ema_warmup_steps = 0
+
+# Use EMA only for evaluation, not training
+# True = training uses current policy, eval uses EMA (RECOMMENDED)
+#        - Training continues to explore/adapt
+#        - Evaluation uses stable averaged policy
+#        - Standard approach in literature
+# False = training uses EMA policy (EXPERIMENTAL)
+#         - More conservative training (less exploration)
+#         - May slow down learning
+#         - Use only if current policy is too unstable
+MetamonAMAGOExperiment.ema_eval_only = True
+
+# ============================================================================
+# Monitoring Metrics
+# ============================================================================
+# Watch these in WandB (if logging enabled):
+#   - EMA logs will show "[EMA] Initialized..." at training start
+#   - "[EMA] Swapped to EMA weights..." during evaluation
+#   - Check {ckpt_dir}/ema_weights/ for EMA checkpoints
+#
+# Diagnostic metrics to add (optional):
+#   - EMA/weight_divergence: L2 distance between EMA and current policy
+#   - EMA/update_count: Number of EMA updates performed
+#   - KL(ema || frozen): Drift from frozen baseline (compare to current policy)
+
+# ============================================================================
+# Usage
+# ============================================================================
+# Include this config in your training config:
+#   include 'metamon/rl/configs/training/ema_config.gin'
+#
+# Or combine with epistemic weighting:
+#   include 'metamon/rl/configs/training/epistemic_ema_rl.gin'
+#
+# To disable EMA (fallback to current behavior):
+#   MetamonAMAGOExperiment.use_ema = False
+
+# ============================================================================
+# Hyperparameter Tuning Guide
+# ============================================================================
+# If EMA policy is too volatile (still seeing drift):
+#   1. Increase ema_decay (0.999 → 0.9999) for longer averaging window
+#   2. Combine with KL-to-frozen constraint (future work)
+#
+# If EMA policy is too conservative (learning too slow):
+#   1. Decrease ema_decay (0.999 → 0.99) for shorter averaging window
+#   2. Consider using ema_eval_only=False (use EMA for training too)
+#
+# If training is slow:
+#   1. Increase ema_update_interval (1 → 5-10) to update less frequently
+#   2. Note: This trades off EMA responsiveness for speed
+
+# ============================================================================
+# Implementation Notes
+# ============================================================================
+# Code location: metamon/rl/metamon_to_amago.py
+# - EMA initialization: start() method
+# - EMA updates: train_step() → _update_ema_weights()
+# - Eval weight swapping: evaluate_val() → _swap_to_ema_for_eval()
+# - Checkpoint saving: train_epoch() → save_ema_checkpoint()
+#
+# EMA checkpoints saved to: {ckpt_dir}/ema_weights/policy_epoch_{N}.pt
+# Regular checkpoints saved to: {ckpt_dir}/policy_weights/policy_epoch_{N}.pt

@@ -1,0 +1,179 @@
+# Combined Configuration: Epistemic Weighting + Policy Averaging (EMA)
+#
+# Addresses both failure modes identified in Gen1 OU training:
+#
+# 1. Epistemic weighting (epistemic_aware_rl.gin):
+#    - Problem: High Q-ensemble uncertainty → noisy advantages → directionally wrong gradients
+#    - Solution: Weight actor gradients by inverse critic uncertainty: w = 1/(1 + β·σ̃)^p
+#    - Target: Suppresses high-σ critic noise
+#
+# 2. Policy averaging (ema_config.gin):
+#    - Problem: Strategic frequency drift in low-uncertainty regions (critic confident but wrong)
+#    - Solution: Maintain EMA of policy params, evaluate EMA instead of current
+#    - Target: Prevents accumulation of strategic drift (CFR-inspired)
+#
+# Why both mechanisms are needed:
+#   - Epistemic weighting: Prevents bad gradients from uncertain regions ✅
+#   - EMA: Prevents accumulation of small bad updates in confident regions ✅
+#   - Expert analysis: "Epistemic weighting alone is insufficient - need equilibrium preservation"
+#
+# Expected behavior (combined):
+#   - Epoch-0 win rate: ~40-50% (no catastrophic collapse)
+#   - Stable learning: No cliff at epoch 1-2
+#   - Frequency preservation: KL(ema || frozen) stays low
+#   - Gradual improvement: Win rate increases smoothly over training
+#
+# ============================================================================
+# Include Base Configurations
+# ============================================================================
+
+# Base config: aggressive reward scale + BC-heavy + dynamic damping
+include 'metamon/rl/configs/training/selfplay_damped_aggressive.gin'
+
+# Epistemic weighting: suppress high-σ gradients
+include 'metamon/rl/configs/training/epistemic_aware_rl.gin'
+
+# EMA: average policy for stability
+include 'metamon/rl/configs/training/ema_config.gin'
+
+# ============================================================================
+# Combined Mechanism Behavior
+# ============================================================================
+# Both mechanisms run simultaneously and independently:
+#
+# During training step:
+#   1. Compute actor/critic losses (per-timestep)
+#   2. Apply epistemic weighting: actor_loss *= confidence(σ)  [BEFORE masked_avg]
+#   3. Compute scalar loss via masked_avg
+#   4. Add KL damping loss (if enabled)
+#   5. Backward pass + optimizer step
+#   6. Update EMA weights: ema = decay * ema + (1-decay) * current
+#
+# During evaluation:
+#   1. Swap to EMA weights
+#   2. Run evaluation battles
+#   3. Restore training weights
+#
+# During checkpointing:
+#   - Save regular checkpoint: {ckpt_dir}/policy_weights/policy_epoch_{N}.pt
+#   - Save EMA checkpoint: {ckpt_dir}/ema_weights/policy_epoch_{N}.pt
+#
+# ============================================================================
+# Key Configuration Summary
+# ============================================================================
+# From selfplay_damped_aggressive.gin:
+#   - reward_multiplier = 0.05 (for +200/0 reward scale)
+#   - offline_coeff = 0.75, online_coeff = 0.25 (BC-heavy)
+#   - target_kl_per_step = 0.015 (loose KL target)
+#   - kl_coef_init = 0.30 (strong initial damping)
+#
+# From epistemic_aware_rl.gin:
+#   - use_epistemic_weighting = True
+#   - epistemic_beta_init = 5.0 → epistemic_beta_final = 1.0
+#   - epistemic_power = 2 (quadratic tail suppression)
+#   - epistemic_anneal_steps = 10000 (~3 epochs)
+#
+# From ema_config.gin:
+#   - use_ema = True
+#   - ema_decay = 0.999 (~1000 step window)
+#   - ema_update_interval = 1 (every gradient step)
+#   - ema_eval_only = True (eval uses EMA, training uses current)
+#
+# ============================================================================
+# Metrics to Monitor
+# ============================================================================
+# Epistemic weighting metrics:
+#   - Epistemic/Mean Confidence: Should start ~0.5-0.7, increase over training
+#   - Epistemic/Confidence (High σ): ~0.3-0.5
+#   - Epistemic/Confidence (Low σ): ~0.7-0.9
+#   - Epistemic/Effective Mass: > 0.5 (learning not suppressed)
+#   - Epistemic/Beta: Decays from 5.0 → 1.0
+#
+# EMA metrics:
+#   - EMA initialization message at training start
+#   - EMA weight swap messages during evaluation
+#   - EMA checkpoints in {ckpt_dir}/ema_weights/
+#
+# Training health:
+#   - KL divergence: < 0.02 (not exploding)
+#   - Entropy: > 1.0 (no collapse)
+#   - Win rate: Should NOT drop to 0% at epoch 0-1
+#
+# ============================================================================
+# Success Criteria
+# ============================================================================
+# Primary metric: Epoch-0 win rate vs RandomBaseline
+#   ❌ Failure: < 30% (catastrophic collapse)
+#   ⚠️ Partial: 30-40% (some collapse)
+#   ✅ Success: > 40% (maintains baseline performance)
+#
+# Secondary metrics:
+#   - No catastrophic cliff at epoch 1-2 (gradual learning curve)
+#   - EMA policy outperforms current policy by epoch 2+
+#   - Policy entropy stable (H > 1.0 throughout)
+#   - KL divergence stable (< 0.02 throughout)
+#
+# ============================================================================
+# Troubleshooting
+# ============================================================================
+# If still seeing epoch-0 collapse (< 40% win rate):
+#   1. Check epistemic weighting is active (Effective Mass logged)
+#   2. Increase epistemic_beta_init (5.0 → 8.0 or 10.0)
+#   3. Increase epistemic_power (2 → 3 for stronger suppression)
+#   4. Verify EMA is enabled (EMA initialization logged)
+#
+# If learning is too slow (epoch 2-3 no improvement):
+#   1. Check Effective Mass > 0.5 (if < 0.5, epistemic too aggressive)
+#   2. Lower epistemic_beta_init (5.0 → 3.0)
+#   3. Lower epistemic_power (2 → 1 for gentler weighting)
+#   4. Increase ema_decay slightly (0.999 → 0.9995)
+#
+# If EMA policy is too volatile:
+#   1. Increase ema_decay (0.999 → 0.9999)
+#   2. Consider adding KL-to-frozen constraint (future work)
+#
+# If EMA policy is too conservative:
+#   1. Decrease ema_decay (0.999 → 0.99)
+#   2. Try ema_eval_only = False (use EMA for training too)
+#
+# ============================================================================
+# Usage
+# ============================================================================
+# Standard Gen1 OU training with combined mechanisms:
+#   python -m metamon.rl.finetune_from_hf \
+#       --run_name "epistemic_ema_gen1ou" \
+#       --finetune_from_model DampedBinarySuperV1_Epoch4 \
+#       --custom_replay_dir ~/metamon/trajectories/super_dataset_loop3/ \
+#       --formats gen1ou \
+#       --train_gin_config epistemic_ema_rl.gin \
+#       --reward_function AggressiveShapedRewardSleep \
+#       --obs_space ExpandedObservationSpace \
+#       --epochs 3 \
+#       --save_dir ~/metamon/models/epistemic_ema_test \
+#       --eval_gens 1 \
+#       --log
+#
+# Evaluate EMA checkpoint vs current checkpoint:
+#   # Current policy (epoch 2)
+#   python -m metamon.rl.evaluate \
+#       --model_name YourModel \
+#       --checkpoint_path ~/metamon/models/epistemic_ema_test/ckpts/policy_weights/policy_epoch_2.pt
+#
+#   # EMA policy (epoch 2)
+#   python -m metamon.rl.evaluate \
+#       --model_name YourModel \
+#       --checkpoint_path ~/metamon/models/epistemic_ema_test/ckpts/ema_weights/policy_epoch_2.pt
+#
+# ============================================================================
+# Next Steps (If Combined Approach Still Insufficient)
+# ============================================================================
+# If epoch-0 collapse persists despite both mechanisms:
+#   1. Add KL-to-frozen policy constraint (next intervention from expert)
+#   2. Add actor update ramp: α(t) = 0 → 1 over first epoch
+#   3. Consider frequency-aware FBC filtering
+#   4. Consider policy mixing: π = (1-α)*π_frozen + α*π_learned
+#
+# Expert recommended priority:
+#   1. KL-to-frozen constraint (most important)
+#   2. Actor update ramp (simpler to implement)
+#   3. Frequency-aware filtering (more advanced)

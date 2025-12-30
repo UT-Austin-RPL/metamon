@@ -1,0 +1,13 @@
+# Controller v1 + EMA (Slow Decay)
+#
+# Slow decay rate for EMA ablation: tests if longer memory window improves performance.
+# Effective window: ~10000 gradient steps
+
+include 'metamon/rl/configs/training/selfplay_controller_v1.gin'
+
+# Enable EMA with slow decay
+MetamonAMAGOExperiment.use_ema = True
+MetamonAMAGOExperiment.ema_decay = 0.9999          # Slow: ~10000 step window
+MetamonAMAGOExperiment.ema_update_interval = 1     # Update every gradient step
+MetamonAMAGOExperiment.ema_warmup_steps = 0        # Start immediately
+MetamonAMAGOExperiment.ema_eval_only = True        # Training: current, Eval: EMA

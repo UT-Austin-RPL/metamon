@@ -60,6 +60,12 @@ def add_cli(parser):
         help="Number of gradient accumulations per update.",
     )
     parser.add_argument(
+        "--ckpt_interval",
+        type=int,
+        default=2,
+        help="Save checkpoints every N epochs. Set to 1 to save all epochs (useful for EMA experiments). Default is 2.",
+    )
+    parser.add_argument(
         "--train_gin_config",
         type=str,
         default=None,
@@ -165,6 +171,7 @@ if __name__ == "__main__":
         steps_per_epoch=args.steps_per_epoch,
         grad_accum=args.grad_accum,
         batch_size_per_gpu=args.batch_size_per_gpu,
+        ckpt_interval=args.ckpt_interval,
         log=args.log,
         wandb_project=WANDB_PROJECT,
         wandb_entity=WANDB_ENTITY,

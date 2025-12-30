@@ -235,6 +235,12 @@ def _get_default_eval(args, base_eval_kwargs):
 
 
 def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
+    # Validate arguments
+    if args.custom_checkpoint_path is None and args.agent is None:
+        raise ValueError("Must provide either --agent or --custom_checkpoint_path")
+    if args.custom_checkpoint_path is not None and args.agent is None:
+        raise ValueError("When using --custom_checkpoint_path, must also specify --agent to indicate which base model config to use")
+
     pretrained_model = get_pretrained_model(args.agent)
     all_results = collections.defaultdict(list)
     for gen in args.gens:
@@ -249,12 +255,18 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
                 battle_format, args.team_set, set_type=team_set_type
             )
             for checkpoint in args.checkpoints:
+                # If custom checkpoint path is provided, pass it as a path instead of checkpoint number
+                if args.custom_checkpoint_path:
+                    checkpoint_to_use = args.custom_checkpoint_path
+                else:
+                    checkpoint_to_use = checkpoint
+
                 eval_kwargs = {
                     "pretrained_model": pretrained_model,
                     "battle_format": battle_format,
                     "team_set": player_team_set,
                     "total_battles": args.total_battles,
-                    "checkpoint": checkpoint,
+                    "checkpoint": checkpoint_to_use,
                     "battle_backend": args.battle_backend,
                     "save_trajectories_to": args.save_trajectories_to,
                     "save_team_results_to": args.save_team_results_to,
@@ -270,9 +282,15 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
 def add_cli(parser):
     parser.add_argument(
         "--agent",
-        required=True,
+        required=False,
         choices=get_pretrained_model_names(),
-        help="Choose a pretrained model to evaluate.",
+        help="Choose a pretrained model to evaluate. Required unless using --custom_checkpoint_path.",
+    )
+    parser.add_argument(
+        "--custom_checkpoint_path",
+        type=str,
+        default=None,
+        help="Path to a custom checkpoint file (.pt). When provided, --agent specifies which base model config to use.",
     )
     parser.add_argument(
         "--eval_type",

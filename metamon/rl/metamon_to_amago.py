@@ -612,24 +612,29 @@ class MetamonMultiTaskAgent(amago.agent.MultiTaskAgent):
     This agent caches trajectory embeddings and observation data during the forward pass,
     allowing dynamic damping to reuse these values instead of recomputing them.
     This provides ~1.6-1.9x speedup in training iteration time.
+
+    Also caches Q-ensemble standard deviation for epistemic uncertainty-aware actor updates.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cached_kl_data = None
+        self.cached_epistemic = None
 
     def forward(self, batch, log_step: bool):
-        """Forward pass with caching for dynamic damping efficiency.
+        """Forward pass with caching for dynamic damping and epistemic weighting.
 
         Args:
             batch: Batch of RL data from amago.loading.Batch
             log_step: Whether this is a logging step
 
-        Computes and caches intermediate values (trajectory embeddings, observations)
-        that can be reused by KL regularization without expensive recomputation.
+        Computes and caches intermediate values (trajectory embeddings, observations,
+        Q-ensemble uncertainty) that can be reused by KL regularization and epistemic
+        weighting without expensive recomputation.
         """
-        # Reset cache
+        # Reset caches
         self.cached_kl_data = None
+        self.cached_epistemic = None
 
         # Compute encodings that will be cached
         self.update_info = {}
@@ -654,11 +659,64 @@ class MetamonMultiTaskAgent(amago.agent.MultiTaskAgent):
             'batch_shape': (s_rep.shape[0], s_rep.shape[1]),  # (B, L) for validation
         }
 
-        # Now call parent's forward, which will use these same values
-        # Note: Parent will recompute o and s_rep, but this is unavoidable without
-        # copying the entire forward() logic. The key win is that _compute_kl_loss()
-        # can reuse our cached values, eliminating its expensive recomputation.
+        # Call parent's forward to compute losses
+        # The parent will compute Q-values, but we need to intercept them for epistemic caching.
+        # Since we can't directly intercept inside parent's forward without full override,
+        # we'll need to recompute Q-values after the fact for epistemic caching.
         critic_loss, actor_loss = super().forward(batch, log_step)
+
+        # Post-hoc Q-ensemble std caching for epistemic weighting
+        # We recompute Q(s,a) briefly to extract ensemble uncertainty
+        # This is a small overhead but necessary without full forward() override
+        if not self.fake_filter or self.online_coeff > 0:
+            try:
+                with torch.no_grad():
+                    # Get actions from batch and expand with gamma dimension (same as parent does)
+                    a = batch.actions  # [B, L, D_action]
+                    B, L = s_rep.shape[0], s_rep.shape[1]
+                    G = len(self.gammas)
+
+                    # Expand actions with gamma dimension
+                    a_buffer = einops.repeat(a, "B L act -> B L G act", G=G)  # [B, L-1, G, D_action]
+                    # Note: batch.actions already has length L-1 (one less than observations)
+                    # because the last observation doesn't have an action
+
+                    # Verify shapes match before calling critic
+                    s_slice = s_rep[:, :-1, ...].detach()  # [B, L-1, D_emb]
+                    a_slice = a_buffer.unsqueeze(0)  # [1, B, L-1, G, D_action] - NO SLICING!
+
+                    # Debug: check shapes
+                    if s_slice.shape[1] != a_slice.shape[2]:
+                        print(f"[WARNING] Shape mismatch in epistemic caching:")
+                        print(f"  s_rep[:, :-1] shape: {s_slice.shape} (expected [B, L-1, D_emb])")
+                        print(f"  a_buffer[:, :-1].unsqueeze(0) shape: {a_slice.shape} (expected [1, B, L-1, G, D_action])")
+                        print(f"  Skipping epistemic caching for this batch")
+                        self.cached_epistemic = None
+                    else:
+                        # Compute Q(s, a) ensemble (same as parent does at line 524-525 in agent.py)
+                        s_a_g = (s_slice, a_slice)
+                        q_s_a_g_ensemble = self.critics(*s_a_g)
+
+                        # Handle distributional critics (C51, etc.) vs standard critics
+                        if hasattr(q_s_a_g_ensemble, 'probs'):
+                            # Distributional critic: convert distribution to scalar values
+                            # q_s_a_g_ensemble is a distribution with shape [1, B, L-1, C, G, Bins]
+                            scalar_q = self.critics.bin_dist_to_raw_vals(q_s_a_g_ensemble)  # [1, B, L-1, C, G, 1]
+                        else:
+                            # Standard critic: already scalar values
+                            scalar_q = q_s_a_g_ensemble  # [1, B, L-1, C, G, 1]
+
+                        # Extract ensemble std across critic dimension (dim=3)
+                        # scalar_q has shape [1, B, L-1, C, G, 1]
+                        q_std = scalar_q.std(dim=3)  # [1, B, L-1, G, 1]
+
+                        self.cached_epistemic = {
+                            'q_std': q_std,  # Already detached via torch.no_grad() context
+                        }
+            except Exception as e:
+                print(f"[WARNING] Failed to cache epistemic uncertainty: {e}")
+                print(f"  Skipping epistemic weighting for this batch")
+                self.cached_epistemic = None
 
         return critic_loss, actor_loss
 
@@ -696,6 +754,19 @@ class MetamonAMAGOExperiment(amago.Experiment):
         min_lr: float = 1e-6,
         max_lr: float = 1e-3,
         dd_adapt_interval: int = 100,  # KL window length for adaptation
+        # Epistemic weighting parameters (gin-configurable)
+        use_epistemic_weighting: bool = False,
+        epistemic_beta_init: float = 5.0,
+        epistemic_beta_final: float = 1.0,
+        epistemic_anneal_steps: int = 10000,
+        epistemic_anneal_power: float = 0.5,
+        epistemic_power: int = 2,
+        # EMA (policy averaging) parameters (gin-configurable)
+        use_ema: bool = False,
+        ema_decay: float = 0.999,
+        ema_update_interval: int = 1,
+        ema_warmup_steps: int = 0,
+        ema_eval_only: bool = True,
         **kwargs,
     ):
         # Debug: Print dynamic damping parameter (commented out to reduce log spam)
@@ -740,6 +811,25 @@ class MetamonAMAGOExperiment(amago.Experiment):
             pass
             # print(f"[DEBUG] use_dynamic_damping=False, skipping dd_config creation", flush=True)
 
+        # Epistemic weighting configuration
+        self.use_epistemic_weighting = use_epistemic_weighting
+        self.epistemic_beta_init = epistemic_beta_init
+        self.epistemic_beta_final = epistemic_beta_final
+        self.epistemic_anneal_steps = epistemic_anneal_steps
+        self.epistemic_anneal_power = epistemic_anneal_power
+        self.epistemic_power = epistemic_power
+
+        # EMA (policy averaging) configuration
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
+        self.ema_update_interval = ema_update_interval
+        self.ema_warmup_steps = ema_warmup_steps
+        self.ema_eval_only = ema_eval_only
+        self.ema_model = None  # Will be initialized in start()
+        self.ema_step_counter = 0
+        self._training_state_dict = None  # Temporary storage for eval weight swapping
+        self.epistemic_step = 0  # Track steps for beta annealing
+
     def start(self):
         """Override start to initialize dynamic damping after policy is created."""
         # print("[DEBUG] start() called", flush=True)
@@ -756,6 +846,15 @@ class MetamonAMAGOExperiment(amago.Experiment):
             )
             # print(f"[Dynamic Damping] Initialized with kl_coef={self.dd_state.kl_coef:.4f}, "
             #       f"ent_coef={self.dd_state.ent_coef:.4f}", flush=True)
+
+        # Initialize EMA model now that policy exists
+        if self.use_ema:
+            import copy
+            self.ema_model = copy.deepcopy(self.policy)
+            self.ema_model.eval()
+            for param in self.ema_model.parameters():
+                param.requires_grad_(False)
+            print(f"[EMA] Initialized with decay={self.ema_decay}, warmup_steps={self.ema_warmup_steps}")
 
     def init_policy(self):
         """Initialize policy and optionally enable dynamic damping."""
@@ -803,6 +902,16 @@ class MetamonAMAGOExperiment(amago.Experiment):
                 param.requires_grad_(False)
             print("[Dynamic Damping] Reference policy updated successfully")
 
+        # Also update EMA model if enabled
+        if self.use_ema and self.ema_model is not None:
+            import copy
+            print("[EMA] Updating EMA model to match loaded checkpoint...")
+            self.ema_model = copy.deepcopy(self.policy)
+            self.ema_model.eval()
+            for param in self.ema_model.parameters():
+                param.requires_grad_(False)
+            print("[EMA] EMA model updated successfully")
+
     def enable_dynamic_damping(self, config=None):
         """Manually enable dynamic damping after initialization.
 
@@ -824,47 +933,92 @@ class MetamonAMAGOExperiment(amago.Experiment):
         print(f"[Dynamic Damping] Enabled with kl_coef={self.dd_state.kl_coef:.4f}")
 
     def compute_loss(self, batch: Batch, log_step: bool) -> dict:
-        """Compute RL loss with optional dynamic damping (KL regularization)."""
-        # Call parent to get standard actor/critic losses
-        loss_dict = super().compute_loss(batch, log_step)
+        """Compute RL loss with optional epistemic weighting and dynamic damping.
 
-        # Add KL regularization if dynamic damping is enabled
+        Overrides parent to apply per-timestep epistemic confidence weights BEFORE
+        masked averaging (critical for epistemic weighting to affect gradients).
+        """
+        # If epistemic weighting is disabled, use parent's implementation with KL damping
+        if not self.use_epistemic_weighting:
+            # Call parent to get standard actor/critic losses
+            loss_dict = super().compute_loss(batch, log_step)
+
+            # Add KL regularization if dynamic damping is enabled
+            if self.dd_state is not None and self.dd_config.enabled:
+                kl_loss, kl_metrics = self._compute_kl_loss(batch, log_step)
+                loss_dict["Actor Loss"] = loss_dict["Actor Loss"] + kl_loss
+                loss_dict.update(kl_metrics)
+
+                # Track KL for adaptive control (sliding window of last N steps)
+                if "KL Divergence" in kl_metrics:
+                    self.kl_window.append(kl_metrics["KL Divergence"])
+                    self.dd_step_counter += 1
+
+                    # Adapt controller every N steps based on LOCAL KL window (not entire epoch)
+                    if self.dd_step_counter >= self.dd_adapt_interval and len(self.kl_window) >= 10:
+                        mean_kl = float(np.mean(self.kl_window))
+                        self.dd_state.adapt_from_observed_kl(self.optimizer, mean_kl)
+                        self.dd_step_counter = 0
+
+            return loss_dict
+
+        # Epistemic weighting path: manually compute losses with per-timestep weighting
+        # Call Agent.forward() to get per-timestep losses
+        critic_loss, actor_loss = self.policy_aclr(batch, log_step=log_step)
+        update_info = self.policy.update_info
+        B, L_1, G, _ = actor_loss.shape
+        C = len(self.policy.critics)
+
+        # Apply epistemic weighting to actor_loss BEFORE masked_avg
+        actor_loss = self._apply_epistemic_weighting(actor_loss, batch, log_step)
+
+        # Apply masking (copied from parent Experiment.compute_loss)
+        state_mask = (~((batch.rl2s == self.policy.pad_val).all(-1, keepdim=True))).bool()
+        critic_state_mask = einops.repeat(state_mask[:, 1:, ...], f"B L 1 -> B L {C} {G} 1")
+        actor_state_mask = einops.repeat(state_mask[:, 1:, ...], f"B L 1 -> B L {G} 1")
+
+        # Hook to allow custom masks (e.g., missing_action_mask in metamon)
+        actor_state_mask = self.edit_actor_mask(batch, actor_loss, actor_state_mask)
+        critic_state_mask = self.edit_critic_mask(batch, critic_loss, critic_state_mask)
+
+        # Compute scalar losses via masked averaging
+        batch_size = B * L_1
+        unmasked_batch_size = actor_state_mask[..., 0, 0].sum()
+        masked_actor_loss = amago.utils.masked_avg(actor_loss, actor_state_mask)
+        if isinstance(critic_loss, torch.Tensor):
+            masked_critic_loss = amago.utils.masked_avg(critic_loss, critic_state_mask)
+        else:
+            assert critic_loss is None
+            masked_critic_loss = 0.0
+
+        loss_dict = {
+            "Critic Loss": masked_critic_loss,
+            "Actor Loss": masked_actor_loss,
+            "Sequence Length": L_1 + 1,
+            "Batch Size (in Timesteps)": batch_size,
+            "Unmasked Batch Size (in Timesteps)": unmasked_batch_size,
+        }
+        loss_dict.update(update_info)
+
+        # Add KL regularization if dynamic damping enabled (independent mechanism)
         if self.dd_state is not None and self.dd_config.enabled:
             kl_loss, kl_metrics = self._compute_kl_loss(batch, log_step)
-
-            # Add KL loss to actor loss
             loss_dict["Actor Loss"] = loss_dict["Actor Loss"] + kl_loss
-
-            # Add KL metrics to loss dict for logging
             loss_dict.update(kl_metrics)
 
-            # Debug: Print metrics being logged (commented out to reduce log spam)
-            # if log_step:
-            #     print(f"[DEBUG] Damping metrics: KL={kl_metrics.get('KL Divergence', 'N/A'):.4f}, "
-            #           f"Entropy={kl_metrics.get('Policy Entropy', 'N/A'):.4f}, "
-            #           f"Keys in loss_dict: {list(kl_metrics.keys())}")
-
-            # Track KL for adaptive control (sliding window of last N steps)
+            # Track KL for adaptive control
             if "KL Divergence" in kl_metrics:
                 self.kl_window.append(kl_metrics["KL Divergence"])
                 self.dd_step_counter += 1
 
-                # Adapt controller every N steps based on LOCAL KL window (not entire epoch)
                 if self.dd_step_counter >= self.dd_adapt_interval and len(self.kl_window) >= 10:
                     mean_kl = float(np.mean(self.kl_window))
                     self.dd_state.adapt_from_observed_kl(self.optimizer, mean_kl)
-
-                    # Adaptation print (commented out to reduce log spam)
-                    # print(f"[Dynamic Damping] Adapted at step {self.dd_step_counter}: "
-                    #       f"mean_kl={mean_kl:.4f}, kl_coef={self.dd_state.kl_coef:.4f}, "
-                    #       f"lr={self.optimizer.param_groups[0]['lr']:.6f}", flush=True)
-
-                    # Reset step counter, keep window rolling (deque auto-manages size)
                     self.dd_step_counter = 0
-        # else:
-        #     if log_step:
-        #         print(f"[DEBUG] Damping NOT enabled: dd_state={self.dd_state is not None}, "
-        #               f"config.enabled={self.dd_config.enabled if self.dd_config else 'N/A'}")
+
+        # Clean up cache to prevent stale data
+        if hasattr(self.policy, 'cached_epistemic') and self.policy.cached_epistemic is not None:
+            self.policy.cached_epistemic = None
 
         return loss_dict
 
@@ -998,6 +1152,35 @@ class MetamonAMAGOExperiment(amago.Experiment):
 
         return kl_loss, metrics
 
+    def _update_ema_weights(self):
+        """Update EMA model weights using exponential moving average.
+
+        EMA update formula: ema_param = decay * ema_param + (1 - decay) * current_param
+
+        Respects warmup period and update interval for gradual/efficient updates.
+        """
+        import torch
+
+        self.ema_step_counter += 1
+
+        # Warmup: skip EMA updates until warmup period completes
+        if self.ema_step_counter < self.ema_warmup_steps:
+            return
+
+        # Update interval: only update every N steps (for efficiency)
+        if self.ema_step_counter % self.ema_update_interval != 0:
+            return
+
+        # EMA update: ema_param = decay * ema_param + (1 - decay) * current_param
+        with torch.no_grad():
+            for ema_param, current_param in zip(
+                self.ema_model.parameters(),
+                self.policy.parameters()
+            ):
+                ema_param.data.mul_(self.ema_decay).add_(
+                    current_param.data, alpha=1 - self.ema_decay
+                )
+
     def train_step(self, batch: Batch, log_step: bool):
         """Training step with dynamic damping schedule updates and adaptive control."""
         # Update damping schedules before training step
@@ -1007,7 +1190,47 @@ class MetamonAMAGOExperiment(amago.Experiment):
         # Perform standard training step
         metrics = super().train_step(batch, log_step)
 
+        # Update EMA weights after gradient step
+        if self.use_ema:
+            self._update_ema_weights()
+
         return metrics
+
+    def save_ema_checkpoint(self, epoch: int):
+        """Save EMA model weights separately from training checkpoint.
+
+        Saves to: {ckpt_dir}/ema_weights/policy_epoch_{epoch}.pt
+
+        This allows loading EMA checkpoints independently of training checkpoints
+        for evaluation or deployment.
+        """
+        import os
+        import torch
+
+        if not self.use_ema:
+            return
+
+        # Create EMA checkpoint directory
+        ema_ckpt_dir = os.path.join(self.ckpt_dir, "ema_weights")
+        os.makedirs(ema_ckpt_dir, exist_ok=True)
+
+        # Save EMA weights
+        ema_path = os.path.join(ema_ckpt_dir, f"policy_epoch_{epoch}.pt")
+        torch.save(self.ema_model.state_dict(), ema_path)
+        print(f"[EMA] Saved checkpoint to {ema_path}")
+
+    def save_checkpoint(self) -> None:
+        """Override AMAGO's save_checkpoint to also save EMA weights.
+
+        AMAGO calls this method from learn() loop when epoch % ckpt_interval == 0.
+        We must override this (not train_epoch) to ensure EMA checkpoints are saved.
+        """
+        # Call parent's checkpoint saving (saves training state + policy weights)
+        super().save_checkpoint()
+
+        # Save EMA checkpoint if enabled
+        if self.use_ema:
+            self.save_ema_checkpoint(self.epoch)
 
     def train_epoch(self, epoch: int):
         """Training epoch with adaptive LR/KL control during training (every N steps)."""
@@ -1034,14 +1257,247 @@ class MetamonAMAGOExperiment(amago.Experiment):
 
         return out
 
+    def _apply_epistemic_weighting(
+        self,
+        actor_loss: torch.Tensor,  # [B, L-1, G, 1]
+        batch: Batch,
+        log_step: bool
+    ) -> torch.Tensor:
+        """Apply per-timestep confidence weighting based on critic uncertainty.
+
+        Weights actor gradients by inverse uncertainty: w = 1/(1 + β·σ̃)^p
+        where σ̃ is normalized critic ensemble std dev.
+
+        Args:
+            actor_loss: Per-timestep actor loss [B, L-1, G, 1]
+            batch: Batch of RL data
+            log_step: Whether this is a logging step
+
+        Returns:
+            Weighted actor loss with same shape [B, L-1, G, 1]
+        """
+        # Extract Q-ensemble std from cache
+        if self.policy.cached_epistemic is None or 'q_std' not in self.policy.cached_epistemic:
+            # Fallback: no epistemic data cached (shouldn't happen if agent forward ran)
+            print("[WARNING] Epistemic cache not found, skipping weighting")
+            return actor_loss
+
+        q_std = self.policy.cached_epistemic['q_std']  # [1, B, L-1, G, 1]
+
+        # Shape alignment: remove batch dimension and match actor_loss
+        q_std = q_std.squeeze(0)  # [B, L-1, G, 1]
+
+        # Defensive shape check
+        assert q_std.shape == actor_loss.shape, \
+            f"Shape mismatch: q_std {q_std.shape} vs actor_loss {actor_loss.shape}"
+
+        # Get mask for valid (non-padding) timesteps
+        state_mask = (~((batch.rl2s == self.policy.pad_val).all(-1, keepdim=True))).bool()
+        state_mask = state_mask[:, 1:]  # [B, L-1, 1]
+        state_mask = state_mask.unsqueeze(-1)  # [B, L-1, 1, 1] - only ONE unsqueeze!
+
+        # Normalize uncertainty (using only valid timesteps)
+        sigma_norm = self._normalize_uncertainty(q_std, state_mask)  # [B, L-1, G, 1]
+
+        # Compute confidence weights: w = 1 / (1 + β·σ̃)^p
+        beta = self._get_current_beta()
+        confidence = 1.0 / (1.0 + beta * sigma_norm).pow(self.epistemic_power)
+
+        # Ensure stop-gradient (no backprop through uncertainty)
+        confidence = confidence.detach()
+
+        # Apply per-timestep weighting
+        weighted_actor_loss = actor_loss * confidence
+
+        # Log metrics
+        if log_step:
+            self._log_epistemic_metrics(sigma_norm, confidence, state_mask)
+
+            # Debug prints for first few steps (validation)
+            if self.epistemic_step <= 5:
+                print(f"\n=== Epistemic Weighting Debug (step {self.epistemic_step - 1}) ===")
+                print(f"actor_loss shape: {actor_loss.shape}")
+                print(f"q_std shape: {q_std.shape}")
+                print(f"confidence range: [{confidence.min():.3f}, {confidence.max():.3f}]")
+                print(f"confidence mean: {confidence.mean():.3f}")
+
+                # Check high vs low uncertainty separation
+                valid = state_mask.squeeze(-1).squeeze(-1) > 0
+                sigma_valid = sigma_norm[valid]
+                conf_valid = confidence[valid]
+
+                if sigma_valid.numel() > 0:
+                    high_mask = sigma_valid > sigma_valid.median()
+                    if high_mask.any() and (~high_mask).any():
+                        print(f"High-σ confidence: {conf_valid[high_mask].mean():.3f}")
+                        print(f"Low-σ confidence: {conf_valid[~high_mask].mean():.3f}")
+
+                print(f"Beta: {beta:.3f}")
+                print("=" * 50)
+
+        return weighted_actor_loss
+
+    def _normalize_uncertainty(
+        self,
+        q_std: torch.Tensor,      # [B, L-1, G, 1]
+        mask: torch.Tensor        # [B, L-1, 1, 1]
+    ) -> torch.Tensor:
+        """Normalize uncertainty to prevent scale drift across training loops.
+
+        Uses per-batch median normalization for stability.
+
+        Args:
+            q_std: Q-ensemble standard deviation [B, L-1, G, 1]
+            mask: Valid timestep mask [B, L-1, 1, 1]
+
+        Returns:
+            Normalized uncertainty [B, L-1, G, 1]
+        """
+        # Apply mask to exclude padding
+        masked_std = q_std * mask  # Zero out padding
+
+        # Get valid stds (flatten all dimensions except batch/time)
+        valid_mask = mask.squeeze(-1).squeeze(-1) > 0  # [B, L-1]
+        valid_stds = q_std[valid_mask]  # Flatten valid entries
+
+        if valid_stds.numel() == 0:
+            # Fallback: all padding (shouldn't happen)
+            return torch.ones_like(q_std)
+
+        # Compute median for normalization
+        median = valid_stds.median()
+
+        # Ratio normalization: σ̃ = σ / median(σ)
+        sigma_norm = q_std / (median + 1e-8)
+
+        # Clamp to prevent extreme outliers
+        sigma_norm = sigma_norm.clamp(0, 10)
+
+        return sigma_norm
+
+    def _get_current_beta(self) -> float:
+        """Anneal beta from high (conservative) to low (permissive) over training.
+
+        Schedule: β(t) = β_final + (β_init - β_final) * (1 - progress)^α
+
+        This yields:
+        - step 0: β = β_init (high penalty, ~5-10)
+        - end: β = β_final (low penalty, ~0.5-1.0)
+
+        Returns:
+            Current beta value
+        """
+        # Compute training progress [0, 1]
+        progress = min(1.0, self.epistemic_step / self.epistemic_anneal_steps)
+
+        # Power-law decay: high → low
+        # CRITICAL: This is the CORRECT formula (high → low)
+        beta = self.epistemic_beta_final + \
+               (self.epistemic_beta_init - self.epistemic_beta_final) * \
+               (1.0 - progress) ** self.epistemic_anneal_power
+
+        self.epistemic_step += 1
+        return beta
+
+    def _log_epistemic_metrics(
+        self,
+        sigma_norm: torch.Tensor,   # [B, L-1, G, 1]
+        confidence: torch.Tensor,   # [B, L-1, G, 1]
+        mask: torch.Tensor          # [B, L-1, 1, 1]
+    ) -> None:
+        """Log epistemic weighting diagnostics to wandb."""
+        with torch.no_grad():
+            # Only consider valid (non-padding) timesteps
+            valid_mask = mask.squeeze(-1).squeeze(-1) > 0  # [B, L-1]
+            sigma_valid = sigma_norm[valid_mask]
+            conf_valid = confidence[valid_mask]
+
+            if sigma_valid.numel() == 0:
+                return  # No valid timesteps
+
+            # Get current beta
+            # Note: _get_current_beta() increments step, so we compute it differently here
+            progress = min(1.0, (self.epistemic_step - 1) / self.epistemic_anneal_steps)
+            current_beta = self.epistemic_beta_final + \
+                          (self.epistemic_beta_init - self.epistemic_beta_final) * \
+                          (1.0 - progress) ** self.epistemic_anneal_power
+
+            # Basic stats - add to update_info which gets logged
+            metrics = {
+                "Epistemic/Mean Uncertainty": sigma_valid.mean().item(),
+                "Epistemic/Mean Confidence": conf_valid.mean().item(),
+                "Epistemic/Beta": current_beta,
+            }
+
+            # High vs low uncertainty impact
+            median_sigma = sigma_valid.median()
+            high_unc_mask = sigma_valid > median_sigma
+            low_unc_mask = ~high_unc_mask
+
+            if high_unc_mask.any():
+                metrics["Epistemic/Confidence (High σ)"] = conf_valid[high_unc_mask].mean().item()
+            if low_unc_mask.any():
+                metrics["Epistemic/Confidence (Low σ)"] = conf_valid[low_unc_mask].mean().item()
+
+            # Effective learning mass (what fraction of gradients we're allowing)
+            effective_mass = conf_valid.mean().item()
+            metrics["Epistemic/Effective Mass"] = effective_mass
+
+            # Add to policy's update_info for logging
+            if hasattr(self.policy, 'update_info'):
+                self.policy.update_info.update(metrics)
+
     def init_envs(self):
         out = super().init_envs()
         amago.utils.call_async_env(self.val_envs, "take_long_break")
         return out
 
+    def _swap_to_ema_for_eval(self):
+        """Temporarily swap policy weights with EMA weights for evaluation.
+
+        Stores current training weights in self._training_state_dict for later restoration.
+        """
+        import torch
+
+        # Store current training weights (on CPU to save GPU memory)
+        self._training_state_dict = {
+            k: v.cpu().clone()
+            for k, v in self.policy.state_dict().items()
+        }
+
+        # Load EMA weights into policy
+        self.policy.load_state_dict(self.ema_model.state_dict())
+        print("[EMA] Swapped to EMA weights for evaluation")
+
+    def _restore_training_weights(self):
+        """Restore training weights after evaluation.
+
+        Moves stored weights back to device and loads them into policy.
+        """
+        if self._training_state_dict is None:
+            raise RuntimeError("Cannot restore training weights: no backup found")
+
+        # Move weights back to policy device and load
+        device = next(self.policy.parameters()).device
+        self.policy.load_state_dict(
+            {k: v.to(device) for k, v in self._training_state_dict.items()}
+        )
+        self._training_state_dict = None
+        print("[EMA] Restored training weights after evaluation")
+
     def evaluate_val(self):
         amago.utils.call_async_env(self.val_envs, "resume_from_break")
+
+        # Swap to EMA weights for evaluation if enabled
+        if self.use_ema and self.ema_eval_only:
+            self._swap_to_ema_for_eval()
+
         out = super().evaluate_val()
+
+        # Restore training weights after evaluation
+        if self.use_ema and self.ema_eval_only:
+            self._restore_training_weights()
+
         amago.utils.call_async_env(self.val_envs, "take_long_break")
         return out
 

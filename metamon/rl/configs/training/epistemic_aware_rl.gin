@@ -1,0 +1,125 @@
+# Epistemic Uncertainty-Aware Actor Updates
+#
+# This configuration enables per-timestep epistemic weighting to prevent
+# catastrophic first-epoch collapse in Gen1 OU training. It builds on
+# selfplay_damped_aggressive.gin by adding directional safety to KL damping's
+# magnitude safety.
+#
+# Problem addressed:
+#   - Epoch 0: Win rate drops from 50% (frozen actor) to 0% (catastrophic failure)
+#   - Root cause: High Q-ensemble uncertainty (~0.12-0.14 std) → noisy advantages
+#   - Actor confidently follows directionally wrong gradients → exploitable policy
+#
+# Solution:
+#   - Weight actor gradients by inverse critic uncertainty: w = 1/(1 + β·σ̃)^p
+#   - High-uncertainty states → low weight → small gradient
+#   - Low-uncertainty states → high weight → full gradient
+#   - Beta anneals high → low as critic stabilizes over training
+#
+# Key features:
+#   - Per-timestep weighting (before masked_avg, not after)
+#   - Median normalization of uncertainty (σ̃ = σ / median(σ))
+#   - Beta annealing: 5.0 → 1.0 over ~10k steps (~3 epochs)
+#   - Stop-gradient on confidence weights
+#   - Complementary to KL damping (both run simultaneously)
+#
+# Expected behavior:
+#   - Epoch-0 win rate: ~40-50% (maintains frozen baseline performance)
+#   - Policy entropy: > 1.0 throughout (no collapse)
+#   - KL divergence: < 0.02 (not exploding)
+#   - Q-ensemble std: Decreases over training (critic stabilizing)
+#   - Confidence separation: High-σ ~0.3-0.5, Low-σ ~0.7-0.9
+#   - Effective mass: > 0.5 (learning not over-suppressed)
+#
+
+# Include base config: aggressive reward scale + BC-heavy + dynamic damping
+include 'metamon/rl/configs/training/selfplay_damped_aggressive.gin'
+
+# =========================
+# Epistemic Weighting (NEW)
+# =========================
+# Enable epistemic uncertainty-aware actor updates
+MetamonAMAGOExperiment.use_epistemic_weighting = True
+
+# Beta annealing schedule (HIGH → LOW over training)
+# - Initial β (3.0): Moderate penalty on uncertain states (epoch 0) [LOWERED from 5.0]
+# - Low final β (1.0): Permissive as critic stabilizes (epoch 3+)
+# - ~10k steps ≈ 3 epochs of training on typical Gen1 OU dataset
+MetamonAMAGOExperiment.epistemic_beta_init = 3.0       # Moderate start (was 5.0, too aggressive with p=1)
+MetamonAMAGOExperiment.epistemic_beta_final = 1.0      # Permissive end
+MetamonAMAGOExperiment.epistemic_anneal_steps = 10000  # ~3 epochs worth of steps
+MetamonAMAGOExperiment.epistemic_anneal_power = 0.5    # Sqrt decay (smooth)
+
+# Weighting function power: w = 1/(1 + β·σ̃)^p
+# - p=2: Stronger tail suppression (square law) [TOO AGGRESSIVE - caused Effective Mass = 0.25]
+# - p=1: Gentler weighting (linear) [FIXED: maintains Effective Mass > 0.5]
+MetamonAMAGOExperiment.epistemic_power = 1
+
+# =========================
+# Monitoring Metrics
+# =========================
+# Watch these in WandB:
+#   Epistemic/Mean Uncertainty: Should start ~1.0-2.0, stay stable or decrease
+#   Epistemic/Mean Confidence: Should start ~0.3-0.5, increase to ~0.8-0.9
+#   Epistemic/Beta: Should decay smoothly from 5.0 → 1.0
+#   Epistemic/Confidence (High σ): Should be ~0.3-0.5 (clearly separated)
+#   Epistemic/Confidence (Low σ): Should be ~0.7-0.9 (clearly separated)
+#   Epistemic/Effective Mass: Should be > 0.5 (learning not suppressed)
+
+# =========================
+# Interaction with Dynamic Damping
+# =========================
+# Epistemic weighting and KL damping are COMPLEMENTARY mechanisms:
+#   - KL damping: Limits step size (prevents large policy shifts)
+#   - Epistemic weighting: Improves direction (prevents wrong-direction shifts)
+#
+# Both should run simultaneously. No changes to KL damping parameters needed.
+# The existing target_kl_per_step (0.015) and kl_coef_init (0.30) remain optimal.
+
+# =========================
+# Success Criteria
+# =========================
+# Primary metric: Epoch-0 win rate vs RandomBaseline
+#   ❌ Failure: < 30% (catastrophic collapse)
+#   ⚠️ Partial: 30-40% (some collapse)
+#   ✅ Success: > 40% (maintains baseline performance)
+#
+# Secondary metrics:
+#   - Policy entropy: H > 1.0 throughout (no collapse)
+#   - KL divergence: < 0.02 (not exploding)
+#   - Q-ensemble std: Decreases over training (critic stabilizing)
+#   - Confidence separation: Clear gap between high-σ and low-σ weights
+
+# =========================
+# Hyperparameter Tuning Guide
+# =========================
+# If learning is too slow (Effective Mass < 0.5):
+#   1. Lower epistemic_beta_init (5.0 → 3.0)
+#   2. Lower epistemic_power (2 → 1)
+#   3. Use faster annealing (epistemic_anneal_power = 1.0 for linear)
+#
+# If instability returns (Epoch-0 collapse still happens):
+#   1. Raise epistemic_beta_init (5.0 → 8.0 or 10.0)
+#   2. Raise epistemic_power (2 → 3 for stronger tail suppression)
+#   3. Slower annealing (epistemic_anneal_steps = 20000 for 6 epochs)
+#   4. Check that normalization is working (inspect High-σ vs Low-σ separation)
+#
+# If weighting seems to do nothing (High-σ ≈ Low-σ):
+#   1. Beta too low: increase epistemic_beta_init
+#   2. Normalization broken: check debug logs for raw q_std values
+#   3. Q-ensemble not cached: check agent forward pass logs
+
+# =========================
+# Implementation Notes
+# =========================
+# Changes from selfplay_damped_aggressive.gin:
+#   - Only addition: epistemic weighting parameters (6 new config lines)
+#   - No changes to reward scale, data mix, KL damping, or optimizer settings
+#   - Epistemic weighting operates on per-timestep gradients before masked_avg()
+#
+# Code path:
+#   1. MetamonMultiTaskAgent.forward() caches Q-ensemble std (post-hoc recompute)
+#   2. MetamonAMAGOExperiment.compute_loss() applies weighting before masked_avg()
+#   3. _apply_epistemic_weighting() computes confidence weights w = 1/(1+β·σ̃)^p
+#   4. Multiplies actor_loss by confidence (per-timestep, not scalar)
+#   5. KL damping adds to scalar loss (independent mechanism)
