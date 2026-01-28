@@ -97,6 +97,7 @@ class PokemonSet:
         assert self.item is not None
         assert self.ability is not None
         self.missing_strings = [
+            self.MISSING_NAME,
             self.MISSING_MOVE,
             self.MISSING_ABILITY,
             self.MISSING_ITEM,
@@ -817,6 +818,20 @@ class TeamSet:
                 masked_reserve.append(p.masked(mask_attrs_prob=mask_attrs_prob))
         x.reserve = masked_reserve
         x.lead = masked_lead
+        return x, y
+
+    def to_name_prediction_pair(self):
+        """
+        Toy mode: only mask Pokemon names, keep everything else (moves, abilities, items) revealed.
+        Used to test if the model can learn to predict Pokemon from their movesets.
+        """
+        y = copy.deepcopy(self)
+        y.shuffle()
+        x = copy.deepcopy(y)
+        # Mask only the names, keep all other attributes
+        for pokemon in [x.lead] + x.reserve:
+            if pokemon.name != PokemonSet.MISSING_NAME:
+                pokemon.name = PokemonSet.MISSING_NAME
         return x, y
 
     def fill_from_Roster(self, roster: Roster):
