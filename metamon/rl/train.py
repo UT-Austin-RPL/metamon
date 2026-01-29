@@ -348,6 +348,7 @@ def create_offline_rl_trainer(
     config = {
         "MetamonTstepEncoder.tokenizer": obs_space.tokenizer,
         "MetamonPerceiverTstepEncoder.tokenizer": obs_space.tokenizer,
+        "MetamonGroupedTstepEncoder.tokenizer": obs_space.tokenizer,
     }
     if manual_gin_overrides is not None:
         config.update(manual_gin_overrides)
