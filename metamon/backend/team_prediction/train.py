@@ -9,8 +9,8 @@ training is on hold and this script is mostly untested/TODO.
 
 import os
 import argparse
+import html
 import random
-import re
 from typing import Optional
 
 import tqdm
@@ -85,14 +85,6 @@ def evaluate(
     return avg_loss, avg_acc
 
 
-def wandb_to_console_color(text: str) -> str:
-    # Replace :blue[], :red[], :green[] with ANSI codes
-    text = re.sub(r":blue\[(.*?)\]", r"\033[94m\1\033[0m", text)
-    text = re.sub(r":red\[(.*?)\]", r"\033[91m\1\033[0m", text)
-    text = re.sub(r":green\[(.*?)\]", r"\033[92m\1\033[0m", text)
-    return text
-
-
 def log_example_predictions(
     model: nn.Module,
     vocab: Vocabulary,
@@ -126,44 +118,75 @@ def log_example_predictions(
         x_seq = vocab.ints_to_pokeset_seq(x_tokens[i].cpu().tolist())
         pred_seq = vocab.ints_to_pokeset_seq(merged[i].tolist())
         true_seq = vocab.ints_to_pokeset_seq(y_tokens[i].tolist())
-        mask = pred_masks[i]
-        x_str = " ".join(f":green[{x}]" if m else x for x, m in zip(x_seq, mask))
-        pred_str = []
-        true_str = []
-        for p, t, m in zip(pred_seq, true_seq, mask):
+        mask = pred_masks[i].cpu()
+
+        # Build HTML strings for wandb (colors render in tables)
+        x_parts = []
+        for x, m in zip(x_seq, mask):
+            x_escaped = html.escape(x)
             if m:
-                color = ":blue[" if p == t else ":red["
-                end = "]"
+                x_parts.append(
+                    f'<span style="color: green; font-weight: bold">{x_escaped}</span>'
+                )
             else:
-                color = ""
-                end = ""
-            pred_str.append(f"{color}{p}{end}")
-            true_str.append(f"{color}{t}{end}")
-        pred_str = " ".join(pred_str)
-        true_str = " ".join(true_str)
+                x_parts.append(x_escaped)
+        x_str_html = " ".join(x_parts)
+
+        pred_parts = []
+        true_parts = []
+        for p, t, m in zip(pred_seq, true_seq, mask):
+            p_escaped = html.escape(p)
+            t_escaped = html.escape(t)
+            if m:
+                # Blue if correct, red if wrong
+                color = "blue" if p == t else "red"
+                pred_parts.append(
+                    f'<span style="color: {color}; font-weight: bold">{p_escaped}</span>'
+                )
+                true_parts.append(
+                    f'<span style="color: {color}; font-weight: bold">{t_escaped}</span>'
+                )
+            else:
+                pred_parts.append(p_escaped)
+                true_parts.append(t_escaped)
+        pred_str_html = " ".join(pred_parts)
+        true_str_html = " ".join(true_parts)
 
         table.add_data(
-            f"**Input**:\n{x_str}",
-            f"**Predicted**:\n{pred_str}",
-            f"**Ground truth**:\n{true_str}",
+            wandb.Html(f"<b>Input:</b><br>{x_str_html}"),
+            wandb.Html(f"<b>Predicted:</b><br>{pred_str_html}"),
+            wandb.Html(f"<b>Ground truth:</b><br>{true_str_html}"),
         )
+
     if use_wandb:
         wandb.log({"val/example_predictions": table}, step=epoch)
     else:
-        print(f"Examples at epoch {epoch}:")
+        # Console output with ANSI colors
+        print(f"Examples at step {epoch}:")
         for i in range(min(bs, num_examples)):
+            x_seq = vocab.ints_to_pokeset_seq(x_tokens[i].cpu().tolist())
+            pred_seq = vocab.ints_to_pokeset_seq(merged[i].tolist())
+            true_seq = vocab.ints_to_pokeset_seq(y_tokens[i].tolist())
+            mask = pred_masks[i].cpu()
+
+            x_str = " ".join(
+                f"\033[92m{x}\033[0m" if m else x for x, m in zip(x_seq, mask)
+            )
+            pred_parts = []
+            true_parts = []
+            for p, t, m in zip(pred_seq, true_seq, mask):
+                if m:
+                    color = "\033[94m" if p == t else "\033[91m"
+                    pred_parts.append(f"{color}{p}\033[0m")
+                    true_parts.append(f"{color}{t}\033[0m")
+                else:
+                    pred_parts.append(p)
+                    true_parts.append(t)
+
             print("---")
-            # Use the same strings as above, but convert color markup to ANSI
-            x_str_console = wandb_to_console_color(table.data[i][0].split("\n", 1)[1])
-            pred_str_console = wandb_to_console_color(
-                table.data[i][1].split("\n", 1)[1]
-            )
-            true_str_console = wandb_to_console_color(
-                table.data[i][2].split("\n", 1)[1]
-            )
-            print(f"**Input**:\n{x_str_console}")
-            print(f"**Predicted**:\n{pred_str_console}")
-            print(f"**Ground truth**:\n{true_str_console}")
+            print(f"Input: {x_str}")
+            print(f"Predicted: {' '.join(pred_parts)}")
+            print(f"Ground truth: {' '.join(true_parts)}")
 
 
 def train(config, use_wandb: bool = True):
@@ -183,6 +206,7 @@ def train(config, use_wandb: bool = True):
         seed=config.seed,
         use_cached_filenames=True,
         verbose=True,
+        toy_names_only=config.toy_names_only,
     )
     val_dset = TeamPredictionDataset(
         data_dir=config.train_data_dir,
@@ -193,31 +217,50 @@ def train(config, use_wandb: bool = True):
         seed=config.seed,
         use_cached_filenames=True,
         verbose=True,
+        toy_names_only=config.toy_names_only,
     )
     comp_dset = CompetitiveTeamPredictionDataset(
         mask_pokemon_prob_range=(config.mask_pokemon_prob, config.mask_pokemon_prob),
         mask_attrs_prob_range=(config.mask_attrs_prob, config.mask_attrs_prob),
         verbose=True,
+        toy_names_only=config.toy_names_only,
     )
 
+    # Debug overfit mode: use tiny subset (one batch), same data for train/val, no shuffle
+    if config.debug_overfit:
+        print(f"DEBUG OVERFIT MODE: Using {config.batch_size} samples (one batch)")
+        from torch.utils.data import Subset
+
+        indices = list(range(min(config.batch_size, len(train_dset))))
+        train_dset = Subset(train_dset, indices)
+        val_dset = Subset(train_dset, indices)  # Same data!
+        comp_indices = list(range(min(config.batch_size, len(comp_dset))))
+        comp_dset = Subset(comp_dset, comp_indices)
+
     # DataLoaders
+    shuffle = not config.debug_overfit
+    num_workers = 0 if config.debug_overfit else config.num_workers
+    persistent = num_workers > 0
     train_loader = DataLoader(
         train_dset,
         batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=persistent,
     )
     val_loader = DataLoader(
         val_dset,
         batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=persistent,
     )
     comp_loader = DataLoader(
         comp_dset,
         batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=persistent,
     )
 
     # Initialize model
@@ -236,12 +279,10 @@ def train(config, use_wandb: bool = True):
     )
     vocab = Vocabulary()
 
-    # Create checkpoint directory (per run) and artifacts subdir
     ckpt_dir = os.path.join(config.checkpoint_dir, config.run_name)
     artifact_dir = os.path.join(ckpt_dir, "artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
 
-    # Training loop with early stopping (step-based)
     best_val_loss = float("inf")
     patience_count = 0
     global_step = 0
@@ -250,10 +291,10 @@ def train(config, use_wandb: bool = True):
     steps_since_eval = 0
 
     train_iter = iter(train_loader)
+    val_iter = iter(val_loader)
     pbar = tqdm.tqdm(total=config.max_steps, desc="Training")
 
     while global_step < config.max_steps:
-        # Get next batch, restart iterator if exhausted
         try:
             x_tokens, type_ids, y_tokens, pred_mask = next(train_iter)
         except StopIteration:
@@ -269,15 +310,28 @@ def train(config, use_wandb: bool = True):
         loss, acc = compute_loss_and_accuracy(logits, y_tokens, pred_mask)
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
         optimizer.step()
 
         running_loss += loss.item()
         running_acc += acc
         global_step += 1
         steps_since_eval += 1
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{acc:.2%}"})
         pbar.update(1)
 
-        # Evaluate every eval_every_steps
+        if use_wandb and global_step % config.log_train_every_steps == 0:
+            avg_train_loss = running_loss / steps_since_eval
+            avg_train_acc = running_acc / steps_since_eval
+            wandb.log(
+                {
+                    "global_step": global_step,
+                    "train/loss": avg_train_loss,
+                    "train/accuracy": avg_train_acc,
+                },
+                step=global_step,
+            )
+
         if global_step % config.eval_every_steps == 0:
             train_loss = running_loss / steps_since_eval
             train_acc = running_acc / steps_since_eval
@@ -292,7 +346,6 @@ def train(config, use_wandb: bool = True):
                 model, comp_loader, device, max_steps=config.max_eval_steps
             )
 
-            # Log metrics for each dataset split
             metrics = {
                 "train": {"loss": train_loss, "accuracy": train_acc},
                 "val": {
@@ -303,14 +356,12 @@ def train(config, use_wandb: bool = True):
                 },
             }
             if use_wandb:
-                # Log all metrics to wandb
-                wandb_metrics = {}
+                wandb_metrics = {"global_step": global_step}
                 for split, split_metrics in metrics.items():
                     for metric_name, value in split_metrics.items():
                         wandb_metrics[f"{split}/{metric_name}"] = value
                 wandb.log(wandb_metrics, step=global_step)
             else:
-                # Print metrics to console
                 print(f"\nStep {global_step}")
                 print(
                     f"Train       - loss: {train_loss:.4f}, accuracy: {train_acc:.4f}"
@@ -320,7 +371,11 @@ def train(config, use_wandb: bool = True):
                     f"Competitive - loss: {comp_loss:.4f}, accuracy: {comp_acc:.4f}\n"
                 )
 
-            example_batch = next(iter(val_loader))
+            try:
+                example_batch = next(val_iter)
+            except StopIteration:
+                val_iter = iter(val_loader)
+                example_batch = next(val_iter)
             x_tokens, type_ids, y_tokens, pred_masks = example_batch
             log_example_predictions(
                 model=model,
@@ -335,38 +390,39 @@ def train(config, use_wandb: bool = True):
                 epoch=global_step,
             )
 
-            # Early stopping check
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_count = 0
-                best_model = os.path.join(ckpt_dir, "best_model.pt")
-                torch.save(model.state_dict(), best_model)
-                print(f"New best model saved to {best_model}")
-                if use_wandb:
-                    # Log best checkpoint as Artifact
-                    artifact = wandb.Artifact(
-                        f"{config.run_name}-best-model", type="model"
-                    )
-                    artifact.add_file(best_model)
-                    wandb.log_artifact(artifact)
-            else:
-                patience_count += 1
-                if patience_count >= config.patience:
-                    print(f"Early stopping at step {global_step}")
-                    break
+            if not config.debug_overfit:
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_count = 0
+                    best_model = os.path.join(ckpt_dir, "best_model.pt")
+                    torch.save(model.state_dict(), best_model)
+                    print(f"New best model saved to {best_model}")
+                    if use_wandb:
+                        artifact = wandb.Artifact(
+                            f"{config.run_name}-best-model", type="model"
+                        )
+                        artifact.add_file(best_model)
+                        wandb.log_artifact(artifact)
+                else:
+                    patience_count += 1
+                    if patience_count >= config.patience:
+                        print(f"Early stopping at step {global_step}")
+                        break
 
     pbar.close()
 
-    # Save final model
+    print("Training complete, saving final model...")
+
     final_model = os.path.join(ckpt_dir, "final_model.pt")
     torch.save(model.state_dict(), final_model)
+    print(f"Final model saved to {final_model}")
+
     if use_wandb:
-        # Log final model as Artifact
+        print("Uploading model artifact to wandb...")
         artifact = wandb.Artifact(f"{config.run_name}-final-model", type="model")
         artifact.add_file(final_model)
         wandb.log_artifact(artifact)
-    else:
-        print(f"Final model saved to {final_model}")
+        print("Done uploading artifact.")
 
 
 if __name__ == "__main__":
@@ -394,36 +450,55 @@ if __name__ == "__main__":
         default="checkpoints",
         help="Directory to save model checkpoints",
     )
+    parser.add_argument(
+        "--debug-overfit",
+        action="store_true",
+        help="Debug mode: overfit to a small number of samples (same for train/val)",
+    )
+    parser.add_argument(
+        "--toy-names-only",
+        action="store_true",
+        help="Toy mode: only mask Pokemon names, keep everything else revealed",
+    )
     args = parser.parse_args()
 
     # Default hyperparameters
     sweep_defaults = {
         "train_data_dir": download_revealed_teams(),
         "val_ratio": 0.1,
-        "batch_size": 8,
+        "batch_size": 32,
         "num_workers": 4,
         "mask_pokemon_prob": 0.1,
         "mask_attrs_prob": 0.1,
         "seed": 42,
         "max_seq_len": 64,
-        "d_model": 256,
-        "nhead": 4,
-        "num_layers": 3,
-        "dim_ff": 1024,
+        "d_model": 320,
+        "nhead": 8,
+        "num_layers": 4,
+        "dim_ff": 1280,
         "dropout": 0.0,
-        "learning_rate": 1e-3,
+        "learning_rate": 1e-4,
+        "max_grad_norm": 1.0,
         "max_steps": 100000,
+        "log_train_every_steps": 100,
         "eval_every_steps": 1000,
         "max_eval_steps": 100,
-        "patience": 5,
+        "patience": 25,
         "weight_decay": 1e-4,
         "num_examples": 4,
+        "debug_overfit": False,
+        "toy_names_only": False,
     }
 
-    # Determine whether to use WandB
+    if args.debug_overfit:
+        sweep_defaults["debug_overfit"] = True
+        sweep_defaults["log_train_every_steps"] = 1
+        sweep_defaults["eval_every_steps"] = 10
+    if args.toy_names_only:
+        sweep_defaults["toy_names_only"] = True
+
     use_wandb = not args.no_wandb
     if use_wandb:
-        # Initialize WandB run
         wandb.init(
             project=args.project,
             entity=args.entity,
@@ -432,16 +507,16 @@ if __name__ == "__main__":
             name=args.name,
         )
         cfg = wandb.config
-        # Override checkpoint dir & run name in config
         cfg.checkpoint_dir = args.checkpoint_dir
         cfg.run_name = wandb.run.name
+        wandb.define_metric("global_step")
+        wandb.define_metric("train/*", step_metric="global_step")
+        wandb.define_metric("val/*", step_metric="global_step")
     else:
-        # Use local config namespace
         from argparse import Namespace
 
         cfg = Namespace(**sweep_defaults)
         cfg.checkpoint_dir = args.checkpoint_dir
         cfg.run_name = args.name or "local_run"
 
-    # Start training
     train(cfg, use_wandb)

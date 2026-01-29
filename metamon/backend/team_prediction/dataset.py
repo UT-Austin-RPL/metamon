@@ -151,6 +151,7 @@ class TeamPredictionDataset(Dataset):
         seed: Optional[int] = None,
         use_cached_filenames: bool = False,
         verbose: bool = False,
+        toy_names_only: bool = False,
     ):
         """
         Args:
@@ -162,12 +163,14 @@ class TeamPredictionDataset(Dataset):
             seed: Random seed for reproducibility
             use_cached_filenames: If True, use cached index files instead of scanning directories
             verbose: If True, print progress information
+            toy_names_only: If True, only mask Pokemon names (not abilities/items/moves)
         """
         (
             self.mask_pokemon_prob_low,
             self.mask_pokemon_prob_high,
         ) = mask_pokemon_prob_range
         self.mask_attrs_prob_low, self.mask_attrs_prob_high = mask_attrs_prob_range
+        self.toy_names_only = toy_names_only
         assert self.mask_pokemon_prob_low <= self.mask_pokemon_prob_high
         assert self.mask_attrs_prob_low <= self.mask_attrs_prob_high
         assert 0 <= validation_ratio <= 1, "validation_ratio must be in [0, 1)"
@@ -268,18 +271,26 @@ class TeamPredictionDataset(Dataset):
                 format = to_id_str(os.path.splitext(path)[1].split("_")[0])
                 assert format.startswith("gen"), f"Invalid format: {format}"
                 team = TeamSet.from_showdown_file(path, format=format)
-                mask_pokemon_prob = random.uniform(
-                    self.mask_pokemon_prob_low, self.mask_pokemon_prob_high
-                )
-                mask_attrs_prob = random.uniform(
-                    self.mask_attrs_prob_low, self.mask_attrs_prob_high
-                )
-                x, y = team.to_prediction_pair(
-                    mask_pokemon_prob=mask_pokemon_prob,
-                    mask_attrs_prob=mask_attrs_prob,
-                )
-                x_seq, x_needs_pred = x.to_seq(include_stats=False)
-                y_seq, y_needs_pred = y.to_seq(include_stats=False)
+
+                if self.toy_names_only:
+                    # Toy mode: only mask Pokemon names, keep everything else revealed
+                    x, y = team.to_name_prediction_pair()
+                    x_seq, x_needs_pred = x.to_seq(include_stats=False)
+                    y_seq, y_needs_pred = y.to_seq(include_stats=False)
+                else:
+                    # Normal mode: use random masking
+                    mask_pokemon_prob = random.uniform(
+                        self.mask_pokemon_prob_low, self.mask_pokemon_prob_high
+                    )
+                    mask_attrs_prob = random.uniform(
+                        self.mask_attrs_prob_low, self.mask_attrs_prob_high
+                    )
+                    x, y = team.to_prediction_pair(
+                        mask_pokemon_prob=mask_pokemon_prob,
+                        mask_attrs_prob=mask_attrs_prob,
+                    )
+                    x_seq, x_needs_pred = x.to_seq(include_stats=False)
+                    y_seq, y_needs_pred = y.to_seq(include_stats=False)
                 # we will only train on values that are missing from x but provided by y
                 pred_mask = torch.logical_and(
                     torch.tensor(x_needs_pred), ~torch.tensor(y_needs_pred)
@@ -308,6 +319,7 @@ class CompetitiveTeamPredictionDataset(TeamPredictionDataset):
         mask_pokemon_prob_range: Tuple[float, float] = (0.1, 0.1),
         mask_attrs_prob_range: Tuple[float, float] = (0.1, 0.1),
         verbose: bool = False,
+        toy_names_only: bool = False,
     ):
         team_dirs = []
         for gen in [1, 2, 3, 4, 5, 9]:
@@ -329,6 +341,7 @@ class CompetitiveTeamPredictionDataset(TeamPredictionDataset):
             mask_attrs_prob_range=mask_attrs_prob_range,
             use_cached_filenames=False,
             verbose=verbose,
+            toy_names_only=toy_names_only,
         )
 
 
