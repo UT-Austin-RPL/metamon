@@ -520,10 +520,13 @@ class MetamonTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
         if self.training and self.token_mask_aug:
             obs["text_tokens"] = unknown_token_mask(obs["text_tokens"])
         extras = F.leaky_relu(self.extra_emb(symlog(rl2s)))
+        add_activation_log("MetamonTstepEncoder/extra_emb", extras, log_dict)
         numerical = torch.cat((obs["numbers"], extras), dim=-1)
+        add_activation_log("MetamonTstepEncoder/numerical", numerical, log_dict)
         turn_emb = self.turn_embedding(
             token_inputs=obs["text_tokens"], numerical_inputs=numerical
         )
+        add_activation_log("MetamonTstepEncoder/turn_emb", turn_emb, log_dict)
         return turn_emb
 
 
@@ -578,10 +581,15 @@ class MetamonPerceiverTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
         if self.training and self.token_mask_aug:
             obs["text_tokens"] = unknown_token_mask(obs["text_tokens"])
         extras = F.leaky_relu(self.extra_emb(symlog(rl2s)))
+        add_activation_log("MetamonPerceiverTstepEncoder/extra_emb", extras, log_dict)
         numerical = torch.cat((obs["numbers"], extras), dim=-1)
+        add_activation_log(
+            "MetamonPerceiverTstepEncoder/numerical", numerical, log_dict
+        )
         turn_emb = self.turn_embedding(
             token_inputs=obs["text_tokens"], numerical_inputs=numerical
         )
+        add_activation_log("MetamonPerceiverTstepEncoder/turn_emb", turn_emb, log_dict)
         return turn_emb
 
 
