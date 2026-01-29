@@ -594,12 +594,6 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
     1. Pokemon encoder (shared): encodes each of 7 Pokemon independently
     2. Global encoder: encodes misc features (format, conditions, etc.) + rl2
     3. Fusion encoder: combines 8 entity embeddings into final turn representation
-
-    Entity order preserves action correspondence:
-    - 0: active_pokemon (moves = actions 0-3)
-    - 1-5: switch_0 through switch_4 (actions 4-8)
-    - 6: opponent_active_pokemon
-    - 7: misc/global features
     """
 
     # Hardcoded to GroupedObservationSpace dimensions
@@ -642,7 +636,7 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
 
         self.extra_emb = nn.Linear(rl2_space.shape[-1], extra_emb_dim)
 
-        # ─── Pokemon Encoder (shared for all 7) ─────────────────────────────
+        # pokemon encoder (shared for all 7)
         self.pokemon_token_emb = TokenEmbedding(tokenizer, d_pokemon)
         self.pokemon_fuse = MultiModalEmbedding(
             token_emb_dim=d_pokemon,
@@ -662,12 +656,11 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             n_layers=n_layers_pokemon,
             dropout=dropout,
         )
-        # Project to d_fusion
         pokemon_out_dim = latent_tokens_pokemon * d_pokemon
         self.pokemon_proj = nn.Linear(pokemon_out_dim, d_fusion)
         self.pokemon_out_norm = Normalization(pokemon_out_norm, d_fusion)
 
-        # ─── Global Encoder ─────────────────────────────────────────────────
+        # global encoder
         self.global_token_emb = TokenEmbedding(tokenizer, d_global)
         self.global_fuse = MultiModalEmbedding(
             token_emb_dim=d_global,
@@ -687,12 +680,11 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             n_layers=n_layers_global,
             dropout=dropout,
         )
-        # Project to d_fusion
         global_out_dim = latent_tokens_global * d_global
         self.global_proj = nn.Linear(global_out_dim, d_fusion)
         self.global_out_norm = Normalization(global_out_norm, d_fusion)
 
-        # ─── Fusion Encoder ─────────────────────────────────────────────────
+        # fusion encoder
         self.entity_type_emb = nn.Embedding(self.NUM_POKEMON + 1, d_fusion)
         self.fusion = PerceiverEncoder(
             latent_tokens=latent_tokens_fusion,
@@ -712,32 +704,20 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
     def _encode_pokemon(
         self, text_tokens: torch.Tensor, numerical: torch.Tensor, log_dict=None
     ) -> torch.Tensor:
-        """
-        Encode all 7 Pokemon with shared weights.
-
-        Args:
-            text_tokens: (B, 7, 12) integer tokens
-            numerical: (B, 7, 31) float features
-            log_dict: Optional dict for activation logging
-
-        Returns:
-            (B, 7, d_fusion) entity embeddings
-        """
         B = text_tokens.size(0)
 
-        # Batch all Pokemon together: (B*7, 12), (B*7, 31)
+        # batch all Pokemon together: (B*7, 12), (B*7, 31)
         text_flat = einops.rearrange(text_tokens, "b n l -> (b n) l")
         nums_flat = einops.rearrange(numerical, "b n d -> (b n) d")
 
-        # Embed tokens: (B*7, 12, d_pokemon)
+        # embed tokens: (B*7, 12, d_pokemon)
         tok_emb = self.pokemon_token_emb(text_flat)
 
-        # Multimodal fuse (needs dummy seq dim): (B*7, 1, L, d) → (B*7, L+num, d)
+        # multimodal fuse (needs dummy seq dim): (B*7, 1, L, d) → (B*7, L+num, d)
         tok_emb = tok_emb.unsqueeze(1)
         nums_flat = nums_flat.unsqueeze(1)
         seq = self.pokemon_fuse(tok_emb, nums_flat).squeeze(1)
 
-        # Positional embeddings
         L = seq.size(1)
         pos_ids = (
             torch.arange(L, device=seq.device).unsqueeze(0).expand(seq.size(0), -1)
@@ -754,7 +734,6 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
         emb = self.pokemon_proj(emb)
         add_activation_log("MetamonGroupedTstepEncoder/pokemon_proj", emb, log_dict)
 
-        # Normalize and unflatten: (B, 7, d_fusion)
         emb = self.pokemon_out_norm(emb)
         add_activation_log("MetamonGroupedTstepEncoder/pokemon_out_norm", emb, log_dict)
 
@@ -763,26 +742,12 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
     def _encode_global(
         self, text_tokens: torch.Tensor, numerical: torch.Tensor, log_dict=None
     ) -> torch.Tensor:
-        """
-        Encode global/misc features.
-
-        Args:
-            text_tokens: (B, 20) integer tokens
-            numerical: (B, 4 + extra_emb_dim) float features
-            log_dict: Optional dict for activation logging
-
-        Returns:
-            (B, d_fusion) global embedding
-        """
-        # Embed tokens: (B, 20, d_global)
         tok_emb = self.global_token_emb(text_tokens)
 
-        # Multimodal fuse: (B, 1, L, d) → (B, L+num, d)
         tok_emb = tok_emb.unsqueeze(1)
         numerical = numerical.unsqueeze(1)
         seq = self.global_fuse(tok_emb, numerical).squeeze(1)
 
-        # Positional embeddings
         L = seq.size(1)
         pos_ids = (
             torch.arange(L, device=seq.device).unsqueeze(0).expand(seq.size(0), -1)
@@ -797,7 +762,6 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
         emb = self.global_proj(emb)
         add_activation_log("MetamonGroupedTstepEncoder/global_proj", emb, log_dict)
 
-        # Normalize
         emb = self.global_out_norm(emb)
         add_activation_log("MetamonGroupedTstepEncoder/global_out_norm", emb, log_dict)
 
@@ -805,8 +769,6 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
 
     @torch.compile
     def inner_forward(self, obs, rl2s, log_dict=None):
-        # Input shapes: obs[key] is (B, L, feat_dim) where L is sequence length
-        # Stack all 7 Pokemon along dim=2: (B, L, 7, feat_dim)
         pokemon_text = torch.stack(
             [
                 obs["text_active_pokemon_tokens"],
@@ -833,40 +795,28 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             dim=2,
         )
 
-        # Flatten B and L for processing: (B, L, 7, feat) -> (B*L, 7, feat)
         B, L = pokemon_text.shape[:2]
         pokemon_text = einops.rearrange(pokemon_text, "b l n f -> (b l) n f")
         pokemon_nums = einops.rearrange(pokemon_nums, "b l n f -> (b l) n f")
 
-        # Encode Pokemon: (B*L, 7, d_fusion)
         pokemon_embs = self._encode_pokemon(pokemon_text, pokemon_nums, log_dict)
 
-        # Encode global with RL2 features: (B*L, d_fusion)
-        # rl2s is (B, L, rl2_dim), flatten to (B*L, rl2_dim)
         rl2s_flat = einops.rearrange(rl2s, "b l d -> (b l) d")
         extras = F.leaky_relu(self.extra_emb(symlog(rl2s_flat)))
-        # numbers_misc is (B, L, feat), flatten to (B*L, feat)
         global_nums_flat = einops.rearrange(obs["numbers_misc"], "b l d -> (b l) d")
         global_nums = torch.cat([global_nums_flat, extras], dim=-1)
-        # text_misc_tokens is (B, L, feat), flatten to (B*L, feat)
         global_text_flat = einops.rearrange(obs["text_misc_tokens"], "b l d -> (b l) d")
         global_emb = self._encode_global(global_text_flat, global_nums, log_dict)
-
-        # Combine: (B*L, 8, d_fusion)
         all_embs = torch.cat([pokemon_embs, global_emb.unsqueeze(1)], dim=1)
 
-        # Add entity type embeddings (preserves action correspondence)
         type_ids = torch.arange(8, device=all_embs.device)
         all_embs = all_embs + self.entity_type_emb(type_ids)
-
-        # Fuse: (B*L, 8, d_fusion) → (B*L, 1, output_dim) → (B*L, output_dim)
         emb = self.fusion(all_embs).squeeze(1)
         add_activation_log("MetamonGroupedTstepEncoder/fusion", emb, log_dict)
 
         emb = self.fusion_out_norm(emb)
         add_activation_log("MetamonGroupedTstepEncoder/fusion_out_norm", emb, log_dict)
 
-        # Unflatten back to (B, L, output_dim)
         emb = einops.rearrange(emb, "(b l) d -> b l d", b=B, l=L)
 
         return emb
