@@ -657,8 +657,8 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             dropout=dropout,
         )
         pokemon_out_dim = latent_tokens_pokemon * d_pokemon
+        self.pokemon_out_norm = Normalization(pokemon_out_norm, d_pokemon)
         self.pokemon_proj = nn.Linear(pokemon_out_dim, d_fusion)
-        self.pokemon_out_norm = Normalization(pokemon_out_norm, d_fusion)
 
         # global encoder
         self.global_token_emb = TokenEmbedding(tokenizer, d_global)
@@ -681,8 +681,8 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             dropout=dropout,
         )
         global_out_dim = latent_tokens_global * d_global
+        self.global_out_norm = Normalization(global_out_norm, d_global)
         self.global_proj = nn.Linear(global_out_dim, d_fusion)
-        self.global_out_norm = Normalization(global_out_norm, d_fusion)
 
         # fusion encoder
         self.entity_type_emb = nn.Embedding(self.NUM_POKEMON + 1, d_fusion)
@@ -693,7 +693,7 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             n_layers=n_layers_fusion,
             dropout=dropout,
         )
-        self.fusion_out_norm = Normalization(fusion_out_norm, self.fusion.output_dim)
+        self.fusion_out_norm = Normalization(fusion_out_norm, d_fusion)
 
         self._emb_dim = self.fusion.output_dim
 
@@ -724,18 +724,18 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
         )
         seq = seq + self.pokemon_pos(pos_ids)
 
-        # Perceiver: (B*7, L, d) → (B*7, 1, latent*d) → (B*7, latent*d)
-        emb = self.pokemon_perceiver(seq).squeeze(1)
+        # Perceiver: (B*7, L, d) → (B*7, latent_tokens, d_pokemon)
+        emb = self.pokemon_perceiver(seq, flatten=False)
         add_activation_log(
             "MetamonGroupedTstepEncoder/pokemon_perceiver", emb, log_dict
         )
 
-        # Project to d_fusion
-        emb = self.pokemon_proj(emb)
-        add_activation_log("MetamonGroupedTstepEncoder/pokemon_proj", emb, log_dict)
-
         emb = self.pokemon_out_norm(emb)
         add_activation_log("MetamonGroupedTstepEncoder/pokemon_out_norm", emb, log_dict)
+
+        emb = einops.rearrange(emb, "b t d -> b (t d)")
+        emb = self.pokemon_proj(emb)
+        add_activation_log("MetamonGroupedTstepEncoder/pokemon_proj", emb, log_dict)
 
         return einops.rearrange(emb, "(b n) d -> b n d", b=B, n=self.NUM_POKEMON)
 
@@ -754,16 +754,16 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
         )
         seq = seq + self.global_pos(pos_ids)
 
-        # Perceiver: (B, L, d) → (B, 1, latent*d) → (B, latent*d)
-        emb = self.global_perceiver(seq).squeeze(1)
+        # Perceiver: (B, L, d) → (B, latent_tokens, d_global)
+        emb = self.global_perceiver(seq, flatten=False)
         add_activation_log("MetamonGroupedTstepEncoder/global_perceiver", emb, log_dict)
-
-        # Project to d_fusion
-        emb = self.global_proj(emb)
-        add_activation_log("MetamonGroupedTstepEncoder/global_proj", emb, log_dict)
 
         emb = self.global_out_norm(emb)
         add_activation_log("MetamonGroupedTstepEncoder/global_out_norm", emb, log_dict)
+
+        emb = einops.rearrange(emb, "b t d -> b (t d)")
+        emb = self.global_proj(emb)
+        add_activation_log("MetamonGroupedTstepEncoder/global_proj", emb, log_dict)
 
         return emb
 
@@ -811,12 +811,15 @@ class MetamonGroupedTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
 
         type_ids = torch.arange(8, device=all_embs.device)
         all_embs = all_embs + self.entity_type_emb(type_ids)
-        emb = self.fusion(all_embs).squeeze(1)
+
+        # Fusion perceiver: (B, 8, d_fusion) → (B, latent_tokens, d_fusion)
+        emb = self.fusion(all_embs, flatten=False)
         add_activation_log("MetamonGroupedTstepEncoder/fusion", emb, log_dict)
 
         emb = self.fusion_out_norm(emb)
         add_activation_log("MetamonGroupedTstepEncoder/fusion_out_norm", emb, log_dict)
 
+        emb = einops.rearrange(emb, "b t d -> b (t d)")
         emb = einops.rearrange(emb, "(b l) d -> b l d", b=B, l=L)
 
         return emb
