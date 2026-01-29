@@ -1317,6 +1317,224 @@ class OpponentMoveObservationSpace(TeamPreviewObservationSpace):
 
 
 @register_observation_space()
+class GroupedObservationSpace(ObservationSpace):
+    """
+    Groups observations by entity for use with a shared Pokemon encoder.
+
+    Unlike DefaultObservationSpace which concatenates all features into single
+    "text" and "numbers" arrays, this space outputs separate arrays for each
+    Pokemon and a misc array for global state.
+    """
+
+    POKEMON_TEXT_LEN = 12  # name, item, ability, tera, types×2, effect, status, moves×4
+    POKEMON_NUM_LEN = 31  # hp, lvl, stats×6, boosts×7, (bp, acc, pri, pp)×4
+    MISC_TEXT_LEN = (
+        20  # format, switch, weather, field, conds×2, prev×2, revealed×6, preview×6
+    )
+    MISC_NUM_LEN = 4  # opp_remaining, sleep, freeze, can_tera
+    NUM_SWITCHES = 5
+
+    def reset(self):
+        self.any_opponent_asleep = False
+        self.any_opponent_frozen = False
+        self.revealed_opponents = set()
+
+    @property
+    def tokenizable(self) -> dict[str, int]:
+        return {
+            "text_active_pokemon": self.POKEMON_TEXT_LEN,
+            "text_switch_0": self.POKEMON_TEXT_LEN,
+            "text_switch_1": self.POKEMON_TEXT_LEN,
+            "text_switch_2": self.POKEMON_TEXT_LEN,
+            "text_switch_3": self.POKEMON_TEXT_LEN,
+            "text_switch_4": self.POKEMON_TEXT_LEN,
+            "text_opponent_active_pokemon": self.POKEMON_TEXT_LEN,
+            "text_misc": self.MISC_TEXT_LEN,
+        }
+
+    @property
+    def gym_space(self) -> gym.spaces.Dict:
+        spaces = {}
+        for key in self.tokenizable:
+            spaces[key] = gym.spaces.Text(max_length=500, min_length=0)
+        spaces["numbers_active_pokemon"] = gym.spaces.Box(
+            low=-10.0, high=10.0, shape=(self.POKEMON_NUM_LEN,), dtype=np.float32
+        )
+        for i in range(self.NUM_SWITCHES):
+            spaces[f"numbers_switch_{i}"] = gym.spaces.Box(
+                low=-10.0, high=10.0, shape=(self.POKEMON_NUM_LEN,), dtype=np.float32
+            )
+        spaces["numbers_opponent_active_pokemon"] = gym.spaces.Box(
+            low=-10.0, high=10.0, shape=(self.POKEMON_NUM_LEN,), dtype=np.float32
+        )
+        spaces["numbers_misc"] = gym.spaces.Box(
+            low=-10.0, high=10.0, shape=(self.MISC_NUM_LEN,), dtype=np.float32
+        )
+        return gym.spaces.Dict(spaces)
+
+    def _get_universal_pokemon_text(
+        self, pokemon: UniversalPokemon, is_active: bool = True
+    ) -> list[str]:
+        out = [
+            pokemon.name,
+            pokemon.item,
+            pokemon.ability,
+            pokemon.tera_type,
+        ]
+        type_parts = pokemon.types.split()
+        out.extend(type_parts[:2] + ["notype"] * (2 - len(type_parts)))
+        out.append(pokemon.effect)
+        out.append(pokemon.status)
+        # (sorted order, padded to 4)
+        for move in self._pad_moves(pokemon.moves):
+            out.append(clean_name(move.name) if move else "<blank>")
+
+        return out
+
+    def _get_universal_pokemon_numbers(
+        self, pokemon: UniversalPokemon, is_active: bool = True
+    ) -> list[float]:
+        out = [pokemon.hp_pct, pokemon.lvl / 100.0]
+        for stat in ("atk", "spa", "def", "spd", "spe", "hp"):
+            out.append(getattr(pokemon, f"base_{stat}") / 255.0)
+        if is_active:
+            for boost in ("atk", "spa", "def", "spd", "spe", "accuracy", "evasion"):
+                out.append(getattr(pokemon, f"{boost}_boost") / 6.0)
+        else:
+            out.extend([0.0] * 7)
+        # (sorted order, padded to 4)
+        for move in self._pad_moves(pokemon.moves):
+            if move:
+                pp_ratio = move.current_pp / move.max_pp if move.max_pp > 0 else 0.0
+                pp_warning = (pp_ratio >= 0.5) + (pp_ratio >= 0.25) + (pp_ratio > 0)
+                out.extend(
+                    [
+                        move.base_power / 200.0,
+                        move.accuracy,
+                        move.priority / 5.0,
+                        float(pp_warning),
+                    ]
+                )
+            else:
+                out.extend([-2.0] * 4)
+
+        return out
+
+    def _pad_moves(
+        self, moves: list[UniversalMove], n: int = 4
+    ) -> list[Optional[UniversalMove]]:
+        sorted_moves = consistent_move_order(moves)[:n]
+        return sorted_moves + [None] * (n - len(sorted_moves))
+
+    def _get_blank_pokemon_text(self) -> list[str]:
+        # padding for empty switch slots."""
+        return ["<blank>"] * self.POKEMON_TEXT_LEN
+
+    def _get_blank_pokemon_numbers(self) -> list[float]:
+        # padding for empty switch slots."""
+        return [-2.0] * self.POKEMON_NUM_LEN
+
+    def _get_misc_text(self, state: UniversalState) -> list[str]:
+        # global text features: format, conditions, prev moves, opponent team
+        # note: "nofield" isn't in the tokenizer, so we map it to "<blank>"
+        battle_field = (
+            state.battle_field if state.battle_field != "nofield" else "<blank>"
+        )
+        out = [
+            f"<{state.format}>",
+            "<forcedswitch>" if state.forced_switch else "<anychoice>",
+            state.weather,
+            battle_field,
+            state.player_conditions,
+            state.opponent_conditions,
+            clean_name(state.player_prev_move.name),
+            clean_name(state.opponent_prev_move.name),
+        ]
+        revealed = sorted(self.revealed_opponents)[:6]
+        out.extend(revealed + ["<blank>"] * (6 - len(revealed)))
+        teampreview = sorted(state.opponent_teampreview)[:6]
+        out.extend(teampreview + ["<blank>"] * (6 - len(teampreview)))
+        return out
+
+    def _get_misc_numbers(self, state: UniversalState) -> list[float]:
+        # global numeric features
+        return [
+            state.opponents_remaining / 6.0,
+            float(self.any_opponent_asleep),
+            float(self.any_opponent_frozen),
+            float(state.can_tera),
+        ]
+
+    def state_to_obs(self, state: UniversalState) -> dict[str, np.ndarray]:
+        obs = {}
+
+        # update history-dependent state tracking
+        opponent = state.opponent_active_pokemon
+        self.any_opponent_asleep |= opponent.status == "slp"
+        self.any_opponent_frozen |= opponent.status == "frz"
+        self.revealed_opponents.add(opponent.base_species)
+
+        # player active
+        obs["text_active_pokemon"] = self._get_universal_pokemon_text(
+            state.player_active_pokemon, is_active=True
+        )
+        obs["numbers_active_pokemon"] = self._get_universal_pokemon_numbers(
+            state.player_active_pokemon, is_active=True
+        )
+
+        # reserve team (sorted order, padded to NUM_SWITCHES)
+        switches = consistent_pokemon_order(state.available_switches)
+        for i in range(self.NUM_SWITCHES):
+            if i < len(switches):
+                obs[f"text_switch_{i}"] = self._get_universal_pokemon_text(
+                    switches[i], is_active=False
+                )
+                obs[f"numbers_switch_{i}"] = self._get_universal_pokemon_numbers(
+                    switches[i], is_active=False
+                )
+            else:
+                obs[f"text_switch_{i}"] = self._get_blank_pokemon_text()
+                obs[f"numbers_switch_{i}"] = self._get_blank_pokemon_numbers()
+
+        # opponent active
+        obs["text_opponent_active_pokemon"] = self._get_universal_pokemon_text(
+            state.opponent_active_pokemon, is_active=True
+        )
+        obs["numbers_opponent_active_pokemon"] = self._get_universal_pokemon_numbers(
+            state.opponent_active_pokemon, is_active=True
+        )
+
+        # misc (global state)
+        obs["text_misc"] = self._get_misc_text(state)
+        obs["numbers_misc"] = self._get_misc_numbers(state)
+
+        # temporary assert checks to verify lengths
+        for key in obs:
+            if key.startswith("text"):
+                expected = (
+                    self.MISC_TEXT_LEN if key == "text_misc" else self.POKEMON_TEXT_LEN
+                )
+                assert (
+                    len(obs[key]) == expected
+                ), f"{key}: expected {expected}, got {len(obs[key])}"
+            else:
+                expected = (
+                    self.MISC_NUM_LEN if key == "numbers_misc" else self.POKEMON_NUM_LEN
+                )
+                assert (
+                    len(obs[key]) == expected
+                ), f"{key}: expected {expected}, got {len(obs[key])}"
+
+        for key in obs:
+            if key.startswith("text"):
+                obs[key] = np.array(" ".join(obs[key]), dtype=np.str_)
+            else:
+                obs[key] = np.array(obs[key], dtype=np.float32)
+
+        return obs
+
+
+@register_observation_space()
 class PatchPokeAgentTeraBug(ObservationSpace):
     """
     Intentionally reintroduces a bug in the "pokeagent" backend that has been fixed.
