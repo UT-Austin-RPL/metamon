@@ -50,12 +50,30 @@ parser.add_argument(
     action="store_true",
     help="Download chaos/ JSON files (includes info.cutoff metadata).",
 )
+parser.add_argument(
+    "--max_concurrency",
+    type=int,
+    default=8,
+    help="Maximum number of concurrent HTTP requests.",
+)
+parser.add_argument(
+    "--max_retries",
+    type=int,
+    default=5,
+    help="Maximum number of retries for a failed request.",
+)
+parser.add_argument(
+    "--backoff_base",
+    type=float,
+    default=0.5,
+    help="Base seconds for exponential backoff (retry delay = base * 2^attempt).",
+)
 args = parser.parse_args()
 
 
 BASELINE_RE = re.compile(r"-(\d+(?:\.\d+)?)\.(txt|json)$")
 
-SKIP_DIRS = {"monotype", "metagame"}
+SKIP_DIRS = {"monotype", "metagame", "leads"}
 if not args.include_chaos:
     SKIP_DIRS.add("chaos")
 
@@ -93,80 +111,94 @@ async def save_text_file(session, url, local_path):
                 await file.write(text)
 
 
-async def scrape_base(session, url, local_dir, start_date, end_date):
-    async with session.get(url) as response:
-        text = await response.text()
+async def _fetch_with_retries(session, url):
+    for attempt in range(args.max_retries + 1):
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"HTTP {response.status}")
+                return await response.text()
+        except Exception:
+            if attempt >= args.max_retries:
+                raise
+            await asyncio.sleep(args.backoff_base * (2**attempt))
+
+
+async def scrape_base(session, url, local_dir, start_date, end_date, sem):
+    async with sem:
+        text = await _fetch_with_retries(session, url)
+    soup = BeautifulSoup(text, "html.parser")
+    tasks = []
+    for link in soup.find_all("a"):
+        href = link.get("href")
+        if href and not href.startswith("?") and href != "../":
+            href_date = int(href[:4])
+            href_full = urljoin(url, href)
+            local_path = os.path.join(local_dir, href)
+
+            if (
+                href.endswith("/")
+                and href_date >= start_date
+                and href_date < end_date
+            ):  # It's a directory
+                ensure_dir(local_path)
+                task = asyncio.create_task(
+                    scrape(session, href_full, local_path, sem)
+                )
+                tasks.append(task)
+
+    await asyncio.gather(*tasks)
+
+
+async def scrape(session, url, local_dir, sem):
+    try:
+        async with sem:
+            text = await _fetch_with_retries(session, url)
         soup = BeautifulSoup(text, "html.parser")
 
         tasks = []
         for link in soup.find_all("a"):
             href = link.get("href")
-            if href and not href.startswith("?") and href != "../":
-                href_date = int(href[:4])
+            if not href or href.startswith("?"):
+                continue
+            if href.endswith("/"):
+                if href == "../":
+                    continue
+                dirname = href.rstrip("/")
+                if dirname in SKIP_DIRS:
+                    continue
                 href_full = urljoin(url, href)
                 local_path = os.path.join(local_dir, href)
+                ensure_dir(local_path)
+                task = asyncio.create_task(
+                    scrape(session, href_full, local_path, sem)
+                )
+                tasks.append(task)
+                continue
 
+            if href.endswith(".txt") or href.endswith(".json"):
+                baseline = extract_baseline(href)
                 if (
-                    href.endswith("/")
-                    and href_date >= start_date
-                    and href_date < end_date
-                ):  # It's a directory
-                    ensure_dir(local_path)
-                    task = asyncio.create_task(scrape(session, href_full, local_path))
-                    tasks.append(task)
+                    allowed_baselines is not None
+                    and baseline is not None
+                    and baseline not in allowed_baselines
+                ):
+                    continue
+                if (
+                    args.min_baseline is not None
+                    and baseline is not None
+                    and baseline < args.min_baseline
+                ):
+                    continue
+                href_full = urljoin(url, href)
+                local_path = os.path.join(local_dir, href)
+                print(f"Downloading {href_full} to {local_path}")
+                task = asyncio.create_task(
+                    save_text_file(session, href_full, local_path)
+                )
+                tasks.append(task)
 
         await asyncio.gather(*tasks)
-
-
-async def scrape(session, url, local_dir):
-    try:
-        async with session.get(url) as response:
-            text = await response.text()
-            soup = BeautifulSoup(text, "html.parser")
-
-            tasks = []
-            for link in soup.find_all("a"):
-                href = link.get("href")
-                if not href or href.startswith("?"):
-                    continue
-                if href.endswith("/"):
-                    if href == "../":
-                        continue
-                    dirname = href.rstrip("/")
-                    if dirname in SKIP_DIRS:
-                        continue
-                    href_full = urljoin(url, href)
-                    local_path = os.path.join(local_dir, href)
-                    ensure_dir(local_path)
-                    task = asyncio.create_task(
-                        scrape(session, href_full, local_path)
-                    )
-                    tasks.append(task)
-                    continue
-
-                if href.endswith(".txt") or href.endswith(".json"):
-                    baseline = extract_baseline(href)
-                    if (
-                        allowed_baselines is not None
-                        and baseline is not None
-                        and baseline not in allowed_baselines
-                    ):
-                        continue
-                    if (
-                        args.min_baseline is not None
-                        and baseline is not None
-                        and baseline < args.min_baseline
-                    ):
-                        continue
-                    href_full = urljoin(url, href)
-                    local_path = os.path.join(local_dir, href)
-                    print(f"Downloading {href_full} to {local_path}")
-                    task = asyncio.create_task(
-                        save_text_file(session, href_full, local_path)
-                    )
-                    tasks.append(task)
-
-            await asyncio.gather(*tasks)
     except Exception as e:
         print(f"Error on url {url}: {e}")
 
@@ -175,13 +207,16 @@ ensure_dir(args.save_dir)
 
 
 async def main():
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(limit=args.max_concurrency)
+    sem = asyncio.Semaphore(args.max_concurrency)
+    async with aiohttp.ClientSession(connector=connector) as session:
         await scrape_base(
             session,
             base_url,
             args.save_dir,
             start_date=args.start_date,
             end_date=args.end_date,
+            sem=sem,
         )
 
 
