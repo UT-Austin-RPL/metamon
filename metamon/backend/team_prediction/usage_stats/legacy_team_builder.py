@@ -203,10 +203,22 @@ class TeamBuilder:
                 if self.verbose:
                     print(f"Hidden Power {hp_type} detected, IVs set to {ivs}")
                 break
+
+        # Gen 1-2 had no abilities; gen 1 had no held items.
+        # Usage stats contain bogus data for these, so we override.
+        if self.gen <= 2:
+            ability = "No Ability"
+        else:
+            ability = weighted_random_choice(abilities, 1)[0]
+        if self.gen <= 1:
+            item = ""
+        else:
+            item = weighted_random_choice(items, 1)[0]
+
         return {
             "name": pokemon,
-            "ability": weighted_random_choice(abilities, 1)[0],
-            "item": weighted_random_choice(items, 1)[0],
+            "ability": ability,
+            "item": item,
             "spread": weighted_random_choice(spreads, 1)[0],
             "tera_type": weighted_random_choice(tera_types, 1)[0],
             "IVs": ivs,
@@ -253,10 +265,16 @@ class TeamBuilder:
                         print(f"Hidden Power {hp_type} detected, IVs set to {ivs}")
                     break
 
-        if not ability:
+        # Gen 1-2 had no abilities; gen 1 had no held items.
+        # Usage stats contain bogus data for these, so we override.
+        if self.gen <= 2:
+            ability = "No Ability"
+        elif not ability:
             ability = weighted_random_choice(abilities, 1)[0]
 
-        if not item:
+        if self.gen <= 1:
+            item = ""
+        elif not item:
             item = weighted_random_choice(items, 1)[0]
 
         if not spread:
