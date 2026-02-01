@@ -4,7 +4,7 @@ import json
 import datetime
 import functools
 import warnings
-from typing import Optional, Union, List
+from typing import Optional, List
 
 from termcolor import colored
 import metamon
@@ -28,32 +28,14 @@ TIER_MAP = {
 
 EARLIEST_USAGE_STATS_DATE = datetime.date(2014, 1, 1)
 LATEST_USAGE_STATS_DATE = datetime.date(2025, 12, 1)
-DEFAULT_USAGE_RANK = "1500"
-
-RankLike = Optional[Union[str, int, float]]
+DEFAULT_USAGE_RANK = 1500
 
 
-def normalize_rank(rank: RankLike) -> Optional[str]:
-    """
-    Normalize a rank/baseline representation to a stable string used in filenames/dirs.
-    Examples:
-      1630.0 -> "1630"
-      "1760" -> "1760"
-      None   -> None
-    """
-    if rank is None:
-        return None
-    s = str(rank).strip()
-    if re.fullmatch(r"\d+(\.0+)?", s):
-        s = s.split(".")[0]
-    return s
-
-
-def rank_from_moveset_filename(fmt: str, filename: str) -> Optional[str]:
+def rank_from_moveset_filename(fmt: str, filename: str) -> Optional[int]:
     """
     Extract the baseline/rank from a Smogon moveset filename.
     Examples: gen1ou-0.txt, gen1ou-1500.txt, gen1ou-1630.txt, gen1ou-1760.txt
-    Returns normalized rank string or None if not applicable.
+    Returns rank as int or None if not applicable.
     """
     if not filename.startswith(fmt):
         return None
@@ -65,15 +47,15 @@ def rank_from_moveset_filename(fmt: str, filename: str) -> Optional[str]:
     stem = filename[:-4]
     if stem == fmt:
         # Smogon convention: no explicit baseline means 1500.
-        return "1500"
+        return 1500
 
     m = re.match(rf"^{re.escape(fmt)}-(\d+(?:\.\d+)?)$", stem)
     if not m:
         return None
-    return normalize_rank(m.group(1))
+    return int(float(m.group(1)))
 
 
-def list_available_ranks_in_moveset_dir(moveset_dir: str, fmt: str) -> List[str]:
+def list_available_ranks_in_moveset_dir(moveset_dir: str, fmt: str) -> List[int]:
     if not os.path.isdir(moveset_dir):
         return []
     ranks = set()
@@ -81,10 +63,10 @@ def list_available_ranks_in_moveset_dir(moveset_dir: str, fmt: str) -> List[str]
         r = rank_from_moveset_filename(fmt, fn)
         if r is not None:
             ranks.add(r)
-    return sorted(ranks, key=lambda x: float(x))
+    return sorted(ranks)
 
 
-def list_available_usage_ranks(format: str) -> List[str]:
+def list_available_usage_ranks(format: str) -> List[int]:
     """
     List available baseline/rank subdirectories in the processed usage-stats dataset
     for a given format (e.g., gen4ou).
@@ -94,11 +76,11 @@ def list_available_usage_ranks(format: str) -> List[str]:
     base = os.path.join(usage_stats_path, "movesets_data", f"gen{gen}", f"{tier}")
     if not os.path.isdir(base):
         return []
-    ranks = [d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))]
-    return sorted(
-        ranks,
-        key=lambda x: float(x) if re.fullmatch(r"\d+(\.\d+)?", x) else x,
-    )
+    ranks = []
+    for d in os.listdir(base):
+        if os.path.isdir(os.path.join(base, d)) and re.fullmatch(r"\d+", d):
+            ranks.append(int(d))
+    return sorted(ranks)
 
 
 def parse_pokemon_moveset(file_path):
@@ -325,7 +307,7 @@ class SmogonStat:
         format: str,
         raw_stats_dir: str,
         date=None,
-        rank=None,
+        rank: Optional[int] = None,
         verbose: bool = True,
     ) -> None:
         if date and type(date) == str:
@@ -337,25 +319,25 @@ class SmogonStat:
 
         self.data_paths = [os.path.join(raw_stats_dir, date) for date in dates]
         self.format = format
-        self.rank = normalize_rank(rank)
+        self.rank = rank
         self.verbose = verbose
 
         self._movesets = {}
         self._inclusive = {}
         self._usage = None
-        self._available_ranks: List[str] = []
+        self._available_ranks: List[int] = []
         self._load()
         self._name_conversion = {
             pokemon_name(pokemon): pokemon for pokemon in self._movesets.keys()
         }
 
     @staticmethod
-    def available_ranks(format: str, raw_stats_dir: str, date: str) -> List[str]:
+    def available_ranks(format: str, raw_stats_dir: str, date: str) -> List[int]:
         moveset_dir = os.path.join(raw_stats_dir, date, "moveset")
         return list_available_ranks_in_moveset_dir(moveset_dir, format)
 
     @property
-    def available_ranks_loaded(self) -> List[str]:
+    def available_ranks_loaded(self) -> List[int]:
         return list(self._available_ranks)
 
     def _load(self):
@@ -388,7 +370,7 @@ class SmogonStat:
                 continue
 
             if self.rank is None:
-                available = sorted(files_by_rank.keys(), key=lambda x: float(x))
+                available = sorted(files_by_rank.keys())
                 raise ValueError(
                     f"SmogonStat requires a baseline/rank for {self.format}. "
                     f"Available ranks in {moveset_path}: {available}"
@@ -403,7 +385,7 @@ class SmogonStat:
                     if self.verbose:
                         warnings.warn(colored(f"Failed parsing {fp}: {e}", "red"))
 
-        self._available_ranks = sorted(ranks_seen, key=lambda x: float(x))
+        self._available_ranks = sorted(ranks_seen)
 
         if not _movesets:
             self._movesets = {}
@@ -515,18 +497,13 @@ class PreloadedSmogonUsageStats(SmogonStat):
         format,
         start_date: datetime.date,
         end_date: datetime.date,
-        rank: RankLike = DEFAULT_USAGE_RANK,
+        rank: int = DEFAULT_USAGE_RANK,
         load_nearest_lower_rank: bool = True,
         search_lower_ranks_on_miss: bool = True,
         verbose: bool = True,
     ):
         self.format = format.strip().lower()
-        self.rank = normalize_rank(rank)
-        if self.rank is None:
-            raise ValueError(
-                f"PreloadedSmogonUsageStats requires rank=... for {self.format} "
-                "(ranked usage stats are stored by baseline)"
-            )
+        self.rank = int(rank)
         self.start_date = start_date
         self.end_date = end_date
         self.verbose = verbose
@@ -540,33 +517,21 @@ class PreloadedSmogonUsageStats(SmogonStat):
         inclusive_base = os.path.join(
             usage_stats_path, "movesets_data", f"gen{gen}", "all_tiers"
         )
-        movesets_path = os.path.join(movesets_base, self.rank)
-        inclusive_path = os.path.join(inclusive_base, self.rank)
+        movesets_path = os.path.join(movesets_base, str(self.rank))
+        inclusive_path = os.path.join(inclusive_base, str(self.rank))
 
-        def _avail_ranks(base: str) -> list[str]:
+        def _avail_ranks(base: str) -> list[int]:
             if not os.path.isdir(base):
                 return []
-            return sorted(
-                [d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))],
-                key=lambda x: float(x) if re.fullmatch(r"\d+(\.\d+)?", x) else x,
-            )
+            ranks = []
+            for d in os.listdir(base):
+                if os.path.isdir(os.path.join(base, d)) and re.fullmatch(r"\d+", d):
+                    ranks.append(int(d))
+            return sorted(ranks)
 
-        def _nearest_lower_rank(target: str, candidates: list[str]) -> Optional[str]:
-            try:
-                target_val = float(target)
-            except ValueError:
-                return None
-            lower = []
-            for r in candidates:
-                try:
-                    r_val = float(r)
-                except ValueError:
-                    continue
-                if r_val < target_val:
-                    lower.append((r_val, r))
-            if not lower:
-                return None
-            return max(lower, key=lambda x: x[0])[1]
+        def _nearest_lower_rank(target: int, candidates: list[int]) -> Optional[int]:
+            lower = [r for r in candidates if r < target]
+            return max(lower) if lower else None
 
         if not os.path.isdir(movesets_path):
             avail = _avail_ranks(movesets_base)
@@ -585,8 +550,8 @@ class PreloadedSmogonUsageStats(SmogonStat):
                         )
                     )
                 self.rank = fallback_rank
-                movesets_path = os.path.join(movesets_base, self.rank)
-                inclusive_path = os.path.join(inclusive_base, self.rank)
+                movesets_path = os.path.join(movesets_base, str(self.rank))
+                inclusive_path = os.path.join(inclusive_base, str(self.rank))
             else:
                 raise FileNotFoundError(
                     f"Movesets data not found for {self.format} at rank={self.rank}. "
@@ -626,14 +591,14 @@ class PreloadedSmogonUsageStats(SmogonStat):
             end_year=LATEST_USAGE_STATS_DATE.year,
             end_month=LATEST_USAGE_STATS_DATE.month,
         )
-        self._lower_rank_fallbacks: list[tuple[str, dict, dict]] = []
+        self._lower_rank_fallbacks: list[tuple[int, dict, dict]] = []
         if search_lower_ranks_on_miss:
             avail = _avail_ranks(movesets_base)
-            lower_ranks = [r for r in avail if float(r) < float(self.rank)]
-            lower_ranks.sort(key=lambda x: float(x), reverse=True)
+            lower_ranks = [r for r in avail if r < self.rank]
+            lower_ranks.sort(reverse=True)
             for r in lower_ranks:
-                lower_movesets_path = os.path.join(movesets_base, r)
-                lower_inclusive_path = os.path.join(inclusive_base, r)
+                lower_movesets_path = os.path.join(movesets_base, str(r))
+                lower_inclusive_path = os.path.join(inclusive_base, str(r))
                 if not os.path.isdir(lower_movesets_path) or not os.path.isdir(
                     lower_inclusive_path
                 ):
@@ -716,7 +681,7 @@ def get_usage_stats(
     format,
     start_date: Optional[datetime.date] = None,
     end_date: Optional[datetime.date] = None,
-    rank: RankLike = DEFAULT_USAGE_RANK,
+    rank: int = DEFAULT_USAGE_RANK,
     load_nearest_lower_rank: bool = True,
     search_lower_ranks_on_miss: bool = True,
 ) -> PreloadedSmogonUsageStats:
@@ -730,14 +695,11 @@ def get_usage_stats(
     else:
         # force to start of months to prevent cache miss (we only have monthly stats anyway)
         end_date = datetime.date(end_date.year, end_date.month, 1)
-    rank_norm = normalize_rank(rank)
-    if rank_norm is None:
-        rank_norm = DEFAULT_USAGE_RANK
     return _cached_smogon_stats(
         format,
         start_date,
         end_date,
-        rank_norm,
+        int(rank),
         load_nearest_lower_rank,
         search_lower_ranks_on_miss,
     )
@@ -748,16 +710,14 @@ def _cached_smogon_stats(
     format,
     start_date: datetime.date,
     end_date: datetime.date,
-    rank: Optional[str],
+    rank: int,
     load_nearest_lower_rank: bool,
     search_lower_ranks_on_miss: bool,
 ):
-    if rank is None:
-        raise ValueError("rank is required for cached usage stats.")
     print(
         f"Loading usage stats for {format} between {start_date} and {end_date} (rank={rank})"
     )
-    return PreloadedSmogonUsageStats(
+    stats = PreloadedSmogonUsageStats(
         format=format,
         start_date=start_date,
         end_date=end_date,
@@ -766,6 +726,9 @@ def _cached_smogon_stats(
         search_lower_ranks_on_miss=search_lower_ranks_on_miss,
         verbose=False,
     )
+    if stats.rank != rank:
+        print(f"  -> Fell back to rank={stats.rank}")
+    return stats
 
 
 if __name__ == "__main__":
@@ -773,7 +736,6 @@ if __name__ == "__main__":
         "gen9ou",
         datetime.date(2023, 1, 1),
         datetime.date(2025, 6, 1),
-        rank=DEFAULT_USAGE_RANK,
     )
     print(len(stats.usage))
     for mon in sorted(

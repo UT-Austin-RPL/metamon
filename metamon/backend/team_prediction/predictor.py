@@ -18,7 +18,6 @@ from metamon.backend.team_prediction.usage_stats.legacy_team_builder import (
 from metamon.backend.team_prediction.usage_stats import (
     PreloadedSmogonUsageStats,
     DEFAULT_USAGE_RANK,
-    RankLike,
 )
 from metamon.backend.replay_parser.str_parsing import pokemon_name
 from metamon.backend.team_prediction.team import TeamSet, PokemonSet, Roster
@@ -28,10 +27,8 @@ class TeamPredictor(ABC):
     def __init__(
         self,
         replay_stats_dir: Optional[str] = None,
-        usage_stats_rank: RankLike = DEFAULT_USAGE_RANK,
+        usage_stats_rank: int = DEFAULT_USAGE_RANK,
     ):
-        if usage_stats_rank is None:
-            usage_stats_rank = DEFAULT_USAGE_RANK
         self.replay_stats_dir = replay_stats_dir
         self.usage_stats_rank = usage_stats_rank
 
@@ -219,7 +216,7 @@ class ReplayPredictor(NaiveUsagePredictor):
         top_k_scored_teams: int = 10,
         top_k_scored_movesets: int = 3,
         replay_stats_dir: Optional[str] = None,
-        usage_stats_rank: RankLike = DEFAULT_USAGE_RANK,
+        usage_stats_rank: int = DEFAULT_USAGE_RANK,
     ):
         assert not isinstance(top_k_consistent_teams, str)
         super().__init__(

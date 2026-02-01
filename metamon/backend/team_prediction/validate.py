@@ -56,7 +56,9 @@ def _find_showdown_bin(repo_root: Path) -> Optional[str]:
     return shutil.which("pokemon-showdown")
 
 
-def _resolve_showdown_validate_cmd(format_id: str, cmd: Optional[List[str]]) -> List[str]:
+def _resolve_showdown_validate_cmd(
+    format_id: str, cmd: Optional[List[str]]
+) -> List[str]:
     if cmd is not None:
         return cmd + [format_id]
     showdown_bin = _find_showdown_bin(_REPO_ROOT)

@@ -7,7 +7,10 @@ from termcolor import colored
 import numpy as np
 
 import metamon
-from metamon.backend.team_prediction.usage_stats import get_usage_stats, RankLike
+from metamon.backend.team_prediction.usage_stats import (
+    get_usage_stats,
+    DEFAULT_USAGE_RANK,
+)
 from metamon.backend.team_prediction.usage_stats.constants import (
     HIDDEN_POWER_IVS,
     HIDDEN_POWER_DVS,
@@ -43,7 +46,7 @@ class TeamBuilder:
         format: str,
         start_date: datetime.date,
         end_date: datetime.date,
-        rank: RankLike = None,
+        rank: int = DEFAULT_USAGE_RANK,
         verbose: bool = False,
         remove_banned: bool = False,
     ):

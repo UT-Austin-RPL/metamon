@@ -117,10 +117,7 @@ if __name__ == "__main__":
         DefaultActionSpace,
     )
     from metamon.data import ParsedReplayDataset
-    from metamon.backend.team_prediction.usage_stats import (
-        get_usage_stats,
-        DEFAULT_USAGE_RANK,
-    )
+    from metamon.backend.team_prediction.usage_stats import get_usage_stats
 
     parser = ArgumentParser()
     parser.add_argument("--parsed_replay_root", required=True)
@@ -136,7 +133,7 @@ if __name__ == "__main__":
 
     # catch stray names from Smogon stats
     for format in SUPPORTED_BATTLE_FORMATS:
-        stat = get_usage_stats(format, rank=DEFAULT_USAGE_RANK)
+        stat = get_usage_stats(format)
         for pokemon_name_str, data in tqdm.tqdm(stat._inclusive.items()):
             tokenizer.add_token_for(pokemon_name(pokemon_name_str))
 

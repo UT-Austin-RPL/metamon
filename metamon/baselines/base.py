@@ -18,10 +18,7 @@ from poke_env.environment import (
 )
 
 from metamon.baselines import GEN_DATA
-from metamon.backend.team_prediction.usage_stats import (
-    get_usage_stats,
-    DEFAULT_USAGE_RANK,
-)
+from metamon.backend.team_prediction.usage_stats import get_usage_stats
 
 
 class Baseline(Player, ABC):
@@ -546,10 +543,7 @@ class Baseline(Player, ABC):
         gen, format = self.get_gen_format(battle)
 
         if check_w > 0:
-            smogon_stats = get_usage_stats(
-                f"gen{gen}{format.lower()}",
-                rank=DEFAULT_USAGE_RANK,
-            )
+            smogon_stats = get_usage_stats(f"gen{gen}{format.lower()}")
 
         switch_scores = {}
         for switch in switches:

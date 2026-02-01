@@ -11,10 +11,7 @@ from poke_env.data import to_id_str
 import metamon
 from metamon.tokenizer import PokemonTokenizer, UNKNOWN_TOKEN
 from metamon.backend.team_prediction.team import PokemonSet, TeamSet
-from metamon.backend.team_prediction.usage_stats import (
-    get_usage_stats,
-    DEFAULT_USAGE_RANK,
-)
+from metamon.backend.team_prediction.usage_stats import get_usage_stats
 
 
 def create_vocabularies(scan_dataset: bool = False):
@@ -48,7 +45,6 @@ def create_vocabularies(scan_dataset: bool = False):
                 format,
                 start_date=date(2015, 1, 1),
                 end_date=date(2025, 1, 1),
-                rank=DEFAULT_USAGE_RANK,
             )
 
             for pokemon_name, data in stat._inclusive.items():

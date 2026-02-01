@@ -15,13 +15,13 @@ from metamon.backend.replay_parser.replay_state import (
     unknown,
 )
 from metamon.backend.replay_parser.str_parsing import pokemon_name
-from metamon.backend.team_prediction.usage_stats import get_usage_stats, DEFAULT_USAGE_RANK
+from metamon.backend.team_prediction.usage_stats import get_usage_stats
 from metamon.backend.showdown_dex import Dex
 
 
 def moveset_size(pokemon_name: str, gen: int) -> int:
     # attempts to handle cases where we would expect a Pokemon to have less than 4 moves
-    stat = get_usage_stats(f"gen{gen}ubers", rank=DEFAULT_USAGE_RANK)
+    stat = get_usage_stats(f"gen{gen}ubers")
     try:
         moves = len(set(stat[pokemon_name]["moves"].keys()) - {"Nothing"})
     except KeyError:
