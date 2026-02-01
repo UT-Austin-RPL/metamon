@@ -49,7 +49,7 @@ def main(args):
                                 "movesets_data",
                                 f"gen{gen}",
                                 f"{format.name.lower()}",
-                                rank,
+                                str(rank),
                                 f"{date}.json",
                             )
                             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -65,7 +65,7 @@ def main(args):
                                 "checks_data",
                                 f"gen{gen}",
                                 f"{format.name.lower()}",
-                                rank,
+                                str(rank),
                                 f"{date}.json",
                             )
                             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -82,7 +82,7 @@ def main(args):
                             "movesets_data",
                             f"gen{gen}",
                             "all_tiers",
-                            rank,
+                            str(rank),
                             f"{date}.json",
                         )
                         os.makedirs(os.path.dirname(path), exist_ok=True)
