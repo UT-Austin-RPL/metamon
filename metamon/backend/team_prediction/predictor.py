@@ -17,14 +17,20 @@ from metamon.backend.team_prediction.usage_stats.legacy_team_builder import (
 )
 from metamon.backend.team_prediction.usage_stats import (
     PreloadedSmogonUsageStats,
+    DEFAULT_USAGE_RANK,
 )
 from metamon.backend.replay_parser.str_parsing import pokemon_name
 from metamon.backend.team_prediction.team import TeamSet, PokemonSet, Roster
 
 
 class TeamPredictor(ABC):
-    def __init__(self, replay_stats_dir: Optional[str] = None):
+    def __init__(
+        self,
+        replay_stats_dir: Optional[str] = None,
+        usage_stats_rank: int = DEFAULT_USAGE_RANK,
+    ):
         self.replay_stats_dir = replay_stats_dir
+        self.usage_stats_rank = usage_stats_rank
 
     def bin_usage_stats_dates(
         self, date: datetime.date
@@ -50,6 +56,7 @@ class TeamPredictor(ABC):
             format=format,
             start_date=start_date,
             end_date=end_date,
+            rank=self.usage_stats_rank,
         )
 
     def get_usage_stats(
@@ -209,9 +216,13 @@ class ReplayPredictor(NaiveUsagePredictor):
         top_k_scored_teams: int = 10,
         top_k_scored_movesets: int = 3,
         replay_stats_dir: Optional[str] = None,
+        usage_stats_rank: int = DEFAULT_USAGE_RANK,
     ):
         assert not isinstance(top_k_consistent_teams, str)
-        super().__init__(replay_stats_dir)
+        super().__init__(
+            replay_stats_dir,
+            usage_stats_rank=usage_stats_rank,
+        )
         self.stat_format = None
         self.top_k_consistent_teams = top_k_consistent_teams
         self.top_k_consistent_movesets = top_k_consistent_movesets

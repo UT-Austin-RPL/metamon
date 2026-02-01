@@ -15,7 +15,10 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
-from metamon.backend.team_prediction.usage_stats import get_usage_stats
+from metamon.backend.team_prediction.usage_stats import (
+    get_usage_stats,
+    DEFAULT_USAGE_RANK,
+)
 
 
 def get_monthly_dates(start_year: int, end_year: int) -> list[datetime.date]:
@@ -33,8 +36,14 @@ def main(args):
     top_k = args.top_k
     start_year = args.start_year
     end_year = args.end_year
+    rank = args.rank
+    output_file = (
+        args.output or f"{pokemon_name}_{format_name}_rank{rank}_move_trends.png"
+    )
 
-    print(f"Analyzing {pokemon_name} in {format_name} ({start_year}-{end_year})")
+    print(
+        f"Analyzing {pokemon_name} in {format_name} ({start_year}-{end_year}, rank={rank})"
+    )
 
     # Step 1: Load all-time stats to find top K moves
     print("Loading all-time stats to determine top moves...")
@@ -42,6 +51,7 @@ def main(args):
         format_name,
         start_date=datetime.date(start_year, 1, 1),
         end_date=datetime.date(end_year, 12, 1),
+        rank=rank,
     )
 
     try:
@@ -73,6 +83,7 @@ def main(args):
                 format_name,
                 start_date=date,
                 end_date=date,
+                rank=rank,
             )
             pokemon_monthly = monthly_stats[pokemon_name]
             moves = pokemon_monthly.get("moves", {})
@@ -115,7 +126,7 @@ def main(args):
             alpha=0.9,
         )
 
-    title = f"{pokemon_name.upper()} Move Trends in {format_name.upper()} ({start_year}-{end_year})"
+    title = f"{pokemon_name.upper()} Move Trends in {format_name.upper()} ({start_year}-{end_year}, rank={rank})"
     ax.set_title(title, fontsize=18, fontweight="bold", family="monospace", pad=15)
 
     ax.set_xlabel("Date", fontsize=14, fontweight="bold")
@@ -139,7 +150,6 @@ def main(args):
     plt.tight_layout()
 
     # Save plot
-    output_file = f"{pokemon_name}_{format_name}_move_trends.png"
     plt.savefig(output_file, dpi=150, bbox_inches="tight", facecolor="white")
     print(f"Saved plot to {output_file}")
 
@@ -177,6 +187,19 @@ if __name__ == "__main__":
         type=int,
         default=2025,
         help="End year for analysis (default: 2025)",
+    )
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=DEFAULT_USAGE_RANK,
+        help=f"Usage stats rank/baseline (default: {DEFAULT_USAGE_RANK})",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Output filename for the plot (default: {pokemon}_{format}_rank{rank}_move_trends.png)",
     )
     args = parser.parse_args()
     main(args)

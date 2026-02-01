@@ -23,7 +23,9 @@ from metamon.backend.replay_parser.str_parsing import clean_name
 
 
 USAGE_STATS = get_usage_stats(
-    "gen9ou", start_date=date(2022, 1, 1), end_date=date(2025, 5, 31)
+    "gen9ou",
+    start_date=date(2022, 1, 1),
+    end_date=date(2025, 5, 31),
 )
 
 

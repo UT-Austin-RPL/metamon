@@ -42,7 +42,9 @@ def create_vocabularies(scan_dataset: bool = False):
         for tier in ["ou", "uu", "ubers", "nu"]:
             format = f"gen{gen}{tier}"
             stat = get_usage_stats(
-                format, start_date=date(2015, 1, 1), end_date=date(2025, 1, 1)
+                format,
+                start_date=date(2015, 1, 1),
+                end_date=date(2025, 1, 1),
             )
 
             for pokemon_name, data in stat._inclusive.items():

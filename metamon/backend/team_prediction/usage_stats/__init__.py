@@ -1,2 +1,7 @@
-from .stat_reader import get_usage_stats, PreloadedSmogonUsageStats
+from .stat_reader import (
+    get_usage_stats,
+    PreloadedSmogonUsageStats,
+    DEFAULT_USAGE_RANK,
+    list_available_usage_ranks,
+)
 from .legacy_team_builder import TeamBuilder, PokemonStatsLookupError

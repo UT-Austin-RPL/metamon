@@ -7,7 +7,10 @@ from termcolor import colored
 import numpy as np
 
 import metamon
-from metamon.backend.team_prediction.usage_stats import get_usage_stats
+from metamon.backend.team_prediction.usage_stats import (
+    get_usage_stats,
+    DEFAULT_USAGE_RANK,
+)
 from metamon.backend.team_prediction.usage_stats.constants import (
     HIDDEN_POWER_IVS,
     HIDDEN_POWER_DVS,
@@ -43,12 +46,18 @@ class TeamBuilder:
         format: str,
         start_date: datetime.date,
         end_date: datetime.date,
+        rank: int = DEFAULT_USAGE_RANK,
         verbose: bool = False,
         remove_banned: bool = False,
     ):
         self.format = format
         self.gen = metamon.backend.format_to_gen(format)
-        self.stat = get_usage_stats(format, start_date, end_date)
+        self.stat = get_usage_stats(
+            format,
+            start_date,
+            end_date,
+            rank=rank,
+        )
         if remove_banned:
             self.stat.remove_banned_pm()
         self.verbose = verbose
