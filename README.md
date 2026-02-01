@@ -1131,7 +1131,7 @@ from datetime import date
 usage_stats = get_usage_stats("gen1ou",
     start_date=date(2017, 12, 1),
     end_date=date(2018, 3, 30),
-    rank="1500",
+    rank=1500,  # falls back to nearest lower (glicko) rank where data is available
 )
 alakazam_info: dict = usage_stats["Alakazam"] # non alphanum chars and case are flexible
 ```
