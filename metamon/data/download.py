@@ -27,7 +27,7 @@ else:
 LATEST_RAW_REPLAY_REVISION = "v5"
 LATEST_PARSED_REPLAY_REVISION = "v5"
 LATEST_TEAMS_REVISION = "v4"
-LATEST_USAGE_STATS_REVISION = "v3"
+LATEST_USAGE_STATS_REVISION = "v4"
 
 
 def _update_version_reference(key: str, name: str, version: str):
