@@ -137,14 +137,10 @@ async def scrape_base(session, url, local_dir, start_date, end_date, sem):
             local_path = os.path.join(local_dir, href)
 
             if (
-                href.endswith("/")
-                and href_date >= start_date
-                and href_date < end_date
+                href.endswith("/") and href_date >= start_date and href_date < end_date
             ):  # It's a directory
                 ensure_dir(local_path)
-                task = asyncio.create_task(
-                    scrape(session, href_full, local_path, sem)
-                )
+                task = asyncio.create_task(scrape(session, href_full, local_path, sem))
                 tasks.append(task)
 
     await asyncio.gather(*tasks)
@@ -170,9 +166,7 @@ async def scrape(session, url, local_dir, sem):
                 href_full = urljoin(url, href)
                 local_path = os.path.join(local_dir, href)
                 ensure_dir(local_path)
-                task = asyncio.create_task(
-                    scrape(session, href_full, local_path, sem)
-                )
+                task = asyncio.create_task(scrape(session, href_full, local_path, sem))
                 tasks.append(task)
                 continue
 

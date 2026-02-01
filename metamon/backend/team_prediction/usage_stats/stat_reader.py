@@ -101,8 +101,6 @@ def list_available_usage_ranks(format: str) -> List[str]:
     )
 
 
-
-
 def parse_pokemon_moveset(file_path):
     moveset_data_list = {
         "name": [],
@@ -518,9 +516,8 @@ class PreloadedSmogonUsageStats(SmogonStat):
         start_date: datetime.date,
         end_date: datetime.date,
         rank: RankLike = DEFAULT_USAGE_RANK,
-        rank_fallback: bool = True,
-        lower_rank_fallback: bool = True,
-        allow_legacy_layout: bool = True,
+        load_nearest_lower_rank: bool = True,
+        search_lower_ranks_on_miss: bool = True,
         verbose: bool = True,
     ):
         self.format = format.strip().lower()
@@ -572,80 +569,38 @@ class PreloadedSmogonUsageStats(SmogonStat):
             return max(lower, key=lambda x: x[0])[1]
 
         if not os.path.isdir(movesets_path):
-            if allow_legacy_layout and os.path.isdir(movesets_base):
-                # Legacy layout: tier directory contains YYYY-MM.json directly.
-                if any(f.endswith(".json") for f in os.listdir(movesets_base)):
-                    if self.verbose:
-                        warnings.warn(
-                            colored(
-                                f"Legacy usage-stats layout detected for {self.format}. "
-                                f"Ignoring rank={self.rank} and loading {movesets_base}.",
-                                "yellow",
-                            )
+            avail = _avail_ranks(movesets_base)
+            fallback_rank = (
+                _nearest_lower_rank(self.rank, avail)
+                if load_nearest_lower_rank
+                else None
+            )
+            if fallback_rank is not None:
+                if self.verbose:
+                    warnings.warn(
+                        colored(
+                            f"Requested rank={self.rank} not found for {self.format}. "
+                            f"Falling back to nearest rank={fallback_rank}.",
+                            "yellow",
                         )
-                    movesets_path = movesets_base
-                    inclusive_path = inclusive_base
-                else:
-                    avail = _avail_ranks(movesets_base)
-                    fallback_rank = (
-                        _nearest_lower_rank(self.rank, avail) if rank_fallback else None
                     )
-                    if fallback_rank is not None:
-                        if self.verbose:
-                            warnings.warn(
-                                colored(
-                                    f"Requested rank={self.rank} not found for {self.format}. "
-                                    f"Falling back to nearest rank={fallback_rank}.",
-                                    "yellow",
-                                )
-                            )
-                        self.rank = fallback_rank
-                        movesets_path = os.path.join(movesets_base, self.rank)
-                        inclusive_path = os.path.join(inclusive_base, self.rank)
-                    else:
-                        raise FileNotFoundError(
-                            f"Movesets data not found for {self.format} at rank={self.rank}. "
-                            f"Available ranks: {avail}"
-                        )
+                self.rank = fallback_rank
+                movesets_path = os.path.join(movesets_base, self.rank)
+                inclusive_path = os.path.join(inclusive_base, self.rank)
             else:
-                avail = _avail_ranks(movesets_base)
-                fallback_rank = (
-                    _nearest_lower_rank(self.rank, avail) if rank_fallback else None
+                raise FileNotFoundError(
+                    f"Movesets data not found for {self.format} at rank={self.rank}. "
+                    f"Available ranks: {avail}. "
+                    f"Run `python -m metamon download usage-stats` to get the latest data."
                 )
-                if fallback_rank is not None:
-                    if self.verbose:
-                        warnings.warn(
-                            colored(
-                                f"Requested rank={self.rank} not found for {self.format}. "
-                                f"Falling back to nearest rank={fallback_rank}.",
-                                "yellow",
-                            )
-                        )
-                    self.rank = fallback_rank
-                    movesets_path = os.path.join(movesets_base, self.rank)
-                    inclusive_path = os.path.join(inclusive_base, self.rank)
-                else:
-                    raise FileNotFoundError(
-                        f"Movesets data not found for {self.format} at rank={self.rank}. "
-                        f"Available ranks: {avail}"
-                    )
 
         if not os.path.isdir(inclusive_path):
-            if allow_legacy_layout and os.path.isdir(inclusive_base):
-                if any(f.endswith(".json") for f in os.listdir(inclusive_base)):
-                    inclusive_path = inclusive_base
-                else:
-                    avail = _avail_ranks(inclusive_base)
-                    raise FileNotFoundError(
-                        f"All-tiers movesets not found for gen{gen} at rank={self.rank}. "
-                        f"Available ranks: {avail}"
-                    )
-            else:
-                avail = _avail_ranks(inclusive_base)
-                raise FileNotFoundError(
-                    f"All-tiers movesets not found for gen{gen} at rank={self.rank}. "
-                    f"Available ranks: {avail}"
-                )
+            avail = _avail_ranks(inclusive_base)
+            raise FileNotFoundError(
+                f"All-tiers movesets not found for gen{gen} at rank={self.rank}. "
+                f"Available ranks: {avail}. "
+                f"Run `python -m metamon download usage-stats` to get the latest data."
+            )
 
         # data is split by year and month
         if not os.path.exists(movesets_path) or not os.path.exists(inclusive_path):
@@ -672,11 +627,9 @@ class PreloadedSmogonUsageStats(SmogonStat):
             end_month=LATEST_USAGE_STATS_DATE.month,
         )
         self._lower_rank_fallbacks: list[tuple[str, dict, dict]] = []
-        if lower_rank_fallback:
+        if search_lower_ranks_on_miss:
             avail = _avail_ranks(movesets_base)
-            lower_ranks = [
-                r for r in avail if float(r) < float(self.rank)
-            ]
+            lower_ranks = [r for r in avail if float(r) < float(self.rank)]
             lower_ranks.sort(key=lambda x: float(x), reverse=True)
             for r in lower_ranks:
                 lower_movesets_path = os.path.join(movesets_base, r)
@@ -764,9 +717,8 @@ def get_usage_stats(
     start_date: Optional[datetime.date] = None,
     end_date: Optional[datetime.date] = None,
     rank: RankLike = DEFAULT_USAGE_RANK,
-    rank_fallback: bool = True,
-    lower_rank_fallback: bool = True,
-    allow_legacy_layout: bool = True,
+    load_nearest_lower_rank: bool = True,
+    search_lower_ranks_on_miss: bool = True,
 ) -> PreloadedSmogonUsageStats:
     if start_date is None or start_date < EARLIEST_USAGE_STATS_DATE:
         start_date = EARLIEST_USAGE_STATS_DATE
@@ -786,9 +738,8 @@ def get_usage_stats(
         start_date,
         end_date,
         rank_norm,
-        rank_fallback,
-        lower_rank_fallback,
-        allow_legacy_layout,
+        load_nearest_lower_rank,
+        search_lower_ranks_on_miss,
     )
 
 
@@ -798,9 +749,8 @@ def _cached_smogon_stats(
     start_date: datetime.date,
     end_date: datetime.date,
     rank: Optional[str],
-    rank_fallback: bool,
-    lower_rank_fallback: bool,
-    allow_legacy_layout: bool,
+    load_nearest_lower_rank: bool,
+    search_lower_ranks_on_miss: bool,
 ):
     if rank is None:
         raise ValueError("rank is required for cached usage stats.")
@@ -812,9 +762,8 @@ def _cached_smogon_stats(
         start_date=start_date,
         end_date=end_date,
         rank=rank,
-        rank_fallback=rank_fallback,
-        lower_rank_fallback=lower_rank_fallback,
-        allow_legacy_layout=allow_legacy_layout,
+        load_nearest_lower_rank=load_nearest_lower_rank,
+        search_lower_ranks_on_miss=search_lower_ranks_on_miss,
         verbose=False,
     )
 
