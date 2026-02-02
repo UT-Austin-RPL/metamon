@@ -11,6 +11,7 @@ from poke_env.data import to_id_str
 import metamon
 from metamon.backend.team_prediction.team import TeamSet, Roster, PokemonSet
 from metamon.backend.team_prediction.vocabulary import Vocabulary
+from metamon.backend.team_prediction.curriculum import TeamMasker
 from metamon import METAMON_CACHE_DIR
 
 
@@ -92,7 +93,6 @@ class FilteredTeamsFromReplaysDataset(TeamDataset):
         self.filenames = []
 
         def _rating_to_int(rating: str) -> int:
-            # mainly maps "Unrated" to 1000
             try:
                 return int(rating)
             except ValueError:
@@ -144,35 +144,24 @@ class TeamPredictionDataset(Dataset):
     def __init__(
         self,
         data_dir: Union[str, Iterable[str]],
-        mask_pokemon_prob_range: Tuple[float, float],
-        mask_attrs_prob_range: Tuple[float, float],
+        masker: TeamMasker,
         split: Literal["train", "val"] = "train",
         validation_ratio: float = 0.1,
         seed: Optional[int] = None,
         use_cached_filenames: bool = False,
         verbose: bool = False,
-        toy_names_only: bool = False,
     ):
         """
         Args:
-            data_dir: Directory or iterable of directories containing .team files (will be searched recursively)
+            data_dir: Directory or iterable of directories containing .team files
+            masker: TeamMasker instance that handles masking logic
             split: Whether this is the training or validation split
             validation_ratio: Fraction of data to use for validation
-            mask_pokemon_prob_range: Range of probabilities to use for masking an entire Pokemon
-            mask_attrs_prob_range: Range of probabilities to use for masking an indivudal attribute
             seed: Random seed for reproducibility
             use_cached_filenames: If True, use cached index files instead of scanning directories
             verbose: If True, print progress information
-            toy_names_only: If True, only mask Pokemon names (not abilities/items/moves)
         """
-        (
-            self.mask_pokemon_prob_low,
-            self.mask_pokemon_prob_high,
-        ) = mask_pokemon_prob_range
-        self.mask_attrs_prob_low, self.mask_attrs_prob_high = mask_attrs_prob_range
-        self.toy_names_only = toy_names_only
-        assert self.mask_pokemon_prob_low <= self.mask_pokemon_prob_high
-        assert self.mask_attrs_prob_low <= self.mask_attrs_prob_high
+        self.masker = masker
         assert 0 <= validation_ratio <= 1, "validation_ratio must be in [0, 1)"
 
         self.vocab = Vocabulary()
@@ -182,13 +171,12 @@ class TeamPredictionDataset(Dataset):
             random.seed(seed)
             torch.manual_seed(seed)
 
-        # Accept a string or an iterable of strings for data_dir
         if isinstance(data_dir, str):
             data_dirs = [data_dir]
         else:
             data_dirs = list(data_dir)
 
-        # Collect all team files
+        # collect all team files
         team_files_set = set()
         for d in data_dirs:
             if self.verbose:
@@ -203,7 +191,7 @@ class TeamPredictionDataset(Dataset):
                 if self.verbose:
                     print(f"Loaded {len(lines)} files from {index_path}")
             else:
-                # Scan directory for team files
+                # scan directory for team files
                 rel_paths = []
                 for f in d_path.rglob("*"):
                     if f.is_file() and f.suffix.endswith("team"):
@@ -211,7 +199,7 @@ class TeamPredictionDataset(Dataset):
                         rel_paths.append(str(f.relative_to(d_path)))
                 if self.verbose:
                     print(f"Indexed {len(rel_paths)} files from {d}/")
-                # Write to index.csv cache
+                # write to index.csv cache
                 if rel_paths:
                     with open(index_path, "w") as f:
                         f.write("filename\n")
@@ -219,47 +207,34 @@ class TeamPredictionDataset(Dataset):
                             f.write(f"{rel_path}\n")
         all_team_files = sorted(team_files_set)
 
-        # Create deterministic train/val split
+        # create train/val split
         n_total = len(all_team_files)
         n_val = int(n_total * validation_ratio)
-
-        # Use a separate random state for splitting to ensure same split regardless of other randomness
         split_rng = random.Random(seed)
         indices = list(range(n_total))
         split_rng.shuffle(indices)
-
         val_indices = set(indices[:n_val])
-
-        # Assign files based on split
         if split == "train":
             self.team_files = [
                 f for i, f in enumerate(all_team_files) if i not in val_indices
             ]
-        else:  # val
+        elif split == "val":
             self.team_files = [
                 f for i, f in enumerate(all_team_files) if i in val_indices
             ]
-
+        else:
+            raise ValueError(f"Invalid split: {split}")
         print(f"Created {split} split with {len(self.team_files)} team files")
 
     def __len__(self) -> int:
         return len(self.team_files)
 
-    def _mask(self, seq: list[str]) -> list[str]:
-        mask_out = []
-        for token in seq:
-            if random.random() < self.mask_pokemon_prob:
-                mask_out.append(self.vocab.special_tokens["Mon"])
-            else:
-                mask_out.append(token)
-        return mask_out
-
     def __getitem__(self, idx: int) -> Tuple[TeamSet, TeamSet]:
         """
         Returns:
-            x: Masked team
+            x_tokens: Masked team tokens
             x_type_ids: Type indicating ints (pokemon, ability, item, etc.)
-            y: Complete team (ground truth)
+            y_tokens: Complete team tokens (ground truth)
             pred_mask: Mask indicating which values are eligible for loss function
         """
         max_retries = 50
@@ -272,25 +247,10 @@ class TeamPredictionDataset(Dataset):
                 assert format.startswith("gen"), f"Invalid format: {format}"
                 team = TeamSet.from_showdown_file(path, format=format)
 
-                if self.toy_names_only:
-                    # Toy mode: only mask Pokemon names, keep everything else revealed
-                    x, y = team.to_name_prediction_pair()
-                    x_seq, x_needs_pred = x.to_seq(include_stats=False)
-                    y_seq, y_needs_pred = y.to_seq(include_stats=False)
-                else:
-                    # Normal mode: use random masking
-                    mask_pokemon_prob = random.uniform(
-                        self.mask_pokemon_prob_low, self.mask_pokemon_prob_high
-                    )
-                    mask_attrs_prob = random.uniform(
-                        self.mask_attrs_prob_low, self.mask_attrs_prob_high
-                    )
-                    x, y = team.to_prediction_pair(
-                        mask_pokemon_prob=mask_pokemon_prob,
-                        mask_attrs_prob=mask_attrs_prob,
-                    )
-                    x_seq, x_needs_pred = x.to_seq(include_stats=False)
-                    y_seq, y_needs_pred = y.to_seq(include_stats=False)
+                x, y = self.masker.mask(team)
+                x_seq, x_needs_pred = x.to_seq(include_stats=False)
+                y_seq, y_needs_pred = y.to_seq(include_stats=False)
+
                 # we will only train on values that are missing from x but provided by y
                 pred_mask = torch.logical_and(
                     torch.tensor(x_needs_pred), ~torch.tensor(y_needs_pred)
@@ -316,10 +276,8 @@ class TeamPredictionDataset(Dataset):
 class CompetitiveTeamPredictionDataset(TeamPredictionDataset):
     def __init__(
         self,
-        mask_pokemon_prob_range: Tuple[float, float] = (0.1, 0.1),
-        mask_attrs_prob_range: Tuple[float, float] = (0.1, 0.1),
+        masker: TeamMasker,
         verbose: bool = False,
-        toy_names_only: bool = False,
     ):
         team_dirs = []
         for gen in [1, 2, 3, 4, 5, 9]:
@@ -335,43 +293,9 @@ class CompetitiveTeamPredictionDataset(TeamPredictionDataset):
                 )
         super().__init__(
             data_dir=team_dirs,
+            masker=masker,
             split="val",
             validation_ratio=1.0,
-            mask_pokemon_prob_range=mask_pokemon_prob_range,
-            mask_attrs_prob_range=mask_attrs_prob_range,
             use_cached_filenames=False,
             verbose=verbose,
-            toy_names_only=toy_names_only,
         )
-
-
-if __name__ == "__main__":
-    # Test dataset loading
-    # dataset = FilteredTeamsFromReplaysDataset(
-    #     os.path.join(METAMON_CACHE_DIR, "parsed-replays", "revealed_teams"),
-    #     format="gen9ou",
-    # )
-
-    dataset = TeamPredictionDataset(
-        data_dir=os.path.join(METAMON_CACHE_DIR, "parsed-replays", "revealed_teams"),
-        split="train",
-        validation_ratio=0.1,
-        mask_pokemon_prob_range=(0.1, 0.1),
-        mask_attrs_prob_range=(0.1, 0.1),
-    )
-
-    for item in dataset:
-        print(item)
-        input()
-
-    print(f"Dataset size: {len(dataset)}")
-
-    # # Test loading a single item
-    # x, type_ids, y = dataset[0]
-    # print("\nMasked team (x):")
-    # print(x)
-    # print("\nType IDs:")
-    # print(type_ids)
-    # print("\nComplete team (y):")
-    # print(y)
-    # input()

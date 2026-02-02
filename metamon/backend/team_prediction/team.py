@@ -177,10 +177,38 @@ class PokemonSet:
 
     @property
     def revealed_moves(self) -> int:
-        """
-        Counts the number of moves revealed in this PokemonSet.
-        """
+        """Counts the number of moves revealed in this PokemonSet."""
         return len(set(self.moves) - {self.MISSING_MOVE})
+
+    def get_maskable_attrs(self, include_stats: bool = False) -> list:
+        """
+        Get list of (key, subkey) tuples for revealed attributes that can be masked.
+        Respects generation constraints (no abilities in gen1-2, no tera in gen1-8, etc.)
+        """
+        maskable = []
+
+        if self.name != self.MISSING_NAME:
+            maskable.append(("name", None))
+        if self.gen >= 3 and self.ability != self.MISSING_ABILITY:
+            maskable.append(("ability", None))
+        if self.gen >= 2 and self.item != self.MISSING_ITEM:
+            maskable.append(("item", None))
+        if self.gen == 9 and self.tera_type != self.MISSING_TERA_TYPE:
+            maskable.append(("tera_type", None))
+
+        for i, move in enumerate(self.moves):
+            if move != self.MISSING_MOVE and move != self.NO_MOVE:
+                maskable.append(("moves", i))
+
+        if include_stats:
+            for i, ev in enumerate(self.evs):
+                if ev != self.MISSING_EV:
+                    maskable.append(("evs", i))
+            for i, iv in enumerate(self.ivs):
+                if iv != self.MISSING_IV:
+                    maskable.append(("ivs", i))
+
+        return maskable
 
     def __eq__(self, other):
         if not isinstance(other, PokemonSet):
@@ -476,6 +504,7 @@ class PokemonSet:
 
     def to_dict(self):
         return {
+            "name": self.name,
             "moves": self.moves,
             "gen": self.gen,
             "ability": self.ability,
@@ -682,6 +711,10 @@ class TeamSet:
     format: str
 
     @property
+    def gen(self) -> int:
+        return metamon.backend.format_to_gen(self.format)
+
+    @property
     def known_pokemon(self) -> List[PokemonSet]:
         return [p for p in self.pokemon if p.name != PokemonSet.MISSING_NAME]
 
@@ -802,38 +835,6 @@ class TeamSet:
             random.shuffle(p.moves)
         return self
 
-    def to_prediction_pair(
-        self, mask_pokemon_prob: float = 0.1, mask_attrs_prob: float = 0.1
-    ):
-        gen = int(self.format.split("gen")[1][0])
-        y = copy.deepcopy(self)
-        y.shuffle()
-        x = copy.deepcopy(y)
-        masked_lead = x.lead.masked(mask_attrs_prob=mask_attrs_prob)
-        masked_reserve = []
-        for p in x.reserve:
-            if random.random() < mask_pokemon_prob:
-                masked_reserve.append(PokemonSet.missing_pokemon(gen=gen))
-            else:
-                masked_reserve.append(p.masked(mask_attrs_prob=mask_attrs_prob))
-        x.reserve = masked_reserve
-        x.lead = masked_lead
-        return x, y
-
-    def to_name_prediction_pair(self):
-        """
-        Toy mode: only mask Pokemon names, keep everything else (moves, abilities, items) revealed.
-        Used to test if the model can learn to predict Pokemon from their movesets.
-        """
-        y = copy.deepcopy(self)
-        y.shuffle()
-        x = copy.deepcopy(y)
-        # Mask only the names, keep all other attributes
-        for pokemon in [x.lead] + x.reserve:
-            if pokemon.name != PokemonSet.MISSING_NAME:
-                pokemon.name = PokemonSet.MISSING_NAME
-        return x, y
-
     def fill_from_Roster(self, roster: Roster):
         """
         Fill in missing Pokemon names from a Roster.
@@ -852,39 +853,3 @@ class TeamSet:
             for pokemon in self.pokemon:
                 if pokemon.name == PokemonSet.MISSING_NAME and new_pokemon:
                     pokemon.name = new_pokemon.pop()
-
-
-if __name__ == "__main__":
-    import os
-    from metamon import METAMON_CACHE_DIR
-
-    TEAM_DIR = os.path.join(
-        METAMON_CACHE_DIR, "parsed-replays", "revealed_teams", "gen9ou"
-    )
-    print(TEAM_DIR)
-    team_files = []
-    for root, dirs, files in os.walk(TEAM_DIR):
-        for file in files:
-            if file.endswith("team") or file.startswith("team"):
-                team_files.append(os.path.join(root, file))
-
-    print(f"Found {len(team_files)} team files.")
-
-    random.shuffle(team_files)
-    for path in team_files:
-        print(f"\nLoading team from: {path}")
-        with open(path, "r") as f:
-            txt = f.read()
-            print(txt)
-        team = TeamSet.from_showdown_file(path, "gen9ou")
-        print("---------------------------------------------------------")
-        x, y = team.to_prediction_pair()
-        print(x.to_str())
-        print("---------------------------------------------------------")
-        print(y.to_str())
-        print(x.to_seq(include_stats=False))
-        print(y.to_seq(include_stats=False))
-        assert len(x.to_seq(include_stats=False)) == len(y.to_seq(include_stats=False))
-        y_copy = TeamSet.from_seq(y.to_seq(include_stats=True)[0], include_stats=True)
-        print(y_copy.to_str())
-        input()
