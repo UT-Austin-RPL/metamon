@@ -903,6 +903,30 @@ class SmallG1BaselineSeed2(LocalPretrainedModel):
 
 
 @pretrained_model()
+class SmallG1BaselineNoMG(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/mnt/nfs_client/jake/metamon_scratchpad/metamonv2_ckpts/",
+            model_name="v2_small_rl_baseline_nomg_g99",
+            model_gin_config="smaller_multitaskagent.gin",
+            train_gin_config="alakazam3.gin",
+            default_checkpoint=26,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+                "MultiTaskAgent.use_multigamma": False,
+                "MultiTaskAgent.gamma": 0.99,
+            },
+        )
+
+
+@pretrained_model()
 class SmallG1BaselineGrouped(LocalPretrainedModel):
     def __init__(self):
         super().__init__(
