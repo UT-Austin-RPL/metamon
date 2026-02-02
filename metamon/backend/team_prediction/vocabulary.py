@@ -203,6 +203,17 @@ class Vocabulary:
                 "Tera Type": 8,
             },
         )
+        # Importance weights for weighted accuracy metric
+        self.attribute_weights = {
+            "Mon": 3.0,
+            "Move": 2.0,
+            "Ability": 1.5,
+            "Item": 1.5,
+            "Tera Type": 1.5,
+            "Nature": 1.0,
+            "EV": 0.5,
+            "IV": 0.5,
+        }
         self.type_id_to_mask = {
             0: self.format_mask,
             1: self.mon_mask,
@@ -214,6 +225,18 @@ class Vocabulary:
             7: self.iv_mask,
             8: self.tera_type_mask,
         }
+
+        # Map format token IDs to generation numbers
+        # e.g., token for "Format: gen1ou" -> 1
+        self.format_token_to_gen = {}
+        for token_id in self.format_mask:
+            token_str = self.tokenizer.all_words[token_id]  # e.g., "Format: gen1ou"
+            # Extract gen number from format string (format is "Format: genXtier")
+            format_part = token_str.split(": ")[1] if ": " in token_str else token_str
+            for gen in range(1, 10):
+                if format_part.lower().startswith(f"gen{gen}"):
+                    self.format_token_to_gen[token_id] = gen
+                    break
 
     def pokeset_seq_to_ints(self, seq: list[str]) -> np.ndarray:
         tokens = self.tokenizer.tokenize(seq)
