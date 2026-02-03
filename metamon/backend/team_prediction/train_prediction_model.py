@@ -18,7 +18,7 @@ from metamon.backend.team_prediction.dataset import (
 )
 from metamon.backend.team_prediction.model import TeamTransformer
 from metamon.backend.team_prediction.vocabulary import Vocabulary
-from metamon.backend.team_prediction.curriculum import (
+from metamon.backend.team_prediction.masking import (
     TeamMasker,
     NamesOnlyMasker,
     CurriculumMasker,
@@ -69,7 +69,7 @@ def evaluate(
         # eventually we should let the one-shot eval use the same samling strategy
         # as each iterative eval step.
         decoder = IterativeTeamDecoder(
-            model, vocab, num_iterations=num_iterations, deterministic=True
+            model, num_iterations=num_iterations, deterministic=True
         )
 
     # Collect batches
@@ -118,8 +118,15 @@ def evaluate(
 
             # iterative eval
             iterative_preds = None
+            iter_stats_for_examples = None
             if include_iterative and decoder is not None:
-                iterative_preds, stats = decoder.decode(x_tokens, type_ids, pred_mask)
+                # Track tokens for visualization on first batch only
+                track = batch_idx == 0 and num_examples > 0
+                iterative_preds, stats = decoder.decode(
+                    x_tokens, type_ids, pred_mask, track_tokens=track
+                )
+                if track:
+                    iter_stats_for_examples = stats
                 iter_stats_accumulator.add_batch(stats)
                 # placeholder logits
                 vocab_size = len(vocab.tokenizer)
@@ -137,6 +144,12 @@ def evaluate(
             # save some predictions for fancy wandb example viz
             if batch_idx == 0 and num_examples > 0:
                 for i in range(min(num_examples, x_tokens.shape[0])):
+                    # Extract per-sample tokens from each iteration
+                    tokens_per_iter = None
+                    if iter_stats_for_examples is not None:
+                        tokens_per_iter = [
+                            t[i] for t in iter_stats_for_examples.tokens_per_iter
+                        ]
                     examples.append(
                         {
                             "input": x_tokens[i].cpu(),
@@ -148,6 +161,7 @@ def evaluate(
                                 else None
                             ),
                             "mask": pred_mask[i].cpu(),
+                            "tokens_per_iter": tokens_per_iter,
                         }
                     )
 
@@ -266,6 +280,102 @@ def log_example_predictions(
     wandb.log({table_name: table}, step=step)
 
 
+def log_iterative_decoding_process(
+    examples: list,
+    vocab: Vocabulary,
+    step: int,
+    table_name: str = "iterative_decoding_process",
+):
+    """
+    Log the iterative decoding process to wandb, showing tokens at each iteration.
+
+    Each row is an example, each column is an iteration (iter_0, iter_1, ..., final).
+    Tokens are colored:
+    - Green: still masked (will be predicted)
+    - Blue: correctly predicted (matches ground truth)
+    - Red: incorrectly predicted
+    - Black: original (never masked)
+    """
+    if not examples:
+        return
+
+    # Find max iterations across examples
+    max_iters = max(len(ex.get("tokens_per_iter", [])) for ex in examples)
+    if max_iters == 0:
+        return
+
+    # Columns: iter_0 (input), iter_1, ..., iter_N, ground_truth
+    columns = [f"iter_{i}" for i in range(max_iters)] + ["ground_truth"]
+    table = wandb.Table(columns=columns)
+
+    for ex in examples:
+        tokens_per_iter = ex.get("tokens_per_iter", [])
+        if not tokens_per_iter:
+            continue
+
+        mask = ex["mask"]
+        true_seq = vocab.ints_to_pokeset_seq(ex["ground_truth"].tolist())
+
+        row_data = []
+        for iter_idx, tokens in enumerate(tokens_per_iter):
+            seq = vocab.ints_to_pokeset_seq(tokens.tolist())
+
+            # For iteration 0 (input), green = masked
+            # For later iterations, blue = correct, red = wrong, green = still masked
+            parts = []
+            for pos, (tok_str, is_masked, true_str) in enumerate(
+                zip(seq, mask, true_seq)
+            ):
+                tok_escaped = html.escape(tok_str)
+
+                if iter_idx == 0:
+                    # Input: just show masked in green
+                    if is_masked:
+                        parts.append(
+                            f'<span style="color: green; font-weight: bold">{tok_escaped}</span>'
+                        )
+                    else:
+                        parts.append(tok_escaped)
+                else:
+                    # Later iterations: check if token was originally masked
+                    if is_masked:
+                        # Check if it's been filled (no longer a $missing$ token)
+                        if "$" not in tok_str:  # filled in
+                            color = "blue" if tok_str == true_str else "red"
+                            parts.append(
+                                f'<span style="color: {color}; font-weight: bold">{tok_escaped}</span>'
+                            )
+                        else:
+                            # Still masked
+                            parts.append(
+                                f'<span style="color: green; font-weight: bold">{tok_escaped}</span>'
+                            )
+                    else:
+                        parts.append(tok_escaped)
+
+            row_data.append(wandb.Html(" ".join(parts)))
+
+        # Pad with empty if fewer iterations
+        while len(row_data) < max_iters:
+            row_data.append(wandb.Html(""))
+
+        # Add ground truth
+        true_parts = []
+        for t, m in zip(true_seq, mask):
+            t_escaped = html.escape(t)
+            if m:
+                true_parts.append(
+                    f'<span style="color: purple; font-weight: bold">{t_escaped}</span>'
+                )
+            else:
+                true_parts.append(t_escaped)
+        row_data.append(wandb.Html(" ".join(true_parts)))
+
+        table.add_data(*row_data)
+
+    wandb.log({table_name: table}, step=step)
+
+
 def train(config, use_wandb: bool = True):
     random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -285,10 +395,12 @@ def train(config, use_wandb: bool = True):
             warmup_steps=config.curriculum_mask_warmup_steps,
             pokemon_prob=config.mask_pokemon_prob,
             attrs_prob=config.mask_attrs_prob,
+            name_only_prob=config.name_only_prob,
         )
         val_masker_standard = TeamMasker(
             pokemon_prob_range=(config.mask_pokemon_prob, config.mask_pokemon_prob),
             attrs_prob_range=(config.mask_attrs_prob, config.mask_attrs_prob),
+            name_only_prob=config.name_only_prob,
         )
         val_masker_low = TeamMasker(
             pokemon_prob_range=(0.0, 0.0),
@@ -296,6 +408,7 @@ def train(config, use_wandb: bool = True):
                 config.val_low_mask_attrs_prob,
                 config.val_low_mask_attrs_prob,
             ),
+            name_only_prob=config.name_only_prob,
         )
         print(
             f"Using CurriculumMasker over {config.curriculum_mask_warmup_steps} steps"
@@ -305,10 +418,12 @@ def train(config, use_wandb: bool = True):
         train_masker = TeamMasker(
             pokemon_prob_range=(0.0, config.mask_pokemon_prob),
             attrs_prob_range=(0.0, config.mask_attrs_prob),
+            name_only_prob=config.name_only_prob,
         )
         val_masker_standard = TeamMasker(
             pokemon_prob_range=(config.mask_pokemon_prob, config.mask_pokemon_prob),
             attrs_prob_range=(config.mask_attrs_prob, config.mask_attrs_prob),
+            name_only_prob=config.name_only_prob,
         )
         val_masker_low = TeamMasker(
             pokemon_prob_range=(0.0, 0.0),
@@ -316,6 +431,7 @@ def train(config, use_wandb: bool = True):
                 config.val_low_mask_attrs_prob,
                 config.val_low_mask_attrs_prob,
             ),
+            name_only_prob=config.name_only_prob,
         )
         print(f"Using variable TeamMasker")
 
@@ -747,6 +863,13 @@ def train(config, use_wandb: bool = True):
                         include_iterative=config.eval_with_iterative,
                         table_name="val_examples",
                     )
+                    if config.eval_with_iterative:
+                        log_iterative_decoding_process(
+                            examples=val_results.examples,
+                            vocab=vocab,
+                            step=global_step,
+                            table_name="val_iterative_process",
+                        )
                 if val_clean_results.examples:
                     log_example_predictions(
                         examples=val_clean_results.examples,
@@ -755,6 +878,13 @@ def train(config, use_wandb: bool = True):
                         include_iterative=config.eval_with_iterative,
                         table_name="val_clean_examples",
                     )
+                    if config.eval_with_iterative:
+                        log_iterative_decoding_process(
+                            examples=val_clean_results.examples,
+                            vocab=vocab,
+                            step=global_step,
+                            table_name="val_clean_iterative_process",
+                        )
                 if val_clean_hard_results.examples:
                     log_example_predictions(
                         examples=val_clean_hard_results.examples,
@@ -763,14 +893,24 @@ def train(config, use_wandb: bool = True):
                         include_iterative=config.eval_with_iterative,
                         table_name="val_clean_hard_examples",
                     )
+                    if config.eval_with_iterative:
+                        log_iterative_decoding_process(
+                            examples=val_clean_hard_results.examples,
+                            vocab=vocab,
+                            step=global_step,
+                            table_name="val_clean_hard_iterative_process",
+                        )
 
                 if val_results.iter_stats:
                     hist_dict = {}
                     for i, conf in enumerate(val_results.iter_stats["confidences"]):
                         if len(conf) > 0:
-                            hist_dict[f"val/iterative/iter_{i}_confidences"] = (
-                                wandb.Histogram(conf.numpy(), num_bins=50)
-                            )
+                            # Filter out inf values (used as sentinel for non-masked positions)
+                            finite_conf = conf[torch.isfinite(conf)]
+                            if len(finite_conf) > 0:
+                                hist_dict[f"val/iterative/iter_{i}_confidences"] = (
+                                    wandb.Histogram(finite_conf.numpy(), num_bins=50)
+                                )
                     committed = val_results.iter_stats.get("committed_per_iter", [])
                     if committed:
                         for i, count in enumerate(committed):
@@ -921,7 +1061,7 @@ if __name__ == "__main__":
         # architecture
         "max_seq_len": 64,
         "d_model": 400,
-        "nhead": 8,
+        "nhead": 16,
         "num_layers": 8,
         "dim_ff": 1600,
         "dropout": 0.05,
@@ -932,8 +1072,8 @@ if __name__ == "__main__":
         "warmup_steps": 5000,
         "max_steps": 5_000_000,
         "log_train_every_steps": 100,
-        "eval_every_steps": 10_000,
-        "max_eval_steps": 50,
+        "eval_every_steps": 5_000,
+        "max_eval_steps": 10,
         "patience": 500,
         "num_examples": 4,  # for wandb viz
         "from_ckpt": args.from_ckpt,
@@ -941,6 +1081,7 @@ if __name__ == "__main__":
         "mask_pokemon_prob": 0.15,
         "mask_attrs_prob": 0.4,
         "val_low_mask_attrs_prob": 0.1,
+        "name_only_prob": 0.05,  # coverage for iterative decoding intermediate states
         "toy_names_only": False,
         "curriculum_mask": args.curriculum_mask,
         "curriculum_mask_warmup_steps": 100_000,

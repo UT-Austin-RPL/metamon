@@ -5,7 +5,7 @@ import time
 import torch.multiprocessing as mp
 from typing import List
 
-from metamon.backend.team_prediction.curriculum import CurriculumMasker
+from metamon.backend.team_prediction.masking import CurriculumMasker
 from metamon.backend.team_prediction.team import TeamSet, PokemonSet
 
 
