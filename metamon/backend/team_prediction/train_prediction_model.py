@@ -935,27 +935,24 @@ if __name__ == "__main__":
         "eval_every_steps": 10_000,
         "max_eval_steps": 50,
         "patience": 500,
+        "num_examples": 4,  # for wandb viz
+        "from_ckpt": args.from_ckpt,
         # masking params
         "mask_pokemon_prob": 0.15,
         "mask_attrs_prob": 0.4,
-        "val_low_mask_attrs_prob": 0.1,  # low masking for val_clean (easy eval)
+        "val_low_mask_attrs_prob": 0.1,
         "toy_names_only": False,
-        # curriculum mask: anneal masking rate from low to high
         "curriculum_mask": args.curriculum_mask,
         "curriculum_mask_warmup_steps": 100_000,
         "eval_with_iterative": True,
         "eval_num_iterations": 8,
         "debug_overfit": False,
-        "num_examples": 4,  # for wandb viz
-        # val_clean: top X% most complete teams
         "val_clean_percentile": 15.0,
-        # curriculum dataset: anneal percentile from start to end
+        # curriculum dataset
         "curriculum_dset": args.curriculum_dset,
-        "curriculum_dset_start_pct": 10.0,  # start with top 10%
-        "curriculum_dset_end_pct": 100.0,  # end with all teams
+        "curriculum_dset_start_pct": 10.0,
+        "curriculum_dset_end_pct": 100.0,
         "curriculum_dset_warmup_steps": 100_000,
-        # checkpoint resumption
-        "from_ckpt": args.from_ckpt,  # bool
     }
 
     if args.debug_overfit:
