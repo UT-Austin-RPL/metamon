@@ -1,0 +1,8 @@
+# Test files created during development
+test_*.py
+
+# Local test checkpoints
+test_ckpts/
+
+# WandB local files
+wandb/

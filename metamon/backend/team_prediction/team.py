@@ -6,7 +6,7 @@ import copy
 from datetime import date
 import functools
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import metamon
 from metamon.backend.replay_parser.replay_state import (
@@ -607,26 +607,6 @@ class PokemonSet:
             tera_type=d["tera_type"],
         )
 
-    def to_seq(self, include_stats: bool = True):
-        """ "
-        Creates a simple sequence format that is used by a team prediction model.
-        """
-        seq = [
-            f"Mon: {self.name}",
-            f"Ability: {self.ability}",
-            f"Item: {self.item}",
-            f"Tera Type: {self.tera_type}",
-        ]
-        moves = [f"Move: {move}" for move in self.moves]
-        seq += moves
-        if include_stats:
-            nature = f"Nature: {self.nature}"
-            evs = [f"EVs: {ev}" for ev in self.evs]
-            ivs = [f"IV: {iv}" for iv in self.ivs]
-            seq += [nature] + evs + ivs
-        mask = [bool(self.missing_regex.search(word)) for word in seq]
-        return seq, mask
-
     @classmethod
     def from_seq(cls, seq: List[str], gen: int, include_stats: bool = True):
         """
@@ -885,22 +865,6 @@ class TeamSet:
             out[p.name] = p.to_dict()
         return out
 
-    def to_seq(self, include_stats: bool = True):
-        lead_seq, lead_mask = self.lead.to_seq(include_stats=include_stats)
-        reserve_seq, reserve_mask = [], []
-        for p in self.reserve:
-            p_seq, p_mask = p.to_seq(include_stats=include_stats)
-            reserve_seq.append(p_seq)
-            reserve_mask.append(p_mask)
-
-        # add format to the beginning (which never needs to be predicted)
-        seq = [f"Format: {self.format}"] + lead_seq
-        mask = [False] + lead_mask
-        for reserve_seq, reserve_mask in zip(reserve_seq, reserve_mask):
-            seq += reserve_seq
-            mask += reserve_mask
-        return seq, mask
-
     @classmethod
     def from_seq(cls, seq: List[str], include_stats: bool = True):
         format = seq[0].split(":")[1].strip()
@@ -920,12 +884,6 @@ class TeamSet:
             idx += poke_seq_len
         return cls(lead=lead, reserve=reserve, format=format)
 
-    def shuffle(self):
-        random.shuffle(self.reserve)
-        for p in [self.lead] + self.reserve:
-            random.shuffle(p.moves)
-        return self
-
     def fill_from_Roster(self, roster: Roster):
         """
         Fill in missing Pokemon names from a Roster.
@@ -944,3 +902,239 @@ class TeamSet:
             for pokemon in self.pokemon:
                 if pokemon.name == PokemonSet.MISSING_NAME and new_pokemon:
                     pokemon.name = new_pokemon.pop()
+
+
+# =============================================================================
+# Team2Seq: Sequence conversion with canonical ordering
+# =============================================================================
+
+
+def _pokemon_sort_key(x_p: PokemonSet, y_p: PokemonSet) -> Tuple[int, str]:
+    """Sort key: visible Pokemon first (alphabetically), then missing (by y's name)."""
+    if x_p.name == PokemonSet.MISSING_NAME:
+        # Masked: use y's name as tie-breaker so labels are in alphabetical order
+        return (1, y_p.name)
+    return (0, x_p.name)
+
+
+def _move_sort_key(x_move: str, y_move: str) -> Tuple[int, str]:
+    """Sort key: visible moves first (alphabetically), then missing (by y's move), then <nomove>."""
+    if x_move == PokemonSet.NO_MOVE:
+        return (2, x_move)
+    if x_move == PokemonSet.MISSING_MOVE:
+        # Masked: use y's move as tie-breaker so labels are in alphabetical order
+        return (1, y_move)
+    return (0, x_move)
+
+
+def _compute_ordering(x_items: List, y_items: List, sort_key) -> List[int]:
+    """Compute permutation indices to sort items by key (using y as tie-breaker for masked x)."""
+    indexed = [(i, sort_key(x, y)) for i, (x, y) in enumerate(zip(x_items, y_items))]
+    indexed.sort(key=lambda x: x[1])
+    return [i for i, _ in indexed]
+
+
+def _apply_ordering(items: List, order: List[int]) -> List:
+    """Apply permutation to reorder items."""
+    return [items[i] for i in order]
+
+
+class Team2Seq:
+    """
+    Converts TeamSets to model-ready sequences and token IDs with canonical ordering.
+
+    Ordering rules:
+    - Pokemon: lead first, then reserve by visible name (alphabetically), then masked
+    - Moves: visible first (alphabetically), then $missing_move$, then <nomove>
+    """
+
+    def __init__(self, include_stats: bool = False):
+        self.include_stats = include_stats
+        # Attributes per Pokemon in sequence
+        self._attrs_per_pokemon = 8  # name, ability, item, tera, move0-3
+        if include_stats:
+            self._attrs_per_pokemon += 1 + 6 + 6  # nature + evs + ivs
+
+    @property
+    def vocab(self):
+        from metamon.backend.team_prediction.vocabulary import get_vocab
+
+        return get_vocab()
+
+    def get_pokemon_indices(self, positions: "torch.Tensor") -> "torch.Tensor":
+        """Which Pokemon (0-5) does each position belong to? Format (pos 0) → -1."""
+        import torch
+
+        # Pos 1-8 → Pokemon 0, Pos 9-16 → Pokemon 1, etc.
+        return torch.where(
+            positions == 0, -1, (positions - 1) // self._attrs_per_pokemon
+        )
+
+    def get_name_positions(self, pokemon_indices: "torch.Tensor") -> "torch.Tensor":
+        """Get the sequence position of each Pokemon's name. Index -1 → 0."""
+        import torch
+
+        # Pokemon 0 name at pos 1, Pokemon 1 name at pos 9, etc.
+        return torch.where(
+            pokemon_indices < 0, 0, 1 + pokemon_indices * self._attrs_per_pokemon
+        )
+
+    def encode(
+        self, team: TeamSet
+    ) -> Tuple["torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+        """
+        Encode a team to token IDs for inference.
+
+        Returns:
+            (tokens, type_ids, pred_mask) where pred_mask indicates missing tokens.
+        """
+        import torch
+
+        seq, mask = self.to_seq(team)
+        tokens, type_ids = self.vocab.pokeset_seq_to_ints(seq)
+        return (
+            torch.from_numpy(tokens).long(),
+            torch.from_numpy(type_ids).long(),
+            torch.tensor(mask),
+        )
+
+    def encode_pair(
+        self, x: TeamSet, y: TeamSet
+    ) -> Tuple["torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+        """
+        Encode (masked, ground_truth) pair to token IDs for training.
+
+        Returns:
+            (x_tokens, type_ids, y_tokens, pred_mask)
+        """
+        import torch
+
+        x_seq, y_seq, pred_mask = self.to_seq_pair(x, y)
+        x_tokens, x_type_ids = self.vocab.pokeset_seq_to_ints(x_seq)
+        y_tokens, y_type_ids = self.vocab.pokeset_seq_to_ints(y_seq)
+        assert (x_type_ids == y_type_ids).all()
+        return (
+            torch.from_numpy(x_tokens).long(),
+            torch.from_numpy(x_type_ids).long(),
+            torch.from_numpy(y_tokens).long(),
+            torch.tensor(pred_mask),
+        )
+
+    def decode(self, tokens: "torch.Tensor") -> TeamSet:
+        """Decode token IDs back to a TeamSet."""
+        seq = self.vocab.ints_to_pokeset_seq(tokens.cpu().numpy())
+        return TeamSet.from_seq(seq, include_stats=self.include_stats)
+
+    def _pokemon_to_seq(self, p: PokemonSet, moves: List[str]) -> List[str]:
+        """Convert a single Pokemon to sequence tokens with given move order."""
+        seq = [
+            f"Mon: {p.name}",
+            f"Ability: {p.ability}",
+            f"Item: {p.item}",
+            f"Tera Type: {p.tera_type}",
+        ]
+        seq += [f"Move: {m}" for m in moves]
+        if self.include_stats:
+            seq.append(f"Nature: {p.nature}")
+            seq += [f"EVs: {ev}" for ev in p.evs]
+            seq += [f"IV: {iv}" for iv in p.ivs]
+        return seq
+
+    def _pokemon_pair_to_seq(
+        self, x_pokemon: PokemonSet, y_pokemon: PokemonSet
+    ) -> Tuple[List[str], List[str], List[bool]]:
+        """Convert Pokemon pair to sequences with coordinated move ordering."""
+        move_order = _compute_ordering(x_pokemon.moves, y_pokemon.moves, _move_sort_key)
+        x_moves = _apply_ordering(x_pokemon.moves, move_order)
+        y_moves = _apply_ordering(y_pokemon.moves, move_order)
+
+        x_seq = self._pokemon_to_seq(x_pokemon, x_moves)
+        y_seq = self._pokemon_to_seq(y_pokemon, y_moves)
+
+        # pred_mask: True where x is missing but y has a real value
+        x_mask = [bool(x_pokemon.missing_regex.search(w)) for w in x_seq]
+        y_mask = [bool(y_pokemon.missing_regex.search(w)) for w in y_seq]
+        pred_mask = [xm and not ym for xm, ym in zip(x_mask, y_mask)]
+
+        return x_seq, y_seq, pred_mask
+
+    def to_seq(self, team: TeamSet) -> Tuple[List[str], List[bool]]:
+        """
+        Convert a team to sequence format (for inference).
+        Returns (sequence, needs_prediction_mask).
+
+        The mask indicates which tokens are missing and need prediction.
+        """
+        # Get the ordered sequence (use to_seq_pair for consistent ordering)
+        seq, _, _ = self.to_seq_pair(team, team)
+
+        # Compute mask: True for any missing token
+        # (different from to_seq_pair which computes xm and not ym)
+        mask = [bool(team.lead.missing_regex.search(w)) for w in seq]
+        return seq, mask
+
+    def to_seq_pair(
+        self, x: TeamSet, y: TeamSet
+    ) -> Tuple[List[str], List[str], List[bool]]:
+        """
+        Convert (x, y) pair to sequences with coordinated ordering.
+        Ordering determined by x's visible state (with y as tie-breaker for masked).
+        Returns (x_seq, y_seq, pred_mask).
+        """
+        reserve_order = _compute_ordering(x.reserve, y.reserve, _pokemon_sort_key)
+        x_all = [x.lead] + _apply_ordering(x.reserve, reserve_order)
+        y_all = [y.lead] + _apply_ordering(y.reserve, reserve_order)
+
+        x_seq = [f"Format: {x.format}"]
+        y_seq = [f"Format: {y.format}"]
+        pred_mask = [False]
+
+        for xp, yp in zip(x_all, y_all):
+            px, py, pm = self._pokemon_pair_to_seq(xp, yp)
+            x_seq.extend(px)
+            y_seq.extend(py)
+            pred_mask.extend(pm)
+
+        return x_seq, y_seq, pred_mask
+
+    def compute_permutation(self, team: TeamSet) -> List[int]:
+        """
+        Compute the permutation that to_seq applies to put team in canonical order.
+
+        Returns permutation P such that canonical_seq[i] comes from original position P[i].
+        Can be used to reorder other tensors (like pred_mask) to match the new order.
+
+        For inference (no ground truth), masked items sort by their token value which is
+        consistent since all masked tokens are identical.
+        """
+        # Position 0 (Format) stays fixed
+        permutation = [0]
+
+        # Compute Pokemon ordering (lead stays first, reserve gets sorted)
+        # Pass team.reserve twice since we don't have separate ground truth
+        reserve_order = _compute_ordering(team.reserve, team.reserve, _pokemon_sort_key)
+        pokemon_order = [0] + [
+            i + 1 for i in reserve_order
+        ]  # 0=lead, then reserve indices
+
+        # For each Pokemon in new order, compute its attribute positions
+        all_pokemon = [team.lead] + list(team.reserve)
+        for old_p_idx in pokemon_order:
+            pokemon = all_pokemon[old_p_idx]
+            old_pokemon_start = 1 + old_p_idx * self._attrs_per_pokemon
+
+            # First 4 attributes (name, ability, item, tera) keep relative order
+            for attr_offset in range(4):
+                permutation.append(old_pokemon_start + attr_offset)
+
+            # Moves get reordered within Pokemon (pass moves twice, no ground truth)
+            move_order = _compute_ordering(pokemon.moves, pokemon.moves, _move_sort_key)
+            for old_move_idx in move_order:
+                permutation.append(old_pokemon_start + 4 + old_move_idx)
+
+            # Stats if included (nature, evs, ivs keep relative order)
+            if self.include_stats:
+                for stat_offset in range(1 + 6 + 6):
+                    permutation.append(old_pokemon_start + 8 + stat_offset)
+
+        return permutation

@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 from typing import Optional
 from collections import defaultdict
 from datetime import date
@@ -96,12 +97,15 @@ def create_vocabularies(scan_dataset: bool = False):
             lines = f.read().splitlines()[1:]  # skip header
         team_files = [os.path.join(data_dir, line) for line in lines if line]
 
+        from metamon.backend.team_prediction.team import Team2Seq
+
+        t2s = Team2Seq(include_stats=False)
         print(f"Scanning {len(team_files)} team files for unknown tokens...")
         for path in tqdm.tqdm(team_files, desc="Scanning team files"):
             try:
                 format_str = to_id_str(os.path.splitext(path)[1].split("_")[0])
                 team = TeamSet.from_showdown_file(path, format=format_str)
-                seq, _ = team.to_seq(include_stats=False)
+                seq, _ = t2s.to_seq(team)
                 for token in seq:
                     team_tokenizer.add_token_for(token)
             except Exception as e:
@@ -270,6 +274,12 @@ class Vocabulary:
         # renormalize probs
         filtered = probs * mask
         return filtered / (filtered.sum(dim=-1, keepdim=True) + 1e-10)
+
+
+@lru_cache(maxsize=1)
+def get_vocab() -> Vocabulary:
+    """Cached Vocabulary singleton (read-only after init)."""
+    return Vocabulary()
 
 
 if __name__ == "__main__":

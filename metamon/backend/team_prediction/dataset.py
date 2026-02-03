@@ -12,8 +12,8 @@ from poke_env.data import to_id_str
 
 import metamon
 from metamon.backend.team_prediction.team import TeamSet, Roster, PokemonSet
-from metamon.backend.team_prediction.vocabulary import Vocabulary
-from metamon.backend.team_prediction.curriculum import TeamMasker
+from metamon.backend.team_prediction.team import Team2Seq
+from metamon.backend.team_prediction.masking import TeamMasker
 from metamon import METAMON_CACHE_DIR
 
 
@@ -159,6 +159,7 @@ class TeamPredictionDataset(Dataset):
         validation_ratio: float = 0.1,
         seed: Optional[int] = None,
         verbose: bool = False,
+        include_stats: bool = False,
     ):
         """
         Args:
@@ -169,9 +170,10 @@ class TeamPredictionDataset(Dataset):
             validation_ratio: Fraction for validation
             seed: Random seed
             verbose: Print debug info
+            include_stats: Include nature/EVs/IVs in sequence
         """
         self.masker = masker
-        self.vocab = Vocabulary()
+        self.t2s = Team2Seq(include_stats=include_stats)
         self.verbose = verbose
         self.data_dir = pathlib.Path(data_dir)
         self._rng = random.Random(seed)
@@ -253,30 +255,14 @@ class TeamPredictionDataset(Dataset):
         return self._total_files
 
     def _load_and_process_team(self, filepath: str):
-        """Load a team file and process it through the masker."""
+        """Load a team file and process it through masker and Team2Seq."""
         format_str = to_id_str(os.path.splitext(filepath)[1].split("_")[0])
         assert format_str.startswith("gen"), f"Invalid format: {format_str}"
         team = TeamSet.from_showdown_file(filepath, format=format_str)
-
         x, y = self.masker.mask(team)
-        x_seq, x_needs_pred = x.to_seq(include_stats=False)
-        y_seq, y_needs_pred = y.to_seq(include_stats=False)
-
-        pred_mask = torch.logical_and(
-            torch.tensor(x_needs_pred), ~torch.tensor(y_needs_pred)
-        )
-        x_tokens, x_type_ids = self.vocab.pokeset_seq_to_ints(x_seq)
-        y_tokens, y_type_ids = self.vocab.pokeset_seq_to_ints(y_seq)
-
-        assert len(x_tokens) == len(x_type_ids)
-        assert len(y_tokens) == len(y_type_ids)
+        x_tokens, type_ids, y_tokens, pred_mask = self.t2s.encode_pair(x, y)
         assert len(x_tokens) == (8 * 6) + 1
-        assert (x_type_ids == y_type_ids).all()
-
-        x_tokens = torch.from_numpy(x_tokens).long()
-        x_type_ids = torch.from_numpy(x_type_ids).long()
-        y_tokens = torch.from_numpy(y_tokens).long()
-        return x_tokens, x_type_ids, y_tokens, pred_mask
+        return x_tokens, type_ids, y_tokens, pred_mask
 
     def __getitem__(self, idx: int):
         max_retries = 50
@@ -319,17 +305,19 @@ class ScoredTeamPredictionDataset(TeamPredictionDataset):
         validation_ratio: float = 0.1,
         seed: Optional[int] = None,
         verbose: bool = False,
+        include_stats: bool = False,
     ):
         """
         Args:
             data_dir: Directory containing index_scored.csv and team files
-            masker: TeamMasker instance for masking
+            masker: Masker instance for creating (x, y) pairs
             gen_weights: Dict mapping gen -> weight. None = uniform across gens present.
             percentile: Sample from top X% of teams by revealed_score (100 = all teams)
             split: "train" or "val"
             validation_ratio: Fraction for validation
             seed: Random seed
             verbose: Print debug info
+            include_stats: Include nature/EVs/IVs in sequence
         """
         super().__init__(
             data_dir=data_dir,
@@ -339,6 +327,7 @@ class ScoredTeamPredictionDataset(TeamPredictionDataset):
             validation_ratio=validation_ratio,
             seed=seed,
             verbose=verbose,
+            include_stats=include_stats,
         )
 
         # Static percentile (can be overridden by curriculum)
