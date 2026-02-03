@@ -191,21 +191,19 @@ class IterativeTeamDecoder:
         """
         MaskGIT-style iterative decoding with re-sorting after each fill.
 
-        Internally, tokens are re-sorted after each commit to maintain canonical
-        ordering (visible items first alphabetically, then masked). At the end,
-        predictions are permuted back to the ORIGINAL input order so they align
-        with y_tokens and pred_mask for evaluation.
+        Tokens are re-sorted after each commit to maintain canonical ordering
+        (visible items first alphabetically, then masked). Output is returned
+        in canonical order, which aligns with y_tokens from encode_pair.
 
         Args:
-            x_tokens: Initial tokens [batch_size, seq_len]
+            x_tokens: Initial tokens [batch_size, seq_len] (should be in canonical order)
             type_ids: Type IDs for filtering [batch_size, seq_len]
             pred_mask: Mask indicating what needs prediction [batch_size, seq_len]
             track_tokens: If True, store tokens at each iteration in stats.tokens_per_iter
-                (note: these are in canonical order during iteration, not original order)
 
         Returns:
-            Tuple of (completed_tokens, stats) where completed_tokens is in the
-            same order as x_tokens (aligned with y_tokens for evaluation).
+            Tuple of (completed_tokens, stats) where completed_tokens is in
+            canonical (alphabetical) order, aligned with y_tokens for evaluation.
         """
         self.model.eval()
         batch_size, seq_len = x_tokens.shape
@@ -214,10 +212,6 @@ class IterativeTeamDecoder:
         current_tokens = x_tokens.clone()
         current_type_ids = type_ids.clone()
         current_mask = pred_mask.clone()
-
-        # Track cumulative permutation per batch item to restore original order at end
-        # cumulative_perm[b][j] = original position that current position j came from
-        cumulative_perm = [list(range(seq_len)) for _ in range(batch_size)]
 
         initial_n_masked = pred_mask.sum(dim=1)  # [batch_size]
 
@@ -360,17 +354,8 @@ class IterativeTeamDecoder:
                         current_type_ids[b], perm
                     )
                     current_mask[b] = self._apply_permutation(current_mask[b], perm)
-                    # Update cumulative permutation
-                    cumulative_perm[b] = [
-                        cumulative_perm[b][perm[j]] for j in range(seq_len)
-                    ]
 
-            # For visualization, scatter tokens back to original order to align with pred_mask
-            tokens_for_viz = None
-            if track_tokens:
-                tokens_for_viz = torch.zeros_like(current_tokens)
-                perm_tensor = torch.tensor(cumulative_perm, device=device)
-                tokens_for_viz.scatter_(1, perm_tensor, current_tokens)
+            tokens_for_viz = current_tokens.clone() if track_tokens else None
 
             stats.add_iteration(
                 iteration=t,
@@ -382,11 +367,4 @@ class IterativeTeamDecoder:
                 current_tokens=tokens_for_viz,
             )
 
-        # Restore predictions to original input order for alignment with y_tokens
-        # cumulative_perm[b][j] = original position that current position j maps to
-        # scatter: result[cumulative_perm[b][j]] = current_tokens[b][j]
-        result_tokens = torch.zeros_like(current_tokens)
-        perm_tensor = torch.tensor(cumulative_perm, device=device)
-        result_tokens.scatter_(1, perm_tensor, current_tokens)
-
-        return result_tokens, stats
+        return current_tokens, stats
