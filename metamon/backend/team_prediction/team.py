@@ -909,22 +909,43 @@ class TeamSet:
 # =============================================================================
 
 
-def _pokemon_sort_key(x_p: PokemonSet, y_p: PokemonSet) -> Tuple[int, str]:
-    """Sort key: visible Pokemon first (alphabetically), then missing (by y's name)."""
+def _pokemon_sort_key(x_p: PokemonSet, y_p: PokemonSet) -> Tuple[int, int, str]:
+    """
+    Sort key: visible first, then masked-with-label, then masked-no-label.
+
+    Order:
+    1. Visible Pokemon (alphabetically)
+    2. Masked Pokemon with labels (alphabetically by y's name)
+    3. Masked Pokemon without labels (y is also $missing_name$)
+    """
     if x_p.name == PokemonSet.MISSING_NAME:
-        # Masked: use y's name as tie-breaker so labels are in alphabetical order
-        return (1, y_p.name)
-    return (0, x_p.name)
+        # If y is also missing, no ground truth - sort after labeled positions
+        if y_p.name == PokemonSet.MISSING_NAME:
+            return (2, 0, y_p.name)
+        # Masked with label - sort alphabetically by y
+        return (1, 0, y_p.name)
+    return (0, 0, x_p.name)
 
 
-def _move_sort_key(x_move: str, y_move: str) -> Tuple[int, str]:
-    """Sort key: visible moves first (alphabetically), then missing (by y's move), then <nomove>."""
+def _move_sort_key(x_move: str, y_move: str) -> Tuple[int, int, str]:
+    """
+    Sort key: visible first, then masked-with-label, then masked-no-label, then <nomove>.
+
+    Order:
+    1. Visible moves (alphabetically)
+    2. Masked moves with labels (alphabetically by y)
+    3. Masked moves without labels (y is also $missing_move$)
+    4. <nomove> empty slots
+    """
     if x_move == PokemonSet.NO_MOVE:
-        return (2, x_move)
+        return (3, 0, x_move)
     if x_move == PokemonSet.MISSING_MOVE:
-        # Masked: use y's move as tie-breaker so labels are in alphabetical order
-        return (1, y_move)
-    return (0, x_move)
+        # If y is also missing, no ground truth - sort after labeled positions
+        if y_move == PokemonSet.MISSING_MOVE:
+            return (2, 0, y_move)
+        # Masked with label - sort alphabetically by y
+        return (1, 0, y_move)
+    return (0, 0, x_move)
 
 
 def _compute_ordering(x_items: List, y_items: List, sort_key) -> List[int]:

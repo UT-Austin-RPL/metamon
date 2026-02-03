@@ -224,6 +224,7 @@ class IterativeTeamDecoder:
         stats = IterativeDecodingStats()
         stats.total_masked = pred_mask.sum().item()
         NAME_TYPE_ID = self.vocab.type_ids["Mon"]
+        MOVE_TYPE_ID = self.vocab.type_ids["Move"]
 
         # Store initial state for visualization
         if track_tokens:
@@ -347,16 +348,29 @@ class IterativeTeamDecoder:
                 total_committed_this_iter += len(commit_positions)
                 total_names_committed_this_iter += names_in_commit
 
-                # Re-sort to maintain canonical ordering invariant
-                perm = self._compute_resort_permutation(current_tokens[b])
-                current_tokens[b] = self._apply_permutation(current_tokens[b], perm)
-                current_type_ids[b] = self._apply_permutation(current_type_ids[b], perm)
-                current_mask[b] = self._apply_permutation(current_mask[b], perm)
-                # Update cumulative permutation: new_pos j came from old_pos perm[j],
-                # which came from original_pos cumulative_perm[perm[j]]
-                cumulative_perm[b] = [
-                    cumulative_perm[b][perm[j]] for j in range(seq_len)
-                ]
+                # Re-sort only if names or moves were committed (only they affect canonical order)
+                # Abilities, items, tera types don't change ordering
+                has_ordering_change = (
+                    names_in_commit > 0 or (commit_types == MOVE_TYPE_ID).any()
+                )
+                if has_ordering_change:
+                    perm = self._compute_resort_permutation(current_tokens[b])
+                    current_tokens[b] = self._apply_permutation(current_tokens[b], perm)
+                    current_type_ids[b] = self._apply_permutation(
+                        current_type_ids[b], perm
+                    )
+                    current_mask[b] = self._apply_permutation(current_mask[b], perm)
+                    # Update cumulative permutation
+                    cumulative_perm[b] = [
+                        cumulative_perm[b][perm[j]] for j in range(seq_len)
+                    ]
+
+            # For visualization, scatter tokens back to original order to align with pred_mask
+            tokens_for_viz = None
+            if track_tokens:
+                tokens_for_viz = torch.zeros_like(current_tokens)
+                perm_tensor = torch.tensor(cumulative_perm, device=device)
+                tokens_for_viz.scatter_(1, perm_tensor, current_tokens)
 
             stats.add_iteration(
                 iteration=t,
@@ -365,15 +379,14 @@ class IterativeTeamDecoder:
                 committed=total_committed_this_iter,
                 names_committed=total_names_committed_this_iter,
                 masked_confidences=iter_confidences,
-                current_tokens=current_tokens if track_tokens else None,
+                current_tokens=tokens_for_viz,
             )
 
         # Restore predictions to original input order for alignment with y_tokens
         # cumulative_perm[b][j] = original position that current position j maps to
-        # So we scatter: result[cumulative_perm[b][j]] = current_tokens[b][j]
+        # scatter: result[cumulative_perm[b][j]] = current_tokens[b][j]
         result_tokens = torch.zeros_like(current_tokens)
-        for b in range(batch_size):
-            for j in range(seq_len):
-                result_tokens[b, cumulative_perm[b][j]] = current_tokens[b, j]
+        perm_tensor = torch.tensor(cumulative_perm, device=device)
+        result_tokens.scatter_(1, perm_tensor, current_tokens)
 
         return result_tokens, stats

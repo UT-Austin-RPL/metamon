@@ -1061,7 +1061,7 @@ if __name__ == "__main__":
         # architecture
         "max_seq_len": 64,
         "d_model": 400,
-        "nhead": 8,
+        "nhead": 16,
         "num_layers": 8,
         "dim_ff": 1600,
         "dropout": 0.05,

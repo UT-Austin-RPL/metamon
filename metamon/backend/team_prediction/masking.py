@@ -74,12 +74,25 @@ class TeamMasker:
 
         Creates "name-only" states that occur during iterative decoding
         after committing a Pokemon's name but before its attributes.
+        Only masks attributes that exist for this gen (respects gen constraints).
         """
         data = pokemon.to_dict()
-        data["ability"] = PokemonSet.MISSING_ABILITY
-        data["item"] = PokemonSet.MISSING_ITEM
-        data["tera_type"] = PokemonSet.MISSING_TERA_TYPE
-        data["moves"] = [PokemonSet.MISSING_MOVE] * 4
+        gen = pokemon.gen
+
+        # Only mask attributes that exist for this gen
+        if gen >= 3 and pokemon.ability != PokemonSet.NO_ABILITY:
+            data["ability"] = PokemonSet.MISSING_ABILITY
+        if gen >= 2 and pokemon.item != PokemonSet.NO_ITEM:
+            data["item"] = PokemonSet.MISSING_ITEM
+        if gen == 9 and pokemon.tera_type != PokemonSet.NO_TERA_TYPE:
+            data["tera_type"] = PokemonSet.MISSING_TERA_TYPE
+
+        # Mask moves (but preserve <nomove> slots)
+        data["moves"] = [
+            PokemonSet.MISSING_MOVE if m != PokemonSet.NO_MOVE else m
+            for m in pokemon.moves
+        ]
+
         if self.include_stats:
             data["nature"] = PokemonSet.MISSING_NATURE
             data["evs"] = [PokemonSet.MISSING_EV] * 6
