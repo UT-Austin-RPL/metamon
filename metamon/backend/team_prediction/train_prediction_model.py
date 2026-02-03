@@ -26,7 +26,9 @@ from metamon.backend.team_prediction.masking import (
 from metamon.backend.team_prediction.prediction_metrics import (
     compute_loss_and_metrics,
     EvaluationAccumulator,
+    SemanticMetricsAccumulator,
 )
+from metamon.backend.team_prediction.team import Team2Seq
 from metamon.backend.team_prediction.iterative_decoder import (
     IterativeTeamDecoder,
     IterativeStatsAccumulator,
@@ -37,6 +39,7 @@ from metamon.backend.team_prediction.iterative_decoder import (
 class EvalResults:
     oneshot_metrics: dict
     iterative_metrics: Optional[dict] = None
+    semantic_metrics: Optional[dict] = None
     examples: Optional[list] = None
     iter_stats: Optional[dict] = None
     mask_counts: Optional[list] = None
@@ -60,6 +63,8 @@ def evaluate(
     iter_stats_accumulator = (
         IterativeStatsAccumulator(num_iterations) if include_iterative else None
     )
+    semantic_accumulator = SemanticMetricsAccumulator() if include_iterative else None
+    t2s = Team2Seq() if include_iterative else None
     val_mask_counts = []
     val_revealed_counts = []
 
@@ -140,6 +145,10 @@ def evaluate(
                 iterative_accumulator.add_batch(
                     iter_logits, y_tokens, pred_mask, type_ids, x_tokens
                 )
+                # Semantic metrics (set-based comparison)
+                semantic_accumulator.add_batch(
+                    iterative_preds.cpu(), y_tokens.cpu(), x_tokens.cpu(), t2s
+                )
 
             # save some predictions for fancy wandb example viz
             if batch_idx == 0 and num_examples > 0:
@@ -170,6 +179,9 @@ def evaluate(
     iterative_metrics = (
         iterative_accumulator.compute_metrics() if iterative_accumulator else None
     )
+    semantic_metrics = (
+        semantic_accumulator.compute_metrics() if semantic_accumulator else None
+    )
     iter_stats = (
         iter_stats_accumulator.compute_results() if iter_stats_accumulator else None
     )
@@ -177,6 +189,7 @@ def evaluate(
     return EvalResults(
         oneshot_metrics=oneshot_metrics,
         iterative_metrics=iterative_metrics,
+        semantic_metrics=semantic_metrics,
         examples=examples if num_examples > 0 else None,
         iter_stats=iter_stats,
         mask_counts=val_mask_counts,
@@ -810,6 +823,16 @@ def train(config, use_wandb: bool = True):
                 ):
                     print(f"    {k}: {v:.3f}")
 
+            # Print semantic metrics (set-based comparison)
+            val_semantic = val_results.semantic_metrics
+            if val_semantic:
+                print("\n  Semantic Metrics (set-based, iterative):")
+                for k, v in sorted(val_semantic.items()):
+                    if k.endswith("_accuracy"):
+                        total_key = k.replace("_accuracy", "_total")
+                        total = val_semantic.get(total_key, 0)
+                        print(f"    {k}: {v:.3f} (n={int(total)})")
+
             if use_wandb:
                 log_dict = {
                     "global_step": global_step,
@@ -840,6 +863,29 @@ def train(config, use_wandb: bool = True):
                         {
                             f"val_clean_hard/iterative/{k}": v
                             for k, v in val_clean_hard_iter.items()
+                        }
+                    )
+
+                # Semantic metrics (set-based comparison)
+                if val_results.semantic_metrics:
+                    log_dict.update(
+                        {
+                            f"val/semantic/{k}": v
+                            for k, v in val_results.semantic_metrics.items()
+                        }
+                    )
+                if val_clean_results.semantic_metrics:
+                    log_dict.update(
+                        {
+                            f"val_clean/semantic/{k}": v
+                            for k, v in val_clean_results.semantic_metrics.items()
+                        }
+                    )
+                if val_clean_hard_results.semantic_metrics:
+                    log_dict.update(
+                        {
+                            f"val_clean_hard/semantic/{k}": v
+                            for k, v in val_clean_hard_results.semantic_metrics.items()
                         }
                     )
 

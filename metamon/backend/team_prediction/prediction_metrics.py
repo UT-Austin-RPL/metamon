@@ -349,3 +349,165 @@ def compute_loss_and_metrics(
     )
 
     return loss, metrics
+
+
+def compute_semantic_metrics(
+    pred_tokens: torch.Tensor,
+    y_tokens: torch.Tensor,
+    x_tokens: torch.Tensor,
+    t2s,
+) -> Dict[str, float]:
+    """
+    Compute semantic metrics by converting to TeamSet and comparing.
+
+    This avoids position-based comparison issues by:
+    1. Matching Pokemon by name (set-based for reserve)
+    2. Comparing moves as sets within each matched Pokemon
+
+    Args:
+        pred_tokens: Predicted tokens [batch_size, seq_len] in canonical order
+        y_tokens: Ground truth tokens [batch_size, seq_len] in canonical order
+        x_tokens: Input tokens [batch_size, seq_len] to determine what was masked
+        t2s: Team2Seq instance for decoding
+
+    Returns:
+        Dict with semantic accuracy metrics
+    """
+    from metamon.backend.team_prediction.team import PokemonSet as P
+
+    stats = defaultdict(lambda: {"correct": 0, "total": 0})
+
+    batch_size = pred_tokens.shape[0]
+    for b in range(batch_size):
+        pred_team = t2s.decode(pred_tokens[b])
+        true_team = t2s.decode(y_tokens[b])
+        input_team = t2s.decode(x_tokens[b])
+
+        # Build aligned lists: (input_pokemon, pred_pokemon, true_pokemon)
+        all_pokemon = [
+            (input_team.lead, pred_team.lead, true_team.lead),
+        ] + list(zip(input_team.reserve, pred_team.reserve, true_team.reserve))
+
+        for input_p, pred_p, true_p in all_pokemon:
+            # Was this Pokemon's name masked?
+            name_was_masked = input_p.name == P.MISSING_NAME
+            name_has_label = true_p.name != P.MISSING_NAME
+
+            if name_was_masked and name_has_label:
+                stats["pokemon"]["total"] += 1
+                if pred_p.name == true_p.name:
+                    stats["pokemon"]["correct"] += 1
+                    # Only compare attributes if Pokemon name was correct
+                    _compare_pokemon_attrs(input_p, pred_p, true_p, stats)
+            elif not name_was_masked:
+                # Pokemon name was visible, compare attributes
+                _compare_pokemon_attrs(input_p, pred_p, true_p, stats)
+
+    # Compute final metrics
+    metrics = {}
+    for attr_name, counts in stats.items():
+        if counts["total"] > 0:
+            metrics[f"semantic_{attr_name}_accuracy"] = (
+                counts["correct"] / counts["total"]
+            )
+            metrics[f"semantic_{attr_name}_total"] = counts["total"]
+
+    return metrics
+
+
+def _compare_pokemon_attrs(input_p, pred_p, true_p, stats):
+    """Compare attributes of matched Pokemon using set-based comparison for moves."""
+    from metamon.backend.team_prediction.team import PokemonSet as P
+
+    # Moves: set-based comparison
+    # Get ground truth moves that were masked and have real labels
+    true_labeled_moves = set()
+    for input_m, true_m in zip(input_p.moves, true_p.moves):
+        if input_m == P.MISSING_MOVE and true_m not in (P.MISSING_MOVE, P.NO_MOVE):
+            true_labeled_moves.add(true_m)
+
+    # Get predicted moves (excluding missing/nomove)
+    pred_moves = set(m for m in pred_p.moves if m not in (P.MISSING_MOVE, P.NO_MOVE))
+
+    # Count how many ground truth moves are in predicted set
+    for move in true_labeled_moves:
+        stats["move"]["total"] += 1
+        if move in pred_moves:
+            stats["move"]["correct"] += 1
+
+    # Ability - only count if masked AND ground truth is a real ability
+    if input_p.ability == P.MISSING_ABILITY and true_p.ability not in (
+        P.MISSING_ABILITY,
+        P.NO_ABILITY,
+    ):
+        stats["ability"]["total"] += 1
+        if pred_p.ability == true_p.ability:
+            stats["ability"]["correct"] += 1
+
+    # Item - only count if masked AND ground truth is a real item
+    if input_p.item == P.MISSING_ITEM and true_p.item not in (
+        P.MISSING_ITEM,
+        P.NO_ITEM,
+    ):
+        stats["item"]["total"] += 1
+        if pred_p.item == true_p.item:
+            stats["item"]["correct"] += 1
+
+    # Tera type - only count if masked AND ground truth is a real tera
+    if input_p.tera_type == P.MISSING_TERA_TYPE and true_p.tera_type not in (
+        P.MISSING_TERA_TYPE,
+        P.NO_TERA_TYPE,
+    ):
+        stats["tera"]["total"] += 1
+        if pred_p.tera_type == true_p.tera_type:
+            stats["tera"]["correct"] += 1
+
+
+class SemanticMetricsAccumulator:
+    """Accumulates semantic metrics across batches."""
+
+    def __init__(self):
+        self.stats = defaultdict(lambda: {"correct": 0, "total": 0})
+
+    def add_batch(
+        self,
+        pred_tokens: torch.Tensor,
+        y_tokens: torch.Tensor,
+        x_tokens: torch.Tensor,
+        t2s,
+    ):
+        """Add a batch of predictions to the accumulator."""
+        from metamon.backend.team_prediction.team import PokemonSet as P
+
+        batch_size = pred_tokens.shape[0]
+        for b in range(batch_size):
+            pred_team = t2s.decode(pred_tokens[b])
+            true_team = t2s.decode(y_tokens[b])
+            input_team = t2s.decode(x_tokens[b])
+
+            all_pokemon = [
+                (input_team.lead, pred_team.lead, true_team.lead),
+            ] + list(zip(input_team.reserve, pred_team.reserve, true_team.reserve))
+
+            for input_p, pred_p, true_p in all_pokemon:
+                name_was_masked = input_p.name == P.MISSING_NAME
+                name_has_label = true_p.name != P.MISSING_NAME
+
+                if name_was_masked and name_has_label:
+                    self.stats["pokemon"]["total"] += 1
+                    if pred_p.name == true_p.name:
+                        self.stats["pokemon"]["correct"] += 1
+                        _compare_pokemon_attrs(input_p, pred_p, true_p, self.stats)
+                elif not name_was_masked:
+                    _compare_pokemon_attrs(input_p, pred_p, true_p, self.stats)
+
+    def compute_metrics(self) -> Dict[str, float]:
+        """Compute final metrics from accumulated stats."""
+        metrics = {}
+        for attr_name, counts in self.stats.items():
+            if counts["total"] > 0:
+                metrics[f"semantic_{attr_name}_accuracy"] = (
+                    counts["correct"] / counts["total"]
+                )
+                metrics[f"semantic_{attr_name}_total"] = counts["total"]
+        return metrics

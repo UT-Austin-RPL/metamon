@@ -14,7 +14,6 @@ class IterativeDecodingStats:
     committed_counts: List[int] = field(default_factory=list)
     names_committed_counts: List[int] = field(default_factory=list)
     confidences_per_iter: List[torch.Tensor] = field(default_factory=list)
-    # For visualization: tokens at each iteration [batch_size, seq_len] per iter
     tokens_per_iter: List[torch.Tensor] = field(default_factory=list)
     num_iterations_used: int = 0
     total_masked: int = 0
@@ -33,7 +32,6 @@ class IterativeDecodingStats:
         self.remaining_counts.append(remaining)
         self.committed_counts.append(committed)
         self.names_committed_counts.append(names_committed)
-        # masked_confidences already extracted at masked positions before permutations
         self.confidences_per_iter.append(masked_confidences)
         if current_tokens is not None:
             self.tokens_per_iter.append(current_tokens.cpu().clone())
@@ -189,23 +187,8 @@ class IterativeTeamDecoder:
         track_tokens: bool = False,
     ) -> tuple[torch.Tensor, IterativeDecodingStats]:
         """
-        MaskGIT-style iterative decoding with re-sorting after each fill.
-
-        Internally, tokens are re-sorted after each commit to maintain canonical
-        ordering (visible items first alphabetically, then masked). At the end,
-        predictions are permuted back to the ORIGINAL input order so they align
-        with y_tokens and pred_mask for evaluation.
-
-        Args:
-            x_tokens: Initial tokens [batch_size, seq_len]
-            type_ids: Type IDs for filtering [batch_size, seq_len]
-            pred_mask: Mask indicating what needs prediction [batch_size, seq_len]
-            track_tokens: If True, store tokens at each iteration in stats.tokens_per_iter
-                (note: these are in canonical order during iteration, not original order)
-
-        Returns:
-            Tuple of (completed_tokens, stats) where completed_tokens is in the
-            same order as x_tokens (aligned with y_tokens for evaluation).
+        MaskGIT-style iterative decoding with re-sorting to deal with structured
+        semi-ordered sequence format of our Pokemon teams.
         """
         self.model.eval()
         batch_size, seq_len = x_tokens.shape
@@ -215,10 +198,6 @@ class IterativeTeamDecoder:
         current_type_ids = type_ids.clone()
         current_mask = pred_mask.clone()
 
-        # Track cumulative permutation per batch item to restore original order at end
-        # cumulative_perm[b][j] = original position that current position j came from
-        cumulative_perm = [list(range(seq_len)) for _ in range(batch_size)]
-
         initial_n_masked = pred_mask.sum(dim=1)  # [batch_size]
 
         stats = IterativeDecodingStats()
@@ -226,7 +205,7 @@ class IterativeTeamDecoder:
         NAME_TYPE_ID = self.vocab.type_ids["Mon"]
         MOVE_TYPE_ID = self.vocab.type_ids["Move"]
 
-        # Store initial state for visualization
+        # initial state for visualization
         if track_tokens:
             stats.tokens_per_iter.append(current_tokens.cpu().clone())
 
@@ -267,7 +246,6 @@ class IterativeTeamDecoder:
             progress = (t + 1) / self.num_iterations
             target_mask_ratio = 0.0 if is_last_iter else self._gamma(progress)
 
-            # Capture confidences at masked positions BEFORE commits/permutations
             iter_confidences = (
                 confidences[current_mask].cpu()
                 if current_mask.any()
@@ -280,7 +258,7 @@ class IterativeTeamDecoder:
                 if n_masked[b] == 0:
                     continue
 
-                # Calculate how many tokens to commit
+                # how many tokens to commit
                 n_remain = max(
                     0, math.ceil(target_mask_ratio * initial_n_masked[b].item())
                 )
@@ -293,41 +271,41 @@ class IterativeTeamDecoder:
                 masked_type_ids = current_type_ids[b][masked_positions]
                 masked_confs = confidences[b][masked_positions]
 
-                # Identify which masked positions are Pokemon names
+                # identify which masked positions are Pokemon names
                 is_name = masked_type_ids == NAME_TYPE_ID
                 name_positions = masked_positions[is_name]
                 name_confs = (
                     masked_confs[is_name] if name_positions.numel() > 0 else None
                 )
 
-                # Select top-k by confidence
+                # select top-k by confidence
                 _, topk_idx = masked_confs.topk(min(n_to_commit, masked_confs.numel()))
                 candidate_positions = masked_positions[topk_idx]
                 candidate_types = current_type_ids[b][candidate_positions]
 
-                # Ensure at least one name is committed if any remain masked
+                # at least one name is committed if any remain masked
                 # (so we always make progress on unblocking attributes)
                 names_in_candidates = candidate_positions[
                     candidate_types == NAME_TYPE_ID
                 ]
                 if name_positions.numel() > 0 and names_in_candidates.numel() == 0:
-                    # No names in top-k, add the most confident name
+                    # no names in top-k, add the most confident name
                     best_name_idx = name_confs.argmax()
                     best_name_pos = name_positions[best_name_idx : best_name_idx + 1]
                     candidate_positions = torch.cat(
                         [candidate_positions, best_name_pos]
                     )
 
-                # Filter: allow attribute only if its Pokemon's name is visible
+                # filter: allow attribute only if its Pokemon's name is visible
                 # OR the name is also being committed this iteration
                 candidate_types = current_type_ids[b][candidate_positions]
                 cand_pokemon_idx = self.t2s.get_pokemon_indices(candidate_positions)
                 cand_name_pos = self.t2s.get_name_positions(cand_pokemon_idx)
 
-                # Which Pokemon have names being committed this iteration?
+                # which Pokemon have names being committed this iteration?
                 name_pokemon_idx = cand_pokemon_idx[candidate_types == NAME_TYPE_ID]
 
-                # Keep if: (1) it's a name, (2) its name is visible, (3) its name is being committed
+                # keep if: (1) it's a name, (2) its name is visible, (3) its name is being committed
                 is_candidate_name = candidate_types == NAME_TYPE_ID
                 name_already_visible = ~current_mask[b, cand_name_pos]
                 name_being_committed = torch.isin(cand_pokemon_idx, name_pokemon_idx)
@@ -338,7 +316,7 @@ class IterativeTeamDecoder:
                 if commit_positions.numel() == 0:
                     continue
 
-                # Count names being committed
+                # count names being committed
                 commit_types = current_type_ids[b][commit_positions]
                 names_in_commit = (commit_types == NAME_TYPE_ID).sum().item()
 
@@ -348,8 +326,7 @@ class IterativeTeamDecoder:
                 total_committed_this_iter += len(commit_positions)
                 total_names_committed_this_iter += names_in_commit
 
-                # Re-sort only if names or moves were committed (only they affect canonical order)
-                # Abilities, items, tera types don't change ordering
+                # re-sort only if names or moves were committed
                 has_ordering_change = (
                     names_in_commit > 0 or (commit_types == MOVE_TYPE_ID).any()
                 )
@@ -360,17 +337,8 @@ class IterativeTeamDecoder:
                         current_type_ids[b], perm
                     )
                     current_mask[b] = self._apply_permutation(current_mask[b], perm)
-                    # Update cumulative permutation
-                    cumulative_perm[b] = [
-                        cumulative_perm[b][perm[j]] for j in range(seq_len)
-                    ]
 
-            # For visualization, scatter tokens back to original order to align with pred_mask
-            tokens_for_viz = None
-            if track_tokens:
-                tokens_for_viz = torch.zeros_like(current_tokens)
-                perm_tensor = torch.tensor(cumulative_perm, device=device)
-                tokens_for_viz.scatter_(1, perm_tensor, current_tokens)
+            tokens_for_viz = current_tokens.clone() if track_tokens else None
 
             stats.add_iteration(
                 iteration=t,
@@ -382,11 +350,4 @@ class IterativeTeamDecoder:
                 current_tokens=tokens_for_viz,
             )
 
-        # Restore predictions to original input order for alignment with y_tokens
-        # cumulative_perm[b][j] = original position that current position j maps to
-        # scatter: result[cumulative_perm[b][j]] = current_tokens[b][j]
-        result_tokens = torch.zeros_like(current_tokens)
-        perm_tensor = torch.tensor(cumulative_perm, device=device)
-        result_tokens.scatter_(1, perm_tensor, current_tokens)
-
-        return result_tokens, stats
+        return current_tokens, stats
