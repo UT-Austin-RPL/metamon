@@ -904,11 +904,6 @@ class TeamSet:
                     pokemon.name = new_pokemon.pop()
 
 
-# =============================================================================
-# Team2Seq: Sequence conversion with canonical ordering
-# =============================================================================
-
-
 def _pokemon_sort_key(x_p: PokemonSet, y_p: PokemonSet) -> Tuple[int, int, str]:
     """
     Sort key: visible first, then masked-with-label, then masked-no-label.
@@ -962,8 +957,7 @@ def _apply_ordering(items: List, order: List[int]) -> List:
 
 class Team2Seq:
     """
-    Converts TeamSets to model-ready sequences and token IDs with canonical ordering.
-
+    Converts TeamSets to model-ready sequences and token IDs with standard ordering.
     Ordering rules:
     - Pokemon: lead first, then reserve by visible name (alphabetically), then masked
     - Moves: visible first (alphabetically), then $missing_move$, then <nomove>
@@ -1120,13 +1114,7 @@ class Team2Seq:
 
     def compute_permutation(self, team: TeamSet) -> List[int]:
         """
-        Compute the permutation that to_seq applies to put team in canonical order.
-
-        Returns permutation P such that canonical_seq[i] comes from original position P[i].
-        Can be used to reorder other tensors (like pred_mask) to match the new order.
-
-        For inference (no ground truth), masked items sort by their token value which is
-        consistent since all masked tokens are identical.
+        Compute the permutation that to_seq applies to put team in sorted order.
         """
         # Position 0 (Format) stays fixed
         permutation = [0]

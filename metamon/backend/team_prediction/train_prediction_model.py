@@ -39,9 +39,7 @@ from metamon.backend.team_prediction.iterative_decoder import (
 class EvalResults:
     oneshot_metrics: dict
     iterative_metrics: Optional[dict] = None
-    semantic_metrics: Optional[dict] = (
-        None  # Semantic (set-based) metrics for iterative
-    )
+    semantic_metrics: Optional[dict] = None
     examples: Optional[list] = None
     iter_stats: Optional[dict] = None
     mask_counts: Optional[list] = None
