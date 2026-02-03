@@ -184,7 +184,12 @@ class TeamPredictionDataset(Dataset):
             d_path = pathlib.Path(d)
             index_path = d_path / "index.csv"
 
-            if self.use_cached_filenames and index_path.exists():
+            if self.use_cached_filenames:
+                if not index_path.exists():
+                    raise FileNotFoundError(
+                        f"index.csv not found at {index_path}. "
+                        "Run compute_revealed_scores.py first to generate it."
+                    )
                 with open(index_path, "r") as f:
                     lines = f.read().splitlines()[1:]  # skip header
                 team_files_set.update(str(d_path / line) for line in lines if line)
@@ -192,19 +197,11 @@ class TeamPredictionDataset(Dataset):
                     print(f"Loaded {len(lines)} files from {index_path}")
             else:
                 # scan directory for team files
-                rel_paths = []
                 for f in d_path.rglob("*"):
                     if f.is_file() and f.suffix.endswith("team"):
                         team_files_set.add(str(f))
-                        rel_paths.append(str(f.relative_to(d_path)))
                 if self.verbose:
-                    print(f"Indexed {len(rel_paths)} files from {d}/")
-                # write to index.csv cache
-                if rel_paths:
-                    with open(index_path, "w") as f:
-                        f.write("filename\n")
-                        for rel_path in rel_paths:
-                            f.write(f"{rel_path}\n")
+                    print(f"Indexed {len(team_files_set)} files from {d}/")
         all_team_files = sorted(team_files_set)
 
         # create train/val split

@@ -404,7 +404,6 @@ def train(config, use_wandb: bool = True):
     train_iter = iter(train_loader)
     pbar = tqdm.tqdm(total=config.max_steps, desc="Training")
 
-    print(f"\nStarting training on {device}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     while global_step < config.max_steps:
@@ -684,31 +683,32 @@ if __name__ == "__main__":
         # dataset
         "train_data_dir": download_revealed_teams(),
         "val_ratio": 0.1,
-        "batch_size": 48,
+        "batch_size": 64,
         "num_workers": 4,
         "seed": 42,
         # architecture
         "max_seq_len": 64,
-        "d_model": 256,
+        "d_model": 400,
         "nhead": 8,
-        "num_layers": 4,
-        "dim_ff": 1024,
+        "num_layers": 8,
+        "dim_ff": 1600,
         "dropout": 0.05,
         # training
         "learning_rate": 1e-4,
         "weight_decay": 1e-4,
         "max_grad_norm": 1.0,
         "warmup_steps": 5000,
-        "max_steps": 200000,
+        "max_steps": 5_000_000,
         "log_train_every_steps": 100,
-        "eval_every_steps": 5000,
+        "eval_every_steps": 10_000,
         "max_eval_steps": 50,
-        "patience": 100,
+        "patience": 500,
         # masking + curriculum params
-        "masking_strategy": "variable",
+        # "masking_strategy": "variable",
+        "masking_strategy": "curriculum",
         "mask_pokemon_prob": 0.15,
         "mask_attrs_prob": 0.4,
-        "curriculum_warmup_steps": 20000,
+        "curriculum_warmup_steps": 200_000,
         "eval_with_iterative": True,
         "eval_num_iterations": 8,
         "debug_overfit": False,
