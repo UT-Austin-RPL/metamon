@@ -1,3 +1,4 @@
+import csv
 import os
 import random
 import pathlib
@@ -5,6 +6,7 @@ from typing import List, Tuple, Optional, Union, Iterable, Literal, Dict, Set
 from datetime import datetime
 
 import torch
+import torch.multiprocessing as mp
 from torch.utils.data import Dataset
 from poke_env.data import to_id_str
 
@@ -141,130 +143,152 @@ class FilteredTeamsFromReplaysDataset(TeamDataset):
 
 
 class TeamPredictionDataset(Dataset):
+    """
+    Dataset for team prediction using index_scored.csv.
+
+    Supports generation-weighted sampling. Loads files grouped by generation
+    with their revealed scores for efficient sampling.
+    """
+
     def __init__(
         self,
-        data_dir: Union[str, Iterable[str]],
+        data_dir: str,
         masker: TeamMasker,
+        gen_weights: Optional[Dict[int, float]] = None,
         split: Literal["train", "val"] = "train",
         validation_ratio: float = 0.1,
         seed: Optional[int] = None,
-        use_cached_filenames: bool = False,
         verbose: bool = False,
     ):
         """
         Args:
-            data_dir: Directory or iterable of directories containing .team files
-            masker: TeamMasker instance that handles masking logic
-            split: Whether this is the training or validation split
-            validation_ratio: Fraction of data to use for validation
-            seed: Random seed for reproducibility
-            use_cached_filenames: If True, use cached index files instead of scanning directories
-            verbose: If True, print progress information
+            data_dir: Directory containing index_scored.csv and team files
+            masker: TeamMasker instance for masking
+            gen_weights: Dict mapping gen -> weight. None = uniform across gens present.
+            split: "train" or "val"
+            validation_ratio: Fraction for validation
+            seed: Random seed
+            verbose: Print debug info
         """
         self.masker = masker
-        assert 0 <= validation_ratio <= 1, "validation_ratio must be in [0, 1)"
-
         self.vocab = Vocabulary()
-        self.use_cached_filenames = use_cached_filenames
         self.verbose = verbose
-        if seed is not None:
-            random.seed(seed)
-            torch.manual_seed(seed)
+        self.data_dir = pathlib.Path(data_dir)
+        self._rng = random.Random(seed)
 
-        if isinstance(data_dir, str):
-            data_dirs = [data_dir]
-        else:
-            data_dirs = list(data_dir)
+        # load index_scored.csv
+        scored_index_path = self.data_dir / "index_scored.csv"
+        if not scored_index_path.exists():
+            raise FileNotFoundError(
+                f"index_scored.csv not found at {scored_index_path}. "
+                "Run compute_revealed_scores.py first."
+            )
 
-        # collect all team files
-        team_files_set = set()
-        for d in data_dirs:
-            if self.verbose:
-                print(f"Processing directory: {d}")
-            d_path = pathlib.Path(d)
-            index_path = d_path / "index.csv"
+        # parse csv: group by gen, sorted by score descending
+        files_by_gen: Dict[int, List[Tuple[str, float]]] = {}
+        with open(scored_index_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                filepath = str(self.data_dir / row["filename"])
+                gen = int(row["gen"])
+                score = float(row["revealed_score"])
+                if gen not in files_by_gen:
+                    files_by_gen[gen] = []
+                files_by_gen[gen].append((filepath, score))
 
-            if self.use_cached_filenames and index_path.exists():
-                with open(index_path, "r") as f:
-                    lines = f.read().splitlines()[1:]  # skip header
-                team_files_set.update(str(d_path / line) for line in lines if line)
-                if self.verbose:
-                    print(f"Loaded {len(lines)} files from {index_path}")
-            else:
-                # scan directory for team files
-                rel_paths = []
-                for f in d_path.rglob("*"):
-                    if f.is_file() and f.suffix.endswith("team"):
-                        team_files_set.add(str(f))
-                        rel_paths.append(str(f.relative_to(d_path)))
-                if self.verbose:
-                    print(f"Indexed {len(rel_paths)} files from {d}/")
-                # write to index.csv cache
-                if rel_paths:
-                    with open(index_path, "w") as f:
-                        f.write("filename\n")
-                        for rel_path in rel_paths:
-                            f.write(f"{rel_path}\n")
-        all_team_files = sorted(team_files_set)
+        # Verify sorted by score descending within each gen
+        for gen, files in files_by_gen.items():
+            for i in range(len(files) - 1):
+                assert (
+                    files[i][1] >= files[i + 1][1]
+                ), f"Files not sorted by score descending for gen {gen}"
 
-        # create train/val split
-        n_total = len(all_team_files)
-        n_val = int(n_total * validation_ratio)
+        # train/val split
         split_rng = random.Random(seed)
-        indices = list(range(n_total))
-        split_rng.shuffle(indices)
-        val_indices = set(indices[:n_val])
-        if split == "train":
-            self.team_files = [
-                f for i, f in enumerate(all_team_files) if i not in val_indices
-            ]
-        elif split == "val":
-            self.team_files = [
-                f for i, f in enumerate(all_team_files) if i in val_indices
-            ]
+        self.files_by_gen: Dict[int, List[Tuple[str, float]]] = {}
+        for gen, files in files_by_gen.items():
+            n_val = int(len(files) * validation_ratio)
+            indices = list(range(len(files)))
+            split_rng.shuffle(indices)
+            val_indices = set(indices[:n_val])
+
+            if split == "train":
+                selected = [files[i] for i in range(len(files)) if i not in val_indices]
+            else:
+                selected = [files[i] for i in range(len(files)) if i in val_indices]
+            selected.sort(key=lambda x: -x[1])
+            self.files_by_gen[gen] = selected
+
+        # extract just scores for subclass use (binary search)
+        self.scores_by_gen: Dict[int, List[float]] = {
+            gen: [s for _, s in files] for gen, files in self.files_by_gen.items()
+        }
+
+        # generation weights
+        self.gens = sorted(self.files_by_gen.keys())
+        if gen_weights is None:
+            # natural distribution: probability proportional to file count
+            self.gen_weights = {g: len(self.files_by_gen[g]) for g in self.gens}
         else:
-            raise ValueError(f"Invalid split: {split}")
-        print(f"Created {split} split with {len(self.team_files)} team files")
+            self.gen_weights = {g: gen_weights.get(g, 0.0) for g in self.gens}
+        total_weight = sum(self.gen_weights.values())
+        if total_weight <= 0:
+            raise ValueError(
+                "Invalid generation weights: sum(gen_weights) must be > 0. "
+                f"Got {self.gen_weights}"
+            )
+        self.gen_probs = [self.gen_weights[g] / total_weight for g in self.gens]
+
+        self._total_files = sum(len(f) for f in self.files_by_gen.values())
+        if verbose:
+            print(
+                f"Dataset ({split}): {self._total_files:,} files, gens={list(self.gens)}"
+            )
+
+    def _get_sample_range(self, gen: int) -> int:
+        """Get the max index to sample from for a generation. Base class uses all files."""
+        return len(self.files_by_gen[gen]) - 1
 
     def __len__(self) -> int:
-        return len(self.team_files)
+        return self._total_files
 
-    def __getitem__(self, idx: int) -> Tuple[TeamSet, TeamSet]:
-        """
-        Returns:
-            x_tokens: Masked team tokens
-            x_type_ids: Type indicating ints (pokemon, ability, item, etc.)
-            y_tokens: Complete team tokens (ground truth)
-            pred_mask: Mask indicating which values are eligible for loss function
-        """
+    def _load_and_process_team(self, filepath: str):
+        """Load a team file and process it through the masker."""
+        format_str = to_id_str(os.path.splitext(filepath)[1].split("_")[0])
+        assert format_str.startswith("gen"), f"Invalid format: {format_str}"
+        team = TeamSet.from_showdown_file(filepath, format=format_str)
+
+        x, y = self.masker.mask(team)
+        x_seq, x_needs_pred = x.to_seq(include_stats=False)
+        y_seq, y_needs_pred = y.to_seq(include_stats=False)
+
+        pred_mask = torch.logical_and(
+            torch.tensor(x_needs_pred), ~torch.tensor(y_needs_pred)
+        )
+        x_tokens, x_type_ids = self.vocab.pokeset_seq_to_ints(x_seq)
+        y_tokens, y_type_ids = self.vocab.pokeset_seq_to_ints(y_seq)
+
+        assert len(x_tokens) == len(x_type_ids)
+        assert len(y_tokens) == len(y_type_ids)
+        assert len(x_tokens) == (8 * 6) + 1
+        assert (x_type_ids == y_type_ids).all()
+
+        x_tokens = torch.from_numpy(x_tokens).long()
+        x_type_ids = torch.from_numpy(x_type_ids).long()
+        y_tokens = torch.from_numpy(y_tokens).long()
+        return x_tokens, x_type_ids, y_tokens, pred_mask
+
+    def __getitem__(self, idx: int):
         max_retries = 50
         for attempt in range(max_retries):
             try:
-                current_idx = idx if attempt == 0 else random.randint(0, len(self) - 1)
-                path = self.team_files[current_idx]
-                # Extract format from file extension (e.g. .gen4ou_team -> gen4ou)
-                format = to_id_str(os.path.splitext(path)[1].split("_")[0])
-                assert format.startswith("gen"), f"Invalid format: {format}"
-                team = TeamSet.from_showdown_file(path, format=format)
-
-                x, y = self.masker.mask(team)
-                x_seq, x_needs_pred = x.to_seq(include_stats=False)
-                y_seq, y_needs_pred = y.to_seq(include_stats=False)
-
-                # we will only train on values that are missing from x but provided by y
-                pred_mask = torch.logical_and(
-                    torch.tensor(x_needs_pred), ~torch.tensor(y_needs_pred)
-                )
-                x_tokens, x_type_ids = self.vocab.pokeset_seq_to_ints(x_seq)
-                y_tokens, y_type_ids = self.vocab.pokeset_seq_to_ints(y_seq)
-                assert len(x_tokens) == len(x_type_ids)
-                assert len(y_tokens) == len(y_type_ids)
-                assert len(x_tokens) == (8 * 6) + 1
-                assert (x_type_ids == y_type_ids).all()
-                x_tokens = torch.from_numpy(x_tokens).long()
-                x_type_ids = torch.from_numpy(x_type_ids).long()
-                y_tokens = torch.from_numpy(y_tokens).long()
-                return x_tokens, x_type_ids, y_tokens, pred_mask
+                gen = self._rng.choices(self.gens, weights=self.gen_probs, k=1)[0]
+                max_idx = self._get_sample_range(gen)
+                if max_idx < 0:
+                    continue
+                file_idx = self._rng.randint(0, max_idx)
+                filepath, score = self.files_by_gen[gen][file_idx]
+                return self._load_and_process_team(filepath)
             except Exception as e:
                 if attempt == max_retries - 1:
                     raise RuntimeError(
@@ -273,29 +297,86 @@ class TeamPredictionDataset(Dataset):
                 continue
 
 
-class CompetitiveTeamPredictionDataset(TeamPredictionDataset):
+class ScoredTeamPredictionDataset(TeamPredictionDataset):
+    """
+    Dataset with percentile-based filtering and curriculum support.
+
+    Inherits gen-weighted sampling from TeamPredictionDataset, adds:
+    - Percentile-based filtering (e.g., top 10% most complete teams)
+    - Curriculum learning with dynamically changing percentile threshold
+
+    Files are sorted by revealed_score descending, so percentile=10 means
+    only sample from the top 10% most complete teams per generation.
+    """
+
     def __init__(
         self,
+        data_dir: str,
         masker: TeamMasker,
+        gen_weights: Optional[Dict[int, float]] = None,
+        percentile: float = 100.0,
+        split: Literal["train", "val"] = "train",
+        validation_ratio: float = 0.1,
+        seed: Optional[int] = None,
         verbose: bool = False,
     ):
-        team_dirs = []
-        for gen in [1, 2, 3, 4, 5, 9]:
-            # TODO: add other tiers?
-            for tier in ["ou"]:
-                team_dirs.append(
-                    os.path.join(
-                        METAMON_CACHE_DIR,
-                        "teams",
-                        "competitive",
-                        f"gen{gen}{tier}",
-                    )
-                )
+        """
+        Args:
+            data_dir: Directory containing index_scored.csv and team files
+            masker: TeamMasker instance for masking
+            gen_weights: Dict mapping gen -> weight. None = uniform across gens present.
+            percentile: Sample from top X% of teams by revealed_score (100 = all teams)
+            split: "train" or "val"
+            validation_ratio: Fraction for validation
+            seed: Random seed
+            verbose: Print debug info
+        """
         super().__init__(
-            data_dir=team_dirs,
+            data_dir=data_dir,
             masker=masker,
-            split="val",
-            validation_ratio=1.0,
-            use_cached_filenames=False,
+            gen_weights=gen_weights,
+            split=split,
+            validation_ratio=validation_ratio,
+            seed=seed,
             verbose=verbose,
         )
+
+        # Static percentile (can be overridden by curriculum)
+        self._static_percentile = percentile
+
+        # Shared value for curriculum (if used)
+        self._shared_percentile: Optional[mp.Value] = None
+
+    def enable_curriculum(self, initial_percentile: float = 10.0) -> None:
+        """Enable curriculum learning with a shared percentile that can be updated."""
+        self._shared_percentile = mp.Value("d", initial_percentile)
+
+    def set_curriculum_percentile(self, percentile: float) -> None:
+        """Update the curriculum percentile (call from main process)."""
+        if self._shared_percentile is not None:
+            self._shared_percentile.value = percentile
+
+    @property
+    def percentile(self) -> float:
+        """Get current percentile threshold."""
+        if self._shared_percentile is not None:
+            return self._shared_percentile.value
+        return self._static_percentile
+
+    def _get_sample_range(self, gen: int) -> int:
+        """
+        Override to restrict sampling to top percentile of files by score.
+
+        Returns the last valid index for sampling.
+        Returns -1 if no files available.
+        """
+        n_files = len(self.files_by_gen[gen])
+        if n_files == 0:
+            return -1
+
+        # percentile=10 means top 10%, so cutoff = n_files * 10 / 100
+        cutoff = int(n_files * self.percentile / 100.0)
+        # Ensure at least 1 file if percentile > 0
+        if self.percentile > 0:
+            cutoff = max(1, cutoff)
+        return cutoff - 1  # Convert count to max index

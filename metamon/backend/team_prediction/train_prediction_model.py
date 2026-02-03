@@ -14,7 +14,7 @@ import wandb
 
 from metamon.backend.team_prediction.dataset import (
     TeamPredictionDataset,
-    CompetitiveTeamPredictionDataset,
+    ScoredTeamPredictionDataset,
 )
 from metamon.backend.team_prediction.model import TeamTransformer
 from metamon.backend.team_prediction.vocabulary import Vocabulary
@@ -40,6 +40,7 @@ class EvalResults:
     examples: Optional[list] = None
     iter_stats: Optional[dict] = None
     mask_counts: Optional[list] = None
+    revealed_counts: Optional[list] = None
 
 
 def evaluate(
@@ -60,6 +61,7 @@ def evaluate(
         IterativeStatsAccumulator(num_iterations) if include_iterative else None
     )
     val_mask_counts = []
+    val_revealed_counts = []
 
     decoder = None
     if include_iterative:
@@ -91,6 +93,10 @@ def evaluate(
             pred_mask = pred_mask.to(device)
 
             val_mask_counts.extend(pred_mask.sum(dim=1).cpu().tolist())
+            # Count actually revealed tokens (not $missing_*$ in ground truth)
+            missing_set = torch.tensor(vocab.missing_mask, device=y_tokens.device)
+            is_revealed = ~torch.isin(y_tokens, missing_set)
+            val_revealed_counts.extend(is_revealed.sum(dim=1).cpu().tolist())
 
             # one-shot eval
             logits = model(x_tokens, type_ids)
@@ -160,6 +166,7 @@ def evaluate(
         examples=examples if num_examples > 0 else None,
         iter_stats=iter_stats,
         mask_counts=val_mask_counts,
+        revealed_counts=val_revealed_counts,
     )
 
 
@@ -168,6 +175,7 @@ def log_example_predictions(
     vocab: Vocabulary,
     step: int,
     include_iterative: bool = True,
+    table_name: str = "val_examples",
 ):
     """
     Log example predictions to wandb with colored HTML output.
@@ -255,7 +263,7 @@ def log_example_predictions(
                 wandb.Html(true_html),
             )
 
-    wandb.log({"val/example_predictions": table}, step=step)
+    wandb.log({table_name: table}, step=step)
 
 
 def train(config, use_wandb: bool = True):
@@ -265,67 +273,117 @@ def train(config, use_wandb: bool = True):
     vocab = Vocabulary()
 
     # maskers (create training examples)
-    strategy = config.masking_strategy
-    if strategy == "names_only":
-        train_masker = NamesOnlyMasker(
-            mask_all=False
-        )  # Random 1-6 for context learning
-        val_masker = NamesOnlyMasker(mask_all=True)  # All 6 for consistent eval
-        print("Using NamesOnlyMasker (train: random 1-6, val: all 6)")
-    elif strategy == "variable":
+    if config.toy_names_only:
+        # debug toy: only predict pokemon names
+        train_masker = NamesOnlyMasker(mask_all=False)  # random 1-6 for context
+        val_masker_standard = NamesOnlyMasker(mask_all=True)
+        val_masker_low = NamesOnlyMasker(mask_all=True)
+        print("Using NamesOnlyMasker (toy mode)")
+    elif config.curriculum_mask:
+        # curriculum: masking rate anneals from low to high
+        train_masker = CurriculumMasker(
+            warmup_steps=config.curriculum_mask_warmup_steps,
+            pokemon_prob=config.mask_pokemon_prob,
+            attrs_prob=config.mask_attrs_prob,
+        )
+        val_masker_standard = TeamMasker(
+            pokemon_prob_range=(config.mask_pokemon_prob, config.mask_pokemon_prob),
+            attrs_prob_range=(config.mask_attrs_prob, config.mask_attrs_prob),
+        )
+        val_masker_low = TeamMasker(
+            pokemon_prob_range=(0.0, 0.0),
+            attrs_prob_range=(
+                config.val_low_mask_attrs_prob,
+                config.val_low_mask_attrs_prob,
+            ),
+        )
+        print(
+            f"Using CurriculumMasker over {config.curriculum_mask_warmup_steps} steps"
+        )
+    else:
+        # variable: random masking rate each sample
         train_masker = TeamMasker(
             pokemon_prob_range=(0.0, config.mask_pokemon_prob),
             attrs_prob_range=(0.0, config.mask_attrs_prob),
         )
-        val_masker = TeamMasker(
+        val_masker_standard = TeamMasker(
             pokemon_prob_range=(config.mask_pokemon_prob, config.mask_pokemon_prob),
             attrs_prob_range=(config.mask_attrs_prob, config.mask_attrs_prob),
         )
-        print(f"Using TeamMasker: {train_masker}")
-
-    elif strategy == "curriculum":
-        train_masker = CurriculumMasker(
-            warmup_steps=config.curriculum_warmup_steps,
-            pokemon_prob=config.mask_pokemon_prob,
-            attrs_prob=config.mask_attrs_prob,
+        val_masker_low = TeamMasker(
+            pokemon_prob_range=(0.0, 0.0),
+            attrs_prob_range=(
+                config.val_low_mask_attrs_prob,
+                config.val_low_mask_attrs_prob,
+            ),
         )
-        val_masker = TeamMasker(
-            pokemon_prob_range=(config.mask_pokemon_prob, config.mask_pokemon_prob),
-            attrs_prob_range=(config.mask_attrs_prob, config.mask_attrs_prob),
-        )
-        print(f"Using CurriculumMasker over {config.curriculum_warmup_steps} steps")
-
-    else:
-        raise ValueError(
-            f"Unknown masking_strategy: {strategy}. Use 'names_only', 'variable', or 'curriculum'"
-        )
+        print(f"Using variable TeamMasker")
 
     # datasets
-    train_dset = TeamPredictionDataset(
-        data_dir=config.train_data_dir,
-        split="train",
-        validation_ratio=config.val_ratio,
-        seed=config.seed,
-        use_cached_filenames=True,
-        verbose=True,
-        masker=train_masker,
-    )
+    if config.gen_weights is not None:
+        print(
+            f"Training on specific generations: {sorted(config.gen_weights.keys())} (uniform sampling)"
+        )
+    if config.curriculum_dset:
+        # curriculum: start with low percentile (few samples), anneal up to 100%
+        train_dset = ScoredTeamPredictionDataset(
+            data_dir=config.train_data_dir,
+            masker=train_masker,
+            gen_weights=config.gen_weights,
+            percentile=config.curriculum_dset_start_pct,
+            split="train",
+            validation_ratio=config.val_ratio,
+            seed=config.seed,
+            verbose=True,
+        )
+        train_dset.enable_curriculum(config.curriculum_dset_start_pct)
+        print(
+            f"Curriculum dataset: top {config.curriculum_dset_start_pct}% -> {config.curriculum_dset_end_pct}% over {config.curriculum_dset_warmup_steps} steps"
+        )
+    else:
+        train_dset = TeamPredictionDataset(
+            data_dir=config.train_data_dir,
+            masker=train_masker,
+            gen_weights=config.gen_weights,
+            split="train",
+            validation_ratio=config.val_ratio,
+            seed=config.seed,
+            verbose=True,
+        )
 
+    # Val: all teams, standard masking
     val_dset = TeamPredictionDataset(
         data_dir=config.train_data_dir,
+        masker=val_masker_standard,
+        gen_weights=config.gen_weights,
         split="val",
         validation_ratio=config.val_ratio,
         seed=config.seed,
-        use_cached_filenames=True,
         verbose=True,
-        masker=val_masker,
     )
 
-    # dataset of complete (zero blank) teams.... but because they are really
-    # forum sample teams, predicting them is trivial, and this isn't an ideal eval.
-    comp_dset = CompetitiveTeamPredictionDataset(
+    # Val clean: top percentile teams, low masking (easy)
+    val_clean_dset = ScoredTeamPredictionDataset(
+        data_dir=config.train_data_dir,
+        masker=val_masker_low,
+        gen_weights=config.gen_weights,
+        percentile=config.val_clean_percentile,
+        split="val",
+        validation_ratio=config.val_ratio,
+        seed=config.seed,
         verbose=True,
-        masker=val_masker,
+    )
+
+    # Val clean hard: top percentile teams, standard masking (hard)
+    val_clean_hard_dset = ScoredTeamPredictionDataset(
+        data_dir=config.train_data_dir,
+        masker=val_masker_standard,
+        gen_weights=config.gen_weights,
+        percentile=config.val_clean_percentile,
+        split="val",
+        validation_ratio=config.val_ratio,
+        seed=config.seed,
+        verbose=True,
     )
 
     if config.debug_overfit:
@@ -335,8 +393,9 @@ def train(config, use_wandb: bool = True):
         indices = list(range(min(config.batch_size, len(train_dset))))
         train_dset = Subset(train_dset, indices)
         val_dset = Subset(train_dset, indices)
-        comp_indices = list(range(min(config.batch_size, len(comp_dset))))
-        comp_dset = Subset(comp_dset, comp_indices)
+        val_clean_indices = list(range(min(config.batch_size, len(val_clean_dset))))
+        val_clean_dset = Subset(val_clean_dset, val_clean_indices)
+        val_clean_hard_dset = Subset(val_clean_hard_dset, val_clean_indices)
 
     # dataloaders
     shuffle = not config.debug_overfit
@@ -357,8 +416,15 @@ def train(config, use_wandb: bool = True):
         num_workers=num_workers,
         persistent_workers=persistent,
     )
-    comp_loader = DataLoader(
-        comp_dset,
+    val_clean_loader = DataLoader(
+        val_clean_dset,
+        batch_size=config.batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=persistent,
+    )
+    val_clean_hard_loader = DataLoader(
+        val_clean_hard_dset,
         batch_size=config.batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
@@ -397,14 +463,50 @@ def train(config, use_wandb: bool = True):
     best_val_accuracy = 0.0
     patience_count = 0
     global_step = 0
+
+    if config.from_ckpt:
+        # start from ckpt
+        ckpt_path = os.path.join(ckpt_dir, "best_model.pt")
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"No checkpoint found at {ckpt_path}")
+        print(f"Loading checkpoint from {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        global_step = ckpt.get("step", 0)
+        best_val_accuracy = ckpt.get("val_accuracy", 0.0)
+        for _ in range(global_step):
+            scheduler.step()
+        print(
+            f"Resumed from step {global_step}, best_val_accuracy={best_val_accuracy:.4f}"
+        )
+        print("\nRunning initial evaluation on loaded checkpoint...")
+        val_results = evaluate(
+            model,
+            val_loader,
+            device,
+            vocab,
+            max_steps=config.max_eval_steps,
+            include_iterative=config.eval_with_iterative,
+            num_iterations=config.eval_num_iterations,
+            num_examples=0,
+        )
+        val_oneshot = val_results.oneshot_metrics
+        val_iter = val_results.iterative_metrics
+        print(
+            f"Checkpoint eval - one-shot acc: {val_oneshot['accuracy']:.4f}, loss: {val_oneshot['loss']:.4f}"
+        )
+        if val_iter:
+            print(f"Checkpoint eval - iterative acc: {val_iter['accuracy']:.4f}")
+
     running_loss = 0.0
     running_metrics = {}
     steps_since_eval = 0
     train_mask_counts = []
+    train_revealed_counts = []
     train_iter = iter(train_loader)
-    pbar = tqdm.tqdm(total=config.max_steps, desc="Training")
+    pbar = tqdm.tqdm(total=config.max_steps, initial=global_step, desc="Training")
 
-    print(f"\nStarting training on {device}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     while global_step < config.max_steps:
@@ -415,6 +517,14 @@ def train(config, use_wandb: bool = True):
             x_tokens, type_ids, y_tokens, pred_mask = next(train_iter)
 
         train_masker.set_step(global_step)
+
+        # update curriculum dataset percentile if enabled
+        if config.curriculum_dset:
+            progress = min(1.0, global_step / config.curriculum_dset_warmup_steps)
+            new_percentile = config.curriculum_dset_start_pct + progress * (
+                config.curriculum_dset_end_pct - config.curriculum_dset_start_pct
+            )
+            train_dset.set_curriculum_percentile(new_percentile)
 
         # training
         model.train()
@@ -434,6 +544,10 @@ def train(config, use_wandb: bool = True):
         scheduler.step()
 
         train_mask_counts.extend(pred_mask.sum(dim=1).cpu().tolist())
+        # Count actually revealed tokens (not $missing_*$ in ground truth)
+        missing_set = torch.tensor(vocab.missing_mask, device=y_tokens.device)
+        is_revealed = ~torch.isin(y_tokens, missing_set)
+        train_revealed_counts.extend(is_revealed.sum(dim=1).cpu().tolist())
         running_loss += loss.item()
         for k, v in metrics.items():
             running_metrics[k] = running_metrics.get(k, 0.0) + v
@@ -454,22 +568,26 @@ def train(config, use_wandb: bool = True):
             avg_loss = running_loss / steps_since_eval
             avg_metrics = {k: v / steps_since_eval for k, v in running_metrics.items()}
 
-            wandb.log(
-                {
-                    "global_step": global_step,
-                    "train/loss": avg_loss,
-                    "train/learning_rate": scheduler.get_last_lr()[0],
-                    **{f"train/{k}": v for k, v in avg_metrics.items()},
-                },
-                step=global_step,
-            )
+            log_dict = {
+                "global_step": global_step,
+                "train/loss": avg_loss,
+                "train/learning_rate": scheduler.get_last_lr()[0],
+                **{f"train/{k}": v for k, v in avg_metrics.items()},
+            }
+            if config.curriculum_dset:
+                log_dict["train/curriculum_percentile"] = train_dset.percentile
+            wandb.log(log_dict, step=global_step)
 
             if train_mask_counts:
                 wandb.log(
-                    {"train/num_blanks": wandb.Histogram(train_mask_counts)},
+                    {
+                        "train/num_blanks": wandb.Histogram(train_mask_counts),
+                        "train/num_revealed": wandb.Histogram(train_revealed_counts),
+                    },
                     step=global_step,
                 )
                 train_mask_counts = []
+                train_revealed_counts = []
 
             if global_step % config.eval_every_steps != 0:
                 running_loss = 0.0
@@ -500,21 +618,34 @@ def train(config, use_wandb: bool = True):
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
-            comp_results = evaluate(
+            val_clean_results = evaluate(
                 model,
-                comp_loader,
+                val_clean_loader,
                 device,
                 vocab,
                 max_steps=config.max_eval_steps,
                 include_iterative=config.eval_with_iterative,
                 num_iterations=config.eval_num_iterations,
-                num_examples=0,
+                num_examples=config.num_examples if use_wandb else 0,
+            )
+
+            val_clean_hard_results = evaluate(
+                model,
+                val_clean_hard_loader,
+                device,
+                vocab,
+                max_steps=config.max_eval_steps,
+                include_iterative=config.eval_with_iterative,
+                num_iterations=config.eval_num_iterations,
+                num_examples=config.num_examples if use_wandb else 0,
             )
 
             val_oneshot = val_results.oneshot_metrics
             val_iter = val_results.iterative_metrics
-            comp_oneshot = comp_results.oneshot_metrics
-            comp_iter = comp_results.iterative_metrics
+            val_clean_oneshot = val_clean_results.oneshot_metrics
+            val_clean_iter = val_clean_results.iterative_metrics
+            val_clean_hard_oneshot = val_clean_hard_results.oneshot_metrics
+            val_clean_hard_iter = val_clean_hard_results.iterative_metrics
 
             print(f"\nStep {global_step}:")
             print(
@@ -525,10 +656,21 @@ def train(config, use_wandb: bool = True):
                 val_acc_str += f" (iter: {val_iter['token_accuracy']:.3f})"
             print(f"  Val Loss:   {val_oneshot['loss']:.4f} | Acc: {val_acc_str}")
 
-            comp_acc_str = f"{comp_oneshot['token_accuracy']:.3f}"
-            if comp_iter:
-                comp_acc_str += f" (iter: {comp_iter['token_accuracy']:.3f})"
-            print(f"  Comp Loss:  {comp_oneshot['loss']:.4f} | Acc: {comp_acc_str}")
+            val_clean_acc_str = f"{val_clean_oneshot['token_accuracy']:.3f}"
+            if val_clean_iter:
+                val_clean_acc_str += f" (iter: {val_clean_iter['token_accuracy']:.3f})"
+            print(
+                f"  Val Clean (low mask):  {val_clean_oneshot['loss']:.4f} | Acc: {val_clean_acc_str}"
+            )
+
+            val_clean_hard_acc_str = f"{val_clean_hard_oneshot['token_accuracy']:.3f}"
+            if val_clean_hard_iter:
+                val_clean_hard_acc_str += (
+                    f" (iter: {val_clean_hard_iter['token_accuracy']:.3f})"
+                )
+            print(
+                f"  Val Clean (std mask):  {val_clean_hard_oneshot['loss']:.4f} | Acc: {val_clean_hard_acc_str}"
+            )
 
             print("\n  Per-Generation Validation Accuracy:")
             for gen in range(1, 10):
@@ -556,16 +698,33 @@ def train(config, use_wandb: bool = True):
                 log_dict = {
                     "global_step": global_step,
                     **{f"val/one_shot/{k}": v for k, v in val_oneshot.items()},
-                    **{f"comp/one_shot/{k}": v for k, v in comp_oneshot.items()},
+                    **{
+                        f"val_clean/one_shot/{k}": v
+                        for k, v in val_clean_oneshot.items()
+                    },
+                    **{
+                        f"val_clean_hard/one_shot/{k}": v
+                        for k, v in val_clean_hard_oneshot.items()
+                    },
                 }
 
                 if val_iter:
                     log_dict.update(
                         {f"val/iterative/{k}": v for k, v in val_iter.items()}
                     )
-                if comp_iter:
+                if val_clean_iter:
                     log_dict.update(
-                        {f"comp/iterative/{k}": v for k, v in comp_iter.items()}
+                        {
+                            f"val_clean/iterative/{k}": v
+                            for k, v in val_clean_iter.items()
+                        }
+                    )
+                if val_clean_hard_iter:
+                    log_dict.update(
+                        {
+                            f"val_clean_hard/iterative/{k}": v
+                            for k, v in val_clean_hard_iter.items()
+                        }
                     )
 
                 if val_results.iter_stats:
@@ -586,6 +745,23 @@ def train(config, use_wandb: bool = True):
                         vocab=vocab,
                         step=global_step,
                         include_iterative=config.eval_with_iterative,
+                        table_name="val_examples",
+                    )
+                if val_clean_results.examples:
+                    log_example_predictions(
+                        examples=val_clean_results.examples,
+                        vocab=vocab,
+                        step=global_step,
+                        include_iterative=config.eval_with_iterative,
+                        table_name="val_clean_examples",
+                    )
+                if val_clean_hard_results.examples:
+                    log_example_predictions(
+                        examples=val_clean_hard_results.examples,
+                        vocab=vocab,
+                        step=global_step,
+                        include_iterative=config.eval_with_iterative,
+                        table_name="val_clean_hard_examples",
                     )
 
                 if val_results.iter_stats:
@@ -595,12 +771,45 @@ def train(config, use_wandb: bool = True):
                             hist_dict[f"val/iterative/iter_{i}_confidences"] = (
                                 wandb.Histogram(conf.numpy(), num_bins=50)
                             )
+                    committed = val_results.iter_stats.get("committed_per_iter", [])
+                    if committed:
+                        for i, count in enumerate(committed):
+                            hist_dict[f"val/iterative/iter_{i}_committed"] = count
                     if hist_dict:
                         wandb.log(hist_dict, step=global_step)
 
                 if val_results.mask_counts:
                     wandb.log(
-                        {"val/num_blanks": wandb.Histogram(val_results.mask_counts)},
+                        {
+                            "val/num_blanks": wandb.Histogram(val_results.mask_counts),
+                            "val/num_revealed": wandb.Histogram(
+                                val_results.revealed_counts
+                            ),
+                        },
+                        step=global_step,
+                    )
+                if val_clean_results.mask_counts:
+                    wandb.log(
+                        {
+                            "val_clean/num_blanks": wandb.Histogram(
+                                val_clean_results.mask_counts
+                            ),
+                            "val_clean/num_revealed": wandb.Histogram(
+                                val_clean_results.revealed_counts
+                            ),
+                        },
+                        step=global_step,
+                    )
+                if val_clean_hard_results.mask_counts:
+                    wandb.log(
+                        {
+                            "val_clean_hard/num_blanks": wandb.Histogram(
+                                val_clean_hard_results.mask_counts
+                            ),
+                            "val_clean_hard/num_revealed": wandb.Histogram(
+                                val_clean_hard_results.revealed_counts
+                            ),
+                        },
                         step=global_step,
                     )
 
@@ -677,42 +886,73 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     parser.add_argument("--debug-overfit", action="store_true")
     parser.add_argument("--toy-names-only", action="store_true")
+    parser.add_argument("--curriculum-mask", action="store_true")
+    parser.add_argument("--curriculum-dset", action="store_true")
+    parser.add_argument(
+        "--gens",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Limit training to specific generations (e.g., --gens 1 9). "
+        "Samples uniformly across specified generations.",
+    )
+    parser.add_argument(
+        "--from-ckpt",
+        action="store_true",
+        help="Resume training from latest checkpoint (uses --checkpoint-dir and --name)",
+    )
 
     args = parser.parse_args()
+
+    # Build gen_weights from --gens argument
+    if args.gens is not None:
+        gen_weights = {g: 1.0 for g in args.gens}  # uniform across specified gens
+    else:
+        gen_weights = None  # natural distribution
 
     sweep_defaults = {
         # dataset
         "train_data_dir": download_revealed_teams(),
         "val_ratio": 0.1,
-        "batch_size": 48,
+        "batch_size": 64,
         "num_workers": 4,
         "seed": 42,
+        "gen_weights": gen_weights,
         # architecture
         "max_seq_len": 64,
-        "d_model": 256,
+        "d_model": 400,
         "nhead": 8,
-        "num_layers": 4,
-        "dim_ff": 1024,
+        "num_layers": 8,
+        "dim_ff": 1600,
         "dropout": 0.05,
         # training
         "learning_rate": 1e-4,
         "weight_decay": 1e-4,
         "max_grad_norm": 1.0,
         "warmup_steps": 5000,
-        "max_steps": 200000,
+        "max_steps": 5_000_000,
         "log_train_every_steps": 100,
-        "eval_every_steps": 5000,
+        "eval_every_steps": 10_000,
         "max_eval_steps": 50,
-        "patience": 100,
-        # masking + curriculum params
-        "masking_strategy": "variable",
+        "patience": 500,
+        "num_examples": 4,  # for wandb viz
+        "from_ckpt": args.from_ckpt,
+        # masking params
         "mask_pokemon_prob": 0.15,
         "mask_attrs_prob": 0.4,
-        "curriculum_warmup_steps": 20000,
+        "val_low_mask_attrs_prob": 0.1,
+        "toy_names_only": False,
+        "curriculum_mask": args.curriculum_mask,
+        "curriculum_mask_warmup_steps": 100_000,
         "eval_with_iterative": True,
         "eval_num_iterations": 8,
         "debug_overfit": False,
-        "num_examples": 4,  # for wandb viz
+        "val_clean_percentile": 15.0,
+        # curriculum dataset
+        "curriculum_dset": args.curriculum_dset,
+        "curriculum_dset_start_pct": 10.0,
+        "curriculum_dset_end_pct": 100.0,
+        "curriculum_dset_warmup_steps": 100_000,
     }
 
     if args.debug_overfit:
@@ -725,7 +965,7 @@ if __name__ == "__main__":
             }
         )
     if args.toy_names_only:
-        sweep_defaults["masking_strategy"] = "names_only"
+        sweep_defaults["toy_names_only"] = True
 
     use_wandb = not args.no_wandb
 
@@ -743,7 +983,8 @@ if __name__ == "__main__":
         wandb.define_metric("global_step")
         wandb.define_metric("train/*", step_metric="global_step")
         wandb.define_metric("val/*", step_metric="global_step")
-        wandb.define_metric("comp/*", step_metric="global_step")
+        wandb.define_metric("val_clean/*", step_metric="global_step")
+        wandb.define_metric("val_clean_hard/*", step_metric="global_step")
     else:
         from argparse import Namespace
 

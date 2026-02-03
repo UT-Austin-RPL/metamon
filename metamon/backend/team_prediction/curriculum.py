@@ -34,10 +34,7 @@ class TeamMasker:
 
         mask_prob = random.uniform(*self.attrs_prob_range)
         num_to_mask = int(mask_prob * len(maskable))
-        num_to_mask = max(0, min(num_to_mask, len(maskable) - 1))
-
-        if num_to_mask == 0:
-            return PokemonSet.from_dict(data)
+        num_to_mask = max(1, min(num_to_mask, len(maskable) - 1))
 
         for key, subkey in random.sample(maskable, num_to_mask):
             if key == "name":
@@ -123,19 +120,23 @@ class NamesOnlyMasker(TeamMasker):
 
 
 class CurriculumMasker(TeamMasker):
-    """TeamMasker with curriculum: ranges grow from 0 to target over warmup steps."""
+    """TeamMasker with curriculum: ranges grow from min to target over warmup steps."""
 
     def __init__(
         self,
         warmup_steps: int = 20_000,
         pokemon_prob: float = 0.15,
         attrs_prob: float = 0.5,
+        min_pokemon_prob: float = 0.0,
+        min_attrs_prob: float = 0.1,
         include_stats: bool = False,
     ):
-        super().__init__(include_stats=include_stats)
+        self.include_stats = include_stats
         self.warmup_steps = warmup_steps
         self._pokemon_prob = pokemon_prob
         self._attrs_prob = attrs_prob
+        self._min_pokemon_prob = min_pokemon_prob
+        self._min_attrs_prob = min_attrs_prob
         self._shared_step = mp.Value(ctypes.c_int, 0)
 
     def set_step(self, step: int) -> None:
@@ -151,13 +152,19 @@ class CurriculumMasker(TeamMasker):
 
     @property
     def pokemon_prob_range(self) -> Tuple[float, float]:
-        # Range grows from [0,0] to [0, pokemon_prob]
-        return (0.0, self.progress * self._pokemon_prob)
+        # Range grows from [0, min] to [0, max]
+        current = self._min_pokemon_prob + self.progress * (
+            self._pokemon_prob - self._min_pokemon_prob
+        )
+        return (0.0, current)
 
     @property
     def attrs_prob_range(self) -> Tuple[float, float]:
-        # Range grows from [0,0] to [0, attrs_prob]
-        return (0.0, self.progress * self._attrs_prob)
+        # Range grows from [0, min] to [0, max]
+        current = self._min_attrs_prob + self.progress * (
+            self._attrs_prob - self._min_attrs_prob
+        )
+        return (0.0, current)
 
     def __repr__(self) -> str:
         return (

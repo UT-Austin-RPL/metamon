@@ -9,6 +9,9 @@ import math
 class IterativeDecodingStats:
     mask_ratios: List[float] = field(default_factory=list)
     remaining_counts: List[int] = field(default_factory=list)
+    committed_counts: List[int] = field(
+        default_factory=list
+    )  # tokens committed per iteration
     confidences_per_iter: List[torch.Tensor] = field(default_factory=list)
     num_iterations_used: int = 0
     total_masked: int = 0
@@ -18,11 +21,13 @@ class IterativeDecodingStats:
         iteration: int,
         mask_ratio: float,
         remaining: int,
+        committed: int,
         confidences: torch.Tensor,
         current_mask: torch.Tensor,
     ):
         self.mask_ratios.append(mask_ratio)
         self.remaining_counts.append(remaining)
+        self.committed_counts.append(committed)
         if current_mask.any():
             self.confidences_per_iter.append(confidences[current_mask].cpu())
         else:
@@ -36,6 +41,7 @@ class IterativeStatsAccumulator:
         self.total_masked = 0
         self.mask_ratios: Optional[List[float]] = None
         self.remaining_counts: List[List[int]] = [[] for _ in range(num_iterations)]
+        self.committed_counts: List[List[int]] = [[] for _ in range(num_iterations)]
         self.confidences: List[List[torch.Tensor]] = [[] for _ in range(num_iterations)]
 
     def add_batch(self, stats: IterativeDecodingStats):
@@ -43,10 +49,15 @@ class IterativeStatsAccumulator:
         if self.mask_ratios is None:
             # same for all batches
             self.mask_ratios = stats.mask_ratios
-        for i, (remaining, conf) in enumerate(
-            zip(stats.remaining_counts, stats.confidences_per_iter)
+        for i, (remaining, committed, conf) in enumerate(
+            zip(
+                stats.remaining_counts,
+                stats.committed_counts,
+                stats.confidences_per_iter,
+            )
         ):
             self.remaining_counts[i].append(remaining)
+            self.committed_counts[i].append(committed)
             if len(conf) > 0:
                 self.confidences[i].append(conf)
 
@@ -55,15 +66,18 @@ class IterativeStatsAccumulator:
         Returns:
             - mask_ratios: list[float] target mask ratio per iteration
             - remaining_frac: list[float] actual fraction remaining per iteration
+            - committed_per_iter: list[int] total committed tokens per iteration
             - confidences: list[Tensor] concatenated confidences per iteration
         """
         remaining_frac = []
+        committed_per_iter = []
         if self.total_masked > 0:
             for i in range(self.num_iterations):
                 if self.remaining_counts[i]:
                     remaining_frac.append(
                         sum(self.remaining_counts[i]) / self.total_masked
                     )
+                    committed_per_iter.append(sum(self.committed_counts[i]))
                 else:
                     break
 
@@ -77,6 +91,7 @@ class IterativeStatsAccumulator:
         return {
             "mask_ratios": self.mask_ratios or [],
             "remaining_frac": remaining_frac,
+            "committed_per_iter": committed_per_iter,
             "confidences": confidences,
         }
 
@@ -196,17 +211,11 @@ class IterativeTeamDecoder:
                 current_mask, confidences, torch.tensor(float("inf"), device=device)
             )
 
+            is_last_iter = t == self.num_iterations - 1
             progress = (t + 1) / self.num_iterations
-            target_mask_ratio = self._gamma(progress)
+            target_mask_ratio = 0.0 if is_last_iter else self._gamma(progress)
 
-            stats.add_iteration(
-                iteration=t,
-                mask_ratio=target_mask_ratio,
-                remaining=current_mask.sum().item(),
-                confidences=confidences,
-                current_mask=current_mask,
-            )
-
+            total_committed_this_iter = 0
             for b in range(batch_size):
                 # TODO: vectorize this
                 if n_masked[b] == 0:
@@ -230,5 +239,15 @@ class IterativeTeamDecoder:
                 # commit selected tokens
                 current_tokens[b, commit_positions] = predictions[b, commit_positions]
                 current_mask[b, commit_positions] = False
+                total_committed_this_iter += len(commit_positions)
+
+            stats.add_iteration(
+                iteration=t,
+                mask_ratio=target_mask_ratio,
+                remaining=current_mask.sum().item(),
+                committed=total_committed_this_iter,
+                confidences=confidences,
+                current_mask=current_mask,
+            )
 
         return current_tokens, stats

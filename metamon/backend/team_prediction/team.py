@@ -180,6 +180,76 @@ class PokemonSet:
         """Counts the number of moves revealed in this PokemonSet."""
         return len(set(self.moves) - {self.MISSING_MOVE})
 
+    @classmethod
+    def max_relevant_attrs(cls, gen: int, include_stats: bool = False) -> int:
+        """
+        Get the maximum number of relevant attributes per Pokemon for a generation.
+        """
+        count = 0
+        if gen <= 4:
+            # name is only relevant in Gen 1-4 (no team preview)
+            count += 1
+        count += 4  # 4 moves always
+        if gen >= 2:
+            count += 1  # item
+        if gen >= 3:
+            count += 1  # ability
+        if gen == 9:
+            count += 1  # tera_type
+        if include_stats:
+            count += 1  # nature
+            count += 6  # evs
+            count += 6  # ivs
+        return count
+
+    def revealed_relevant_attrs(self, include_stats: bool = False) -> int:
+        """
+        Count the number of revealed attributes that are "relevant" for this Pokemon.
+        """
+        count = 0
+        # name is only relevant in Gen 1-4 (no team preview)
+        if self.gen <= 4 and self.name != self.MISSING_NAME:
+            count += 1
+        # ability (gen 3+)
+        if self.gen >= 3 and self.ability != self.MISSING_ABILITY:
+            count += 1
+        # item (gen 2+)
+        if self.gen >= 2 and self.item != self.MISSING_ITEM:
+            count += 1
+        # tera_type (gen 9 only)
+        if self.gen == 9 and self.tera_type != self.MISSING_TERA_TYPE:
+            count += 1
+        # moves (always, up to 4)
+        for move in self.moves:
+            if move != self.MISSING_MOVE and move != self.NO_MOVE:
+                count += 1
+        if include_stats:
+            if self.nature != self.MISSING_NATURE:
+                count += 1
+            for ev in self.evs:
+                if ev != self.MISSING_EV:
+                    count += 1
+            for iv in self.ivs:
+                if iv != self.MISSING_IV:
+                    count += 1
+        return count
+
+    def revealed_score(self, include_stats: bool = False) -> float:
+        """
+        Compute the revealed score for this Pokemon.
+
+        Score = revealed_relevant_attrs / max_relevant_attrs
+        """
+        max_attrs = PokemonSet.max_relevant_attrs(self.gen, include_stats)
+        if max_attrs == 0:
+            return 0.0
+        return self.revealed_relevant_attrs(include_stats) / max_attrs
+
+    @property
+    def is_present(self) -> bool:
+        """Check if this Pokemon is actually present (not a placeholder for unknown mon)."""
+        return self.name != self.MISSING_NAME
+
     def get_maskable_attrs(self, include_stats: bool = False) -> list:
         """
         Get list of (key, subkey) tuples for revealed attributes that can be masked.
@@ -717,6 +787,27 @@ class TeamSet:
     @property
     def known_pokemon(self) -> List[PokemonSet]:
         return [p for p in self.pokemon if p.name != PokemonSet.MISSING_NAME]
+
+    def revealed_score(self, include_stats: bool = False) -> float:
+        """
+        Compute the revealed score for the entire team.
+
+        Score = (total revealed relevant attrs) / (total possible relevant attrs)
+        """
+        gen = self.gen
+        all_pokemon = [self.lead] + list(self.reserve)
+
+        total_revealed = 0
+        total_possible = 0
+
+        for pokemon in all_pokemon:
+            total_possible += PokemonSet.max_relevant_attrs(gen, include_stats)
+            total_revealed += pokemon.revealed_relevant_attrs(include_stats)
+
+        if total_possible == 0:
+            return 0.0
+
+        return total_revealed / total_possible
 
     def __eq__(self, other):
         """
