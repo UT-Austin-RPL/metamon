@@ -37,9 +37,10 @@ from metamon.backend.team_prediction.iterative_decoder import (
 
 @dataclass
 class EvalResults:
-    oneshot_metrics: dict
-    iterative_metrics: Optional[dict] = None
-    semantic_metrics: Optional[dict] = None
+    oneshot_metrics: dict  # Position-based metrics for one-shot
+    oneshot_semantic_metrics: dict  # Semantic (set-based) metrics for one-shot
+    iterative_metrics: Optional[dict] = None  # Position-based metrics for iterative
+    iterative_semantic_metrics: Optional[dict] = None  # Semantic metrics for iterative
     examples: Optional[list] = None
     iter_stats: Optional[dict] = None
     mask_counts: Optional[list] = None
@@ -58,13 +59,16 @@ def evaluate(
 ) -> EvalResults:
     model.eval()
 
+    t2s = Team2Seq()
     oneshot_accumulator = EvaluationAccumulator(vocab)
+    oneshot_semantic_accumulator = SemanticMetricsAccumulator(vocab)
     iterative_accumulator = EvaluationAccumulator(vocab) if include_iterative else None
+    iterative_semantic_accumulator = (
+        SemanticMetricsAccumulator(vocab) if include_iterative else None
+    )
     iter_stats_accumulator = (
         IterativeStatsAccumulator(num_iterations) if include_iterative else None
     )
-    semantic_accumulator = SemanticMetricsAccumulator() if include_iterative else None
-    t2s = Team2Seq() if include_iterative else None
     val_mask_counts = []
     val_revealed_counts = []
 
@@ -121,6 +125,11 @@ def evaluate(
             oneshot_preds = x_tokens.clone()
             oneshot_preds[pred_mask] = filt.argmax(dim=-1)[pred_mask]
 
+            # One-shot semantic metrics (set-based comparison)
+            oneshot_semantic_accumulator.add_batch(
+                oneshot_preds.cpu(), y_tokens.cpu(), x_tokens.cpu(), t2s
+            )
+
             # iterative eval
             iterative_preds = None
             iter_stats_for_examples = None
@@ -145,8 +154,8 @@ def evaluate(
                 iterative_accumulator.add_batch(
                     iter_logits, y_tokens, pred_mask, type_ids, x_tokens
                 )
-                # Semantic metrics (set-based comparison)
-                semantic_accumulator.add_batch(
+                # Iterative semantic metrics (set-based comparison)
+                iterative_semantic_accumulator.add_batch(
                     iterative_preds.cpu(), y_tokens.cpu(), x_tokens.cpu(), t2s
                 )
 
@@ -176,11 +185,14 @@ def evaluate(
 
     # summarize metrics
     oneshot_metrics = oneshot_accumulator.compute_metrics()
+    oneshot_semantic_metrics = oneshot_semantic_accumulator.compute_metrics()
     iterative_metrics = (
         iterative_accumulator.compute_metrics() if iterative_accumulator else None
     )
-    semantic_metrics = (
-        semantic_accumulator.compute_metrics() if semantic_accumulator else None
+    iterative_semantic_metrics = (
+        iterative_semantic_accumulator.compute_metrics()
+        if iterative_semantic_accumulator
+        else None
     )
     iter_stats = (
         iter_stats_accumulator.compute_results() if iter_stats_accumulator else None
@@ -188,8 +200,9 @@ def evaluate(
 
     return EvalResults(
         oneshot_metrics=oneshot_metrics,
+        oneshot_semantic_metrics=oneshot_semantic_metrics,
         iterative_metrics=iterative_metrics,
-        semantic_metrics=semantic_metrics,
+        iterative_semantic_metrics=iterative_semantic_metrics,
         examples=examples if num_examples > 0 else None,
         iter_stats=iter_stats,
         mask_counts=val_mask_counts,
@@ -206,10 +219,6 @@ def log_example_predictions(
 ):
     """
     Log example predictions to wandb with colored HTML output.
-
-    Green: masked input tokens
-    Blue: correct predictions
-    Red: incorrect predictions
     """
     if not examples:
         return
@@ -301,13 +310,6 @@ def log_iterative_decoding_process(
 ):
     """
     Log the iterative decoding process to wandb, showing tokens at each iteration.
-
-    Each row is an example, each column is an iteration (iter_0, iter_1, ..., final).
-    Tokens are colored:
-    - Green: still masked (will be predicted)
-    - Blue: correctly predicted (matches ground truth)
-    - Red: incorrectly predicted
-    - Black: original (never masked)
     """
     if not examples:
         return
@@ -635,6 +637,8 @@ def train(config, use_wandb: bool = True):
     train_revealed_counts = []
     train_iter = iter(train_loader)
     pbar = tqdm.tqdm(total=config.max_steps, initial=global_step, desc="Training")
+    t2s = Team2Seq()
+    train_semantic_accumulator = SemanticMetricsAccumulator(vocab)
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -673,13 +677,24 @@ def train(config, use_wandb: bool = True):
         scheduler.step()
 
         train_mask_counts.extend(pred_mask.sum(dim=1).cpu().tolist())
-        # Count actually revealed tokens (not $missing_*$ in ground truth)
         missing_set = torch.tensor(vocab.missing_mask, device=y_tokens.device)
         is_revealed = ~torch.isin(y_tokens, missing_set)
         train_revealed_counts.extend(is_revealed.sum(dim=1).cpu().tolist())
         running_loss += loss.item()
         for k, v in metrics.items():
             running_metrics[k] = running_metrics.get(k, 0.0) + v
+
+        # accumulate semantic metrics every N steps (decoding is expensive)
+        semantic_accumulate_every = max(1, config.semantic_train_every_steps // 10)
+        if global_step % semantic_accumulate_every == 0:
+            with torch.no_grad():
+                probs = torch.softmax(logits, dim=-1)
+                filt = vocab.filter_probs(probs, type_ids)
+                train_preds = x_tokens.clone()
+                train_preds[pred_mask] = filt.argmax(dim=-1)[pred_mask]
+                train_semantic_accumulator.add_batch(
+                    train_preds.cpu(), y_tokens.cpu(), x_tokens.cpu(), t2s
+                )
 
         global_step += 1
         steps_since_eval += 1
@@ -722,6 +737,14 @@ def train(config, use_wandb: bool = True):
                 running_loss = 0.0
                 running_metrics = {}
                 steps_since_eval = 0
+
+        if use_wandb and global_step % config.semantic_train_every_steps == 0:
+            train_semantic_metrics = train_semantic_accumulator.compute_metrics()
+            wandb.log(
+                {f"train/semantic/{k}": v for k, v in train_semantic_metrics.items()},
+                step=global_step,
+            )
+            train_semantic_accumulator = SemanticMetricsAccumulator(vocab)
 
         # evaluation
         if global_step % config.eval_every_steps == 0:
@@ -769,12 +792,20 @@ def train(config, use_wandb: bool = True):
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
+            # Position-based metrics
             val_oneshot = val_results.oneshot_metrics
             val_iter = val_results.iterative_metrics
             val_clean_oneshot = val_clean_results.oneshot_metrics
             val_clean_iter = val_clean_results.iterative_metrics
             val_clean_hard_oneshot = val_clean_hard_results.oneshot_metrics
             val_clean_hard_iter = val_clean_hard_results.iterative_metrics
+            # Semantic metrics (set-based)
+            val_oneshot_sem = val_results.oneshot_semantic_metrics
+            val_iter_sem = val_results.iterative_semantic_metrics
+            val_clean_oneshot_sem = val_clean_results.oneshot_semantic_metrics
+            val_clean_iter_sem = val_clean_results.iterative_semantic_metrics
+            val_clean_hard_oneshot_sem = val_clean_hard_results.oneshot_semantic_metrics
+            val_clean_hard_iter_sem = val_clean_hard_results.iterative_semantic_metrics
 
             print(f"\nStep {global_step}:")
             print(
@@ -814,7 +845,7 @@ def train(config, use_wandb: bool = True):
                         f"    Gen{gen}: {val_oneshot[gen_key]:.3f}{iter_str} (n={int(count)})"
                     )
 
-            print("\n  Per-Attribute Validation Accuracy:")
+            print("\n  Per-Attribute Validation Accuracy (position-based):")
             for k, v in sorted(val_oneshot.items()):
                 if (
                     k.endswith("_accuracy")
@@ -824,68 +855,97 @@ def train(config, use_wandb: bool = True):
                     print(f"    {k}: {v:.3f}")
 
             # Print semantic metrics (set-based comparison)
-            val_semantic = val_results.semantic_metrics
-            if val_semantic:
-                print("\n  Semantic Metrics (set-based, iterative):")
-                for k, v in sorted(val_semantic.items()):
-                    if k.endswith("_accuracy"):
-                        total_key = k.replace("_accuracy", "_total")
-                        total = val_semantic.get(total_key, 0)
-                        print(f"    {k}: {v:.3f} (n={int(total)})")
+            print("\n  Semantic Metrics (set-based):")
+            for attr in ["pokemon", "move", "ability", "item", "tera"]:
+                key = f"{attr}_accuracy"
+                if key in val_oneshot_sem:
+                    oneshot_val = val_oneshot_sem[key]
+                    total = val_oneshot_sem.get(f"{attr}_total", 0)
+                    iter_str = ""
+                    if val_iter_sem and key in val_iter_sem:
+                        iter_str = f" (iter: {val_iter_sem[key]:.3f})"
+                    print(f"    {attr}: {oneshot_val:.3f}{iter_str} (n={int(total)})")
 
             if use_wandb:
-                log_dict = {
-                    "global_step": global_step,
-                    **{f"val/one_shot/{k}": v for k, v in val_oneshot.items()},
-                    **{
-                        f"val_clean/one_shot/{k}": v
-                        for k, v in val_clean_oneshot.items()
-                    },
-                    **{
-                        f"val_clean_hard/one_shot/{k}": v
-                        for k, v in val_clean_hard_oneshot.items()
-                    },
-                }
+                log_dict = {"global_step": global_step}
 
+                # Position-based metrics: {dset}/one_shot/position/
+                log_dict.update(
+                    {f"val/one_shot/position/{k}": v for k, v in val_oneshot.items()}
+                )
+                log_dict.update(
+                    {
+                        f"val_clean/one_shot/position/{k}": v
+                        for k, v in val_clean_oneshot.items()
+                    }
+                )
+                log_dict.update(
+                    {
+                        f"val_clean_hard/one_shot/position/{k}": v
+                        for k, v in val_clean_hard_oneshot.items()
+                    }
+                )
+
+                # Semantic metrics for one-shot: {dset}/one_shot/semantic/
+                log_dict.update(
+                    {
+                        f"val/one_shot/semantic/{k}": v
+                        for k, v in val_oneshot_sem.items()
+                    }
+                )
+                log_dict.update(
+                    {
+                        f"val_clean/one_shot/semantic/{k}": v
+                        for k, v in val_clean_oneshot_sem.items()
+                    }
+                )
+                log_dict.update(
+                    {
+                        f"val_clean_hard/one_shot/semantic/{k}": v
+                        for k, v in val_clean_hard_oneshot_sem.items()
+                    }
+                )
+
+                # Position-based metrics for iterative: {dset}/iterative/position/
                 if val_iter:
                     log_dict.update(
-                        {f"val/iterative/{k}": v for k, v in val_iter.items()}
+                        {f"val/iterative/position/{k}": v for k, v in val_iter.items()}
                     )
                 if val_clean_iter:
                     log_dict.update(
                         {
-                            f"val_clean/iterative/{k}": v
+                            f"val_clean/iterative/position/{k}": v
                             for k, v in val_clean_iter.items()
                         }
                     )
                 if val_clean_hard_iter:
                     log_dict.update(
                         {
-                            f"val_clean_hard/iterative/{k}": v
+                            f"val_clean_hard/iterative/position/{k}": v
                             for k, v in val_clean_hard_iter.items()
                         }
                     )
 
-                # Semantic metrics (set-based comparison)
-                if val_results.semantic_metrics:
+                # Semantic metrics for iterative: {dset}/iterative/semantic/
+                if val_iter_sem:
                     log_dict.update(
                         {
-                            f"val/semantic/{k}": v
-                            for k, v in val_results.semantic_metrics.items()
+                            f"val/iterative/semantic/{k}": v
+                            for k, v in val_iter_sem.items()
                         }
                     )
-                if val_clean_results.semantic_metrics:
+                if val_clean_iter_sem:
                     log_dict.update(
                         {
-                            f"val_clean/semantic/{k}": v
-                            for k, v in val_clean_results.semantic_metrics.items()
+                            f"val_clean/iterative/semantic/{k}": v
+                            for k, v in val_clean_iter_sem.items()
                         }
                     )
-                if val_clean_hard_results.semantic_metrics:
+                if val_clean_hard_iter_sem:
                     log_dict.update(
                         {
-                            f"val_clean_hard/semantic/{k}": v
-                            for k, v in val_clean_hard_results.semantic_metrics.items()
+                            f"val_clean_hard/iterative/semantic/{k}": v
+                            for k, v in val_clean_hard_iter_sem.items()
                         }
                     )
 
@@ -951,7 +1011,6 @@ def train(config, use_wandb: bool = True):
                     hist_dict = {}
                     for i, conf in enumerate(val_results.iter_stats["confidences"]):
                         if len(conf) > 0:
-                            # Filter out inf values (used as sentinel for non-masked positions)
                             finite_conf = conf[torch.isfinite(conf)]
                             if len(finite_conf) > 0:
                                 hist_dict[f"val/iterative/iter_{i}_confidences"] = (
@@ -1001,15 +1060,15 @@ def train(config, use_wandb: bool = True):
 
             # checkpointing
             if not config.debug_overfit:
-                # Use weighted accuracy as primary metric (prefer iterative if available)
-                if val_iter:
-                    val_score = val_iter.get(
-                        "weighted_accuracy", val_iter["token_accuracy"]
-                    )
+                # Use val_clean_hard semantic move accuracy as early stopping metric
+                # (prefer iterative if available, fallback to one-shot)
+                if (
+                    val_clean_hard_iter_sem
+                    and "move_accuracy" in val_clean_hard_iter_sem
+                ):
+                    val_score = val_clean_hard_iter_sem["move_accuracy"]
                 else:
-                    val_score = val_oneshot.get(
-                        "weighted_accuracy", val_oneshot["token_accuracy"]
-                    )
+                    val_score = val_clean_hard_oneshot_sem.get("move_accuracy", 0.0)
 
                 if val_score > best_val_accuracy:
                     # early stopping
@@ -1022,22 +1081,13 @@ def train(config, use_wandb: bool = True):
                             "step": global_step,
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
-                            "val_accuracy": val_score,
+                            "val_semantic_move_accuracy": val_score,
                             "val_loss": val_oneshot["loss"],
                         },
                         best_model_path,
                     )
 
-                    print(f"\nNew best model! Accuracy: {val_score:.3f}")
-
-                    if use_wandb:
-                        artifact = wandb.Artifact(
-                            f"{config.run_name}-best-model",
-                            type="model",
-                            metadata={"val_accuracy": val_score},
-                        )
-                        artifact.add_file(best_model_path)
-                        wandb.log_artifact(artifact)
+                    print(f"\nNew best model! Semantic Move Acc: {val_score:.3f}")
                 else:
                     patience_count += 1
                     if patience_count >= config.patience:
@@ -1090,7 +1140,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Build gen_weights from --gens argument
     if args.gens is not None:
         gen_weights = {g: 1.0 for g in args.gens}  # uniform across specified gens
     else:
@@ -1118,6 +1167,7 @@ if __name__ == "__main__":
         "warmup_steps": 5000,
         "max_steps": 5_000_000,
         "log_train_every_steps": 100,
+        "semantic_train_every_steps": 5_000,
         "eval_every_steps": 5_000,
         "max_eval_steps": 10,
         "patience": 500,
@@ -1147,6 +1197,7 @@ if __name__ == "__main__":
             {
                 "debug_overfit": True,
                 "log_train_every_steps": 1,
+                "semantic_train_every_steps": 10,
                 "eval_every_steps": 10,
                 "max_steps": 1000,
             }
