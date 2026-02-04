@@ -963,6 +963,20 @@ class Team2Seq:
     - Moves: visible first (alphabetically), then $missing_move$, then <nomove>
     """
 
+    NUM_POKEMON = 6
+    ATTRS_PER_POKEMON_BASE = 8  # name, ability, item, tera, 4 moves
+    ATTRS_PER_POKEMON_WITH_STATS = 21  # + nature + 6 evs + 6 ivs
+
+    @staticmethod
+    def seq_len(include_stats: bool = False) -> int:
+        """Compute total sequence length for a team."""
+        attrs = (
+            Team2Seq.ATTRS_PER_POKEMON_WITH_STATS
+            if include_stats
+            else Team2Seq.ATTRS_PER_POKEMON_BASE
+        )
+        return 1 + Team2Seq.NUM_POKEMON * attrs  # format token + pokemon
+
     def __init__(self, include_stats: bool = False):
         self.include_stats = include_stats
         # Attributes per Pokemon in sequence

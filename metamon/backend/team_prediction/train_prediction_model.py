@@ -8,7 +8,6 @@ from dataclasses import dataclass
 import tqdm
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.utils.data import DataLoader
 import wandb
 
@@ -16,7 +15,10 @@ from metamon.backend.team_prediction.dataset import (
     TeamPredictionDataset,
     ScoredTeamPredictionDataset,
 )
-from metamon.backend.team_prediction.model import TeamTransformer
+from metamon.backend.team_prediction.prediction_model import (
+    TeamPredictionModel,
+    create_model,
+)
 from metamon.backend.team_prediction.vocabulary import Vocabulary
 from metamon.backend.team_prediction.masking import (
     TeamMasker,
@@ -29,10 +31,7 @@ from metamon.backend.team_prediction.prediction_metrics import (
     SemanticMetricsAccumulator,
 )
 from metamon.backend.team_prediction.team import Team2Seq
-from metamon.backend.team_prediction.iterative_decoder import (
-    IterativeTeamDecoder,
-    IterativeStatsAccumulator,
-)
+from metamon.backend.team_prediction.iterative_decoder import IterativeStatsAccumulator
 
 
 @dataclass
@@ -48,16 +47,16 @@ class EvalResults:
 
 
 def evaluate(
-    model: nn.Module,
+    prediction_model: TeamPredictionModel,
     dataloader: DataLoader,
-    device: torch.device,
-    vocab: Vocabulary,
     max_steps: Optional[int] = None,
     include_iterative: bool = True,
-    num_iterations: int = 8,
     num_examples: int = 0,
 ) -> EvalResults:
-    model.eval()
+    prediction_model.eval()
+    vocab = prediction_model.vocab
+    device = prediction_model.device
+    num_iterations = prediction_model.iterative_decoder.num_iterations
 
     t2s = Team2Seq()
     oneshot_accumulator = EvaluationAccumulator(vocab)
@@ -71,15 +70,6 @@ def evaluate(
     )
     val_mask_counts = []
     val_revealed_counts = []
-
-    decoder = None
-    if include_iterative:
-        # deterministic for fair comparison with one-shot eval
-        # eventually we should let the one-shot eval use the same samling strategy
-        # as each iterative eval step.
-        decoder = IterativeTeamDecoder(
-            model, num_iterations=num_iterations, deterministic=True
-        )
 
     # Collect batches
     batches = []
@@ -108,7 +98,7 @@ def evaluate(
             val_revealed_counts.extend(is_revealed.sum(dim=1).cpu().tolist())
 
             # one-shot eval
-            logits = model(x_tokens, type_ids)
+            logits = prediction_model.forward(x_tokens, type_ids)
             loss = F.cross_entropy(
                 logits.view(-1, logits.shape[-1]),
                 y_tokens.view(-1),
@@ -118,12 +108,10 @@ def evaluate(
             oneshot_accumulator.add_batch(
                 logits, y_tokens, pred_mask, type_ids, x_tokens, loss=loss
             )
-            probs = torch.softmax(logits, dim=-1)
-            filt = vocab.filter_probs(probs, type_ids)
-            # merge predictions onto input (only replace masked positions).
-            # iterative decoder does this internally.
-            oneshot_preds = x_tokens.clone()
-            oneshot_preds[pred_mask] = filt.argmax(dim=-1)[pred_mask]
+            # Get one-shot predictions using the decoder
+            oneshot_preds = prediction_model.oneshot_forward(
+                x_tokens, type_ids, pred_mask
+            )
 
             # One-shot semantic metrics (set-based comparison)
             oneshot_semantic_accumulator.add_batch(
@@ -133,10 +121,10 @@ def evaluate(
             # iterative eval
             iterative_preds = None
             iter_stats_for_examples = None
-            if include_iterative and decoder is not None:
+            if include_iterative:
                 # Track tokens for visualization on first batch only
                 track = batch_idx == 0 and num_examples > 0
-                iterative_preds, stats = decoder.decode(
+                iterative_preds, stats = prediction_model.iterative_forward(
                     x_tokens, type_ids, pred_mask, track_tokens=track
                 )
                 if track:
@@ -562,21 +550,23 @@ def train(config, use_wandb: bool = True):
         persistent_workers=persistent,
     )
 
-    model = TeamTransformer(
-        max_seq_len=config.max_seq_len,
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    prediction_model = create_model(
         d_model=config.d_model,
         nhead=config.nhead,
         num_layers=config.num_layers,
         dim_feedforward=config.dim_ff,
         dropout=config.dropout,
+        num_iterations=config.eval_num_iterations,
+        iterative_deterministic=True,  # For fair comparison with one-shot
+        oneshot_deterministic=True,  # Argmax for evaluation
+        device=device,
     )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
 
     # optimizer
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        prediction_model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
         betas=(0.9, 0.999),
@@ -601,11 +591,9 @@ def train(config, use_wandb: bool = True):
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"No checkpoint found at {ckpt_path}")
         print(f"Loading checkpoint from {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        global_step = ckpt.get("step", 0)
-        best_val_accuracy = ckpt.get("val_accuracy", 0.0)
+        extra_state = prediction_model.load_checkpoint(ckpt_path, optimizer)
+        global_step = extra_state.get("step", 0)
+        best_val_accuracy = extra_state.get("val_accuracy", 0.0)
         for _ in range(global_step):
             scheduler.step()
         print(
@@ -613,13 +601,10 @@ def train(config, use_wandb: bool = True):
         )
         print("\nRunning initial evaluation on loaded checkpoint...")
         val_results = evaluate(
-            model,
+            prediction_model,
             val_loader,
-            device,
-            vocab,
             max_steps=config.max_eval_steps,
             include_iterative=config.eval_with_iterative,
-            num_iterations=config.eval_num_iterations,
             num_examples=0,
         )
         val_oneshot = val_results.oneshot_metrics
@@ -640,7 +625,9 @@ def train(config, use_wandb: bool = True):
     t2s = Team2Seq()
     train_semantic_accumulator = SemanticMetricsAccumulator(vocab)
 
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(
+        f"Model parameters: {sum(p.numel() for p in prediction_model.parameters()):,}"
+    )
 
     while global_step < config.max_steps:
         try:
@@ -660,19 +647,21 @@ def train(config, use_wandb: bool = True):
             train_dset.set_curriculum_percentile(new_percentile)
 
         # training
-        model.train()
+        prediction_model.train()
         x_tokens = x_tokens.to(device)
         type_ids = type_ids.to(device)
         y_tokens = y_tokens.to(device)
         pred_mask = pred_mask.to(device)
 
-        logits = model(x_tokens, type_ids)
+        logits = prediction_model.forward(x_tokens, type_ids)
         loss, metrics = compute_loss_and_metrics(
             logits, y_tokens, pred_mask, type_ids, vocab
         )
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(
+            prediction_model.parameters(), config.max_grad_norm
+        )
         optimizer.step()
         scheduler.step()
 
@@ -760,35 +749,26 @@ def train(config, use_wandb: bool = True):
             print(f"\n\nEvaluating at step {global_step}...")
 
             val_results = evaluate(
-                model,
+                prediction_model,
                 val_loader,
-                device,
-                vocab,
                 max_steps=config.max_eval_steps,
                 include_iterative=config.eval_with_iterative,
-                num_iterations=config.eval_num_iterations,
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
             val_clean_results = evaluate(
-                model,
+                prediction_model,
                 val_clean_loader,
-                device,
-                vocab,
                 max_steps=config.max_eval_steps,
                 include_iterative=config.eval_with_iterative,
-                num_iterations=config.eval_num_iterations,
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
             val_clean_hard_results = evaluate(
-                model,
+                prediction_model,
                 val_clean_hard_loader,
-                device,
-                vocab,
                 max_steps=config.max_eval_steps,
                 include_iterative=config.eval_with_iterative,
-                num_iterations=config.eval_num_iterations,
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
@@ -1076,15 +1056,14 @@ def train(config, use_wandb: bool = True):
                     patience_count = 0
 
                     best_model_path = os.path.join(ckpt_dir, "best_model.pt")
-                    torch.save(
-                        {
+                    prediction_model.save_checkpoint(
+                        best_model_path,
+                        optimizer=optimizer,
+                        extra_state={
                             "step": global_step,
-                            "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
                             "val_semantic_move_accuracy": val_score,
                             "val_loss": val_oneshot["loss"],
                         },
-                        best_model_path,
                     )
 
                     print(f"\nNew best model! Semantic Move Acc: {val_score:.3f}")
@@ -1098,13 +1077,10 @@ def train(config, use_wandb: bool = True):
 
     print("\nTraining complete! Saving final model...")
     final_model_path = os.path.join(ckpt_dir, "final_model.pt")
-    torch.save(
-        {
-            "step": global_step,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-        },
+    prediction_model.save_checkpoint(
         final_model_path,
+        optimizer=optimizer,
+        extra_state={"step": global_step},
     )
 
     print(f"Models saved to {ckpt_dir}")
@@ -1154,7 +1130,6 @@ if __name__ == "__main__":
         "seed": 42,
         "gen_weights": gen_weights,
         # architecture
-        "max_seq_len": 64,
         "d_model": 400,
         "nhead": 16,
         "num_layers": 8,
