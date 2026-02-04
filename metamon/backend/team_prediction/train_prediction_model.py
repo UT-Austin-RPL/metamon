@@ -180,7 +180,9 @@ def log_demo_decoding(
         # Build row with format and each iteration
         row_data = [team.format]
 
-        prev_seq = None
+        # Compare against input (iter 0) to avoid re-sorting confusion
+        input_seq = vocab.ints_to_pokeset_seq(tokens_per_iter[0][0].tolist())
+
         for iter_idx, tokens in enumerate(tokens_per_iter):
             seq = vocab.ints_to_pokeset_seq(tokens[0].tolist())  # batch dim 0
 
@@ -188,27 +190,22 @@ def log_demo_decoding(
             for pos, tok_str in enumerate(seq):
                 tok_escaped = html.escape(tok_str)
 
-                # Check if this token was newly committed this iteration
-                was_committed_now = False
-                if prev_seq is not None:
-                    # Committed if: was $missing$ before, now is not
-                    if "$" in prev_seq[pos] and "$" not in tok_str:
-                        was_committed_now = True
+                # Highlight if: was $missing$ in INPUT and now filled
+                is_prediction = "$" in input_seq[pos] and "$" not in tok_str
 
-                if was_committed_now:
-                    # Highlight newly committed tokens in orange/bold
+                if is_prediction:
+                    # Predicted token - orange
                     parts.append(
-                        f'<span style="color: darkorange; font-weight: bold; background-color: #fff3e0">{tok_escaped}</span>'
+                        f'<span style="color: darkorange; font-weight: bold">{tok_escaped}</span>'
                     )
                 elif "$" in tok_str:
                     # Still masked - gray
                     parts.append(f'<span style="color: gray">{tok_escaped}</span>')
                 else:
-                    # Already visible from input or previous iterations
+                    # Input token (never masked)
                     parts.append(tok_escaped)
 
             row_data.append(wandb.Html(" ".join(parts)))
-            prev_seq = seq
 
         table.add_data(*row_data)
 

@@ -69,6 +69,7 @@ class TeamTransformer(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=num_layers,
+            norm=nn.LayerNorm(d_model) if norm_first else None,
         )
 
         self.output_layer = nn.Linear(d_model, vocab_size)
@@ -187,6 +188,7 @@ class LocalGlobalTeamTransformer(nn.Module):
             ]
         )
 
+        self.final_norm = nn.LayerNorm(d_model) if norm_first else None
         self.output_layer = nn.Linear(d_model, vocab_size)
         self.dropout = nn.Dropout(dropout)
 
@@ -285,6 +287,8 @@ class LocalGlobalTeamTransformer(nn.Module):
             pokemon_emb = global_out[:, 1:, :]  # discard format output
 
         output = torch.cat([format_emb, pokemon_emb], dim=1)
+        if self.final_norm is not None:
+            output = self.final_norm(output)
         logits = self.output_layer(output)
         return logits
 
