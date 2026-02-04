@@ -1,12 +1,3 @@
-"""
-TeamPredictionModel: High-level wrapper for team prediction models.
-
-Provides a clean interface for training and inference:
-- forward(): Pass-through to underlying model (training)
-- predict(): TeamSet -> TeamSet inference with iterative decoding
-- save_checkpoint() / load_checkpoint(): Checkpointing
-"""
-
 import torch
 import torch.nn as nn
 from pathlib import Path
@@ -22,9 +13,9 @@ from metamon.backend.team_prediction.iterative_decoder import (
 )
 
 
-###############################################################################
-# Neural Network Architectures
-###############################################################################
+##################################
+## Neural Network Architectures ##
+##################################
 
 
 class TeamTransformer(nn.Module):
@@ -71,6 +62,7 @@ class TeamTransformer(nn.Module):
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
+            activation="gelu",
             batch_first=True,
             norm_first=norm_first,
         )
@@ -82,6 +74,7 @@ class TeamTransformer(nn.Module):
         self.output_layer = nn.Linear(d_model, vocab_size)
         self.dropout = nn.Dropout(dropout)
 
+    @torch.compile
     def forward(
         self,
         x_tokens: torch.LongTensor,
@@ -115,9 +108,190 @@ class TeamTransformer(nn.Module):
         return logits
 
 
-###############################################################################
-# High-Level Model Wrapper
-###############################################################################
+class LocalGlobalTeamTransformer(nn.Module):
+    """
+    Alternating local (per-pokemon) and global (full-team) attention.
+
+    Local attention: Each pokemon attends to its own tokens + format token.
+    Global attention: Full sequence attention over the entire team.
+
+    The format token embedding is kept constant throughout - it provides
+    context but is never updated since it never needs predicting.
+
+    Args:
+        include_stats (bool): Whether sequences include nature/EVs/IVs
+        d_model (int): Embedding dimension (default: 512)
+        nhead (int): Number of attention heads (default: 8)
+        num_blocks (int): Number of local+global block pairs (default: 6)
+        dim_feedforward (int): Inner dimension of feedforward networks (default: 2048)
+        dropout (float): Dropout probability (default: 0.1)
+        norm_first (bool): Whether to apply normalization before attention (default: True)
+    """
+
+    NUM_POKEMON = 6
+
+    def __init__(
+        self,
+        include_stats: bool = False,
+        d_model: int = 512,
+        nhead: int = 8,
+        num_blocks: int = 6,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        norm_first: bool = True,
+    ):
+        super().__init__()
+        self.include_stats = include_stats
+        self.seq_len = Team2Seq.seq_len(include_stats)
+        self.attrs_per_pokemon = (
+            Team2Seq.ATTRS_PER_POKEMON_WITH_STATS
+            if include_stats
+            else Team2Seq.ATTRS_PER_POKEMON_BASE
+        )
+        self.num_blocks = num_blocks
+        self.vocab = Vocabulary()
+        vocab_size = len(self.vocab.tokenizer)
+        type_vocab_size = max(self.vocab.type_ids.values()) + 1
+        self.d_model = d_model
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.type_embedding = nn.Embedding(type_vocab_size, d_model)
+        self.position_embedding = nn.Embedding(self.seq_len, d_model)
+
+        self.local_layers = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(
+                    d_model=d_model,
+                    nhead=nhead,
+                    dim_feedforward=dim_feedforward,
+                    dropout=dropout,
+                    activation="gelu",
+                    batch_first=True,
+                    norm_first=norm_first,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+
+        self.global_layers = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(
+                    d_model=d_model,
+                    nhead=nhead,
+                    dim_feedforward=dim_feedforward,
+                    dropout=dropout,
+                    activation="gelu",
+                    batch_first=True,
+                    norm_first=norm_first,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+
+        self.output_layer = nn.Linear(d_model, vocab_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def _fold_for_local(
+        self, pokemon_emb: torch.Tensor, format_emb: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Fold pokemon embeddings for local attention.
+
+        Args:
+            pokemon_emb: (batch, 6 * attrs_per_pokemon, d_model)
+            format_emb: (batch, 1, d_model)
+
+        Returns:
+            (batch * 6, 1 + attrs_per_pokemon, d_model)
+        """
+        batch_size = pokemon_emb.size(0)
+        pokemon_emb = pokemon_emb.view(
+            batch_size, self.NUM_POKEMON, self.attrs_per_pokemon, self.d_model
+        )
+        format_expanded = format_emb.unsqueeze(1).expand(
+            batch_size, self.NUM_POKEMON, 1, self.d_model
+        )
+        local_seq = torch.cat([format_expanded, pokemon_emb], dim=2)
+        local_seq = local_seq.view(
+            batch_size * self.NUM_POKEMON, 1 + self.attrs_per_pokemon, self.d_model
+        )
+        return local_seq
+
+    def _unfold_from_local(
+        self, local_out: torch.Tensor, batch_size: int
+    ) -> torch.Tensor:
+        """
+        Unfold local attention output back to full sequence (excluding format token).
+
+        Args:
+            local_out: (batch * 6, 1 + attrs_per_pokemon, d_model)
+            batch_size: Original batch size
+
+        Returns:
+            pokemon_emb: (batch, 6 * attrs_per_pokemon, d_model)
+        """
+        local_out = local_out.view(
+            batch_size, self.NUM_POKEMON, 1 + self.attrs_per_pokemon, self.d_model
+        )
+        pokemon_emb = local_out[:, :, 1:, :]
+        pokemon_emb = pokemon_emb.reshape(
+            batch_size, self.NUM_POKEMON * self.attrs_per_pokemon, self.d_model
+        )
+        return pokemon_emb
+
+    @torch.compile
+    def forward(
+        self,
+        x_tokens: torch.LongTensor,
+        type_ids: torch.LongTensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass with alternating local and global attention.
+
+        Args:
+            x_tokens (LongTensor): (batch_size, seq_len) token IDs
+            type_ids (LongTensor): (batch_size, seq_len) type IDs
+
+        Returns:
+            logits (Tensor): (batch_size, seq_len, vocab_size)
+        """
+        batch_size, seq_len = x_tokens.size()
+        if seq_len > self.seq_len:
+            raise ValueError(
+                f"Sequence length {seq_len} exceeds expected {self.seq_len}."
+            )
+
+        # standard embedding (tokens, position, types)
+        position_ids = torch.arange(seq_len, device=x_tokens.device)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, seq_len)
+        token_emb = self.token_embedding(x_tokens)
+        type_emb = self.type_embedding(type_ids)
+        pos_emb = self.position_embedding(position_ids)
+        x = token_emb + type_emb + pos_emb
+        x = self.dropout(x)
+
+        # split format token (constant) from pokemon tokens (updated)
+        format_emb = x[:, 0:1, :]  # (batch, 1, d_model) - kept constant
+        pokemon_emb = x[:, 1:, :]  # (batch, 6*attrs, d_model) - gets updated
+
+        # alternating local and global attention
+        for local_layer, global_layer in zip(self.local_layers, self.global_layers):
+            # local attention: each pokemon sees format + its own tokens
+            local_in = self._fold_for_local(pokemon_emb, format_emb)
+            local_out = local_layer(local_in)
+            pokemon_emb = self._unfold_from_local(local_out, batch_size)
+            # global attention: full sequence
+            global_in = torch.cat([format_emb, pokemon_emb], dim=1)
+            global_out = global_layer(global_in)
+            pokemon_emb = global_out[:, 1:, :]  # discard format output
+
+        output = torch.cat([format_emb, pokemon_emb], dim=1)
+        logits = self.output_layer(output)
+        return logits
+
+
+##############################
+## High-Level Model Wrapper ##
+##############################
 
 
 class TeamPredictionModel:
@@ -456,10 +630,10 @@ def create_model(
     Factory function to create a TeamPredictionModel with common defaults.
 
     Args:
-        model_type: Model architecture ("TeamTransformer")
+        model_type: Model architecture ("TeamTransformer" or "LocalGlobalTeamTransformer")
         d_model: Embedding dimension
         nhead: Number of attention heads
-        num_layers: Number of transformer layers
+        num_layers: Number of transformer layers (or blocks for LocalGlobal)
         dim_feedforward: FFN inner dimension
         dropout: Dropout rate
         num_iterations: Number of iterative decoding steps
@@ -477,18 +651,32 @@ def create_model(
     """
     model_classes = {
         "TeamTransformer": TeamTransformer,
+        "LocalGlobalTeamTransformer": LocalGlobalTeamTransformer,
     }
 
     if model_type not in model_classes:
-        raise ValueError(f"Unknown model type: {model_type}")
+        raise ValueError(
+            f"Unknown model type: {model_type}. "
+            f"Available: {list(model_classes.keys())}"
+        )
 
-    model_kwargs = {
-        "d_model": d_model,
-        "nhead": nhead,
-        "num_layers": num_layers,
-        "dim_feedforward": dim_feedforward,
-        "dropout": dropout,
-    }
+    # Build model kwargs based on architecture
+    if model_type == "LocalGlobalTeamTransformer":
+        model_kwargs = {
+            "d_model": d_model,
+            "nhead": nhead,
+            "num_blocks": num_layers,  # LocalGlobal uses num_blocks
+            "dim_feedforward": dim_feedforward,
+            "dropout": dropout,
+        }
+    else:
+        model_kwargs = {
+            "d_model": d_model,
+            "nhead": nhead,
+            "num_layers": num_layers,
+            "dim_feedforward": dim_feedforward,
+            "dropout": dropout,
+        }
 
     iterative_decoder_kwargs = {
         "num_iterations": num_iterations,

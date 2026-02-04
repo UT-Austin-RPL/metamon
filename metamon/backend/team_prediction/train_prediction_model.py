@@ -734,6 +734,7 @@ def train(config, use_wandb: bool = True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     prediction_model = create_model(
+        model_type=config.model_type,
         d_model=config.d_model,
         nhead=config.nhead,
         num_layers=config.num_layers,
@@ -1315,6 +1316,7 @@ if __name__ == "__main__":
         "seed": 42,
         "gen_weights": gen_weights,
         # architecture
+        "model_type": "LocalGlobalTeamTransformer",  # or "LocalGlobalTeamTransformer"
         "d_model": 400,
         "nhead": 16,
         "num_layers": 8,
