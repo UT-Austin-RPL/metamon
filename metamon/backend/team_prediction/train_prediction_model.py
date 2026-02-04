@@ -8,7 +8,6 @@ from dataclasses import dataclass
 import tqdm
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.utils.data import DataLoader
 import wandb
 
@@ -16,7 +15,10 @@ from metamon.backend.team_prediction.dataset import (
     TeamPredictionDataset,
     ScoredTeamPredictionDataset,
 )
-from metamon.backend.team_prediction.model import TeamTransformer
+from metamon.backend.team_prediction.prediction_model import (
+    TeamPredictionModel,
+    create_model,
+)
 from metamon.backend.team_prediction.vocabulary import Vocabulary
 from metamon.backend.team_prediction.masking import (
     TeamMasker,
@@ -28,18 +30,197 @@ from metamon.backend.team_prediction.prediction_metrics import (
     EvaluationAccumulator,
     SemanticMetricsAccumulator,
 )
-from metamon.backend.team_prediction.team import Team2Seq
-from metamon.backend.team_prediction.iterative_decoder import (
-    IterativeTeamDecoder,
-    IterativeStatsAccumulator,
-)
+from metamon.backend.team_prediction.team import Team2Seq, TeamSet, PokemonSet
+from metamon.backend.team_prediction.iterative_decoder import IterativeStatsAccumulator
+
+
+def create_demo_teams() -> list[TeamSet]:
+    """
+    Create demonstration teams for iterative decoding visualization.
+    Each team has minimal information to show the full decoding process.
+    """
+    demos = []
+
+    # Gen 1: Only Gengar name visible
+    gen1_lead = PokemonSet(
+        name="Gengar",
+        gen=1,
+        ability=PokemonSet.NO_ABILITY,
+        item=PokemonSet.NO_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen1ou",
+            lead=gen1_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=1) for _ in range(5)],
+        )
+    )
+
+    # Gen 2: Only Cloyster name visible
+    gen2_lead = PokemonSet(
+        name="Cloyster",
+        gen=2,
+        ability=PokemonSet.NO_ABILITY,
+        item=PokemonSet.MISSING_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen2ou",
+            lead=gen2_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=2) for _ in range(5)],
+        )
+    )
+
+    # Gen 3: Only Tyranitar name visible
+    gen3_lead = PokemonSet(
+        name="Tyranitar",
+        gen=3,
+        ability=PokemonSet.MISSING_ABILITY,
+        item=PokemonSet.MISSING_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen3ou",
+            lead=gen3_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=3) for _ in range(5)],
+        )
+    )
+
+    # Gen 4: Only Metagross name visible
+    gen4_lead = PokemonSet(
+        name="Metagross",
+        gen=4,
+        ability=PokemonSet.MISSING_ABILITY,
+        item=PokemonSet.MISSING_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen4ou",
+            lead=gen4_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=4) for _ in range(5)],
+        )
+    )
+
+    # Gen 9: All 6 names visible, everything else masked
+    gen9_names = [
+        "Gholdengo",
+        "Darkrai",
+        "Clefable",
+        "Ting-Lu",
+        "Dragonite",
+        "Pecharunt",
+    ]
+
+    def gen9_pokemon(name: str) -> PokemonSet:
+        return PokemonSet(
+            name=name,
+            gen=9,
+            ability=PokemonSet.MISSING_ABILITY,
+            item=PokemonSet.MISSING_ITEM,
+            nature=PokemonSet.NO_NATURE,
+            moves=[PokemonSet.MISSING_MOVE] * 4,
+            evs=[252] * 6,
+            ivs=[31] * 6,
+            tera_type=PokemonSet.MISSING_TERA_TYPE,
+        )
+
+    demos.append(
+        TeamSet(
+            format="gen9ou",
+            lead=gen9_pokemon(gen9_names[0]),
+            reserve=[gen9_pokemon(n) for n in gen9_names[1:]],
+        )
+    )
+
+    return demos
+
+
+def log_demo_decoding(
+    prediction_model: TeamPredictionModel,
+    vocab: Vocabulary,
+    step: int,
+):
+    """
+    Log iterative decoding demonstrations showing progression for each generation.
+    Highlights tokens committed at each iteration.
+    """
+    demos = create_demo_teams()
+
+    # tokens_per_iter has num_iterations + 1 entries: initial state + each iteration
+    num_cols = prediction_model.iterative_decoder.num_iterations + 1
+    columns = ["format", "input"] + [f"iter_{i}" for i in range(1, num_cols)]
+    table = wandb.Table(columns=columns)
+
+    for team in demos:
+        # Use the high-level predict API with stats tracking
+        _, stats = prediction_model.predict(team, return_stats=True)
+
+        tokens_per_iter = stats.tokens_per_iter  # List of tensors per iteration
+
+        # Build row with format and each iteration
+        row_data = [team.format]
+
+        prev_seq = None
+        for iter_idx, tokens in enumerate(tokens_per_iter):
+            seq = vocab.ints_to_pokeset_seq(tokens[0].tolist())  # batch dim 0
+
+            parts = []
+            for pos, tok_str in enumerate(seq):
+                tok_escaped = html.escape(tok_str)
+
+                # Check if this token was newly committed this iteration
+                was_committed_now = False
+                if prev_seq is not None:
+                    # Committed if: was $missing$ before, now is not
+                    if "$" in prev_seq[pos] and "$" not in tok_str:
+                        was_committed_now = True
+
+                if was_committed_now:
+                    # Highlight newly committed tokens in orange/bold
+                    parts.append(
+                        f'<span style="color: darkorange; font-weight: bold; background-color: #fff3e0">{tok_escaped}</span>'
+                    )
+                elif "$" in tok_str:
+                    # Still masked - gray
+                    parts.append(f'<span style="color: gray">{tok_escaped}</span>')
+                else:
+                    # Already visible from input or previous iterations
+                    parts.append(tok_escaped)
+
+            row_data.append(wandb.Html(" ".join(parts)))
+            prev_seq = seq
+
+        table.add_data(*row_data)
+
+    wandb.log({"demo_iterative_decoding": table}, step=step)
 
 
 @dataclass
 class EvalResults:
-    oneshot_metrics: dict
-    iterative_metrics: Optional[dict] = None
-    semantic_metrics: Optional[dict] = None
+    oneshot_metrics: dict  # Position-based metrics for one-shot
+    oneshot_semantic_metrics: dict  # Semantic (set-based) metrics for one-shot
+    iterative_metrics: Optional[dict] = None  # Position-based metrics for iterative
+    iterative_semantic_metrics: Optional[dict] = None  # Semantic metrics for iterative
     examples: Optional[list] = None
     iter_stats: Optional[dict] = None
     mask_counts: Optional[list] = None
@@ -47,35 +228,29 @@ class EvalResults:
 
 
 def evaluate(
-    model: nn.Module,
+    prediction_model: TeamPredictionModel,
     dataloader: DataLoader,
-    device: torch.device,
-    vocab: Vocabulary,
     max_steps: Optional[int] = None,
     include_iterative: bool = True,
-    num_iterations: int = 8,
     num_examples: int = 0,
 ) -> EvalResults:
-    model.eval()
+    prediction_model.eval()
+    vocab = prediction_model.vocab
+    device = prediction_model.device
+    num_iterations = prediction_model.iterative_decoder.num_iterations
 
+    t2s = Team2Seq()
     oneshot_accumulator = EvaluationAccumulator(vocab)
+    oneshot_semantic_accumulator = SemanticMetricsAccumulator(vocab)
     iterative_accumulator = EvaluationAccumulator(vocab) if include_iterative else None
+    iterative_semantic_accumulator = (
+        SemanticMetricsAccumulator(vocab) if include_iterative else None
+    )
     iter_stats_accumulator = (
         IterativeStatsAccumulator(num_iterations) if include_iterative else None
     )
-    semantic_accumulator = SemanticMetricsAccumulator() if include_iterative else None
-    t2s = Team2Seq() if include_iterative else None
     val_mask_counts = []
     val_revealed_counts = []
-
-    decoder = None
-    if include_iterative:
-        # deterministic for fair comparison with one-shot eval
-        # eventually we should let the one-shot eval use the same samling strategy
-        # as each iterative eval step.
-        decoder = IterativeTeamDecoder(
-            model, num_iterations=num_iterations, deterministic=True
-        )
 
     # Collect batches
     batches = []
@@ -104,7 +279,7 @@ def evaluate(
             val_revealed_counts.extend(is_revealed.sum(dim=1).cpu().tolist())
 
             # one-shot eval
-            logits = model(x_tokens, type_ids)
+            logits = prediction_model.forward(x_tokens, type_ids)
             loss = F.cross_entropy(
                 logits.view(-1, logits.shape[-1]),
                 y_tokens.view(-1),
@@ -114,20 +289,23 @@ def evaluate(
             oneshot_accumulator.add_batch(
                 logits, y_tokens, pred_mask, type_ids, x_tokens, loss=loss
             )
-            probs = torch.softmax(logits, dim=-1)
-            filt = vocab.filter_probs(probs, type_ids)
-            # merge predictions onto input (only replace masked positions).
-            # iterative decoder does this internally.
-            oneshot_preds = x_tokens.clone()
-            oneshot_preds[pred_mask] = filt.argmax(dim=-1)[pred_mask]
+            # Get one-shot predictions using the decoder
+            oneshot_preds = prediction_model.oneshot_forward(
+                x_tokens, type_ids, pred_mask
+            )
+
+            # One-shot semantic metrics (set-based comparison)
+            oneshot_semantic_accumulator.add_batch(
+                oneshot_preds.cpu(), y_tokens.cpu(), x_tokens.cpu(), t2s
+            )
 
             # iterative eval
             iterative_preds = None
             iter_stats_for_examples = None
-            if include_iterative and decoder is not None:
+            if include_iterative:
                 # Track tokens for visualization on first batch only
                 track = batch_idx == 0 and num_examples > 0
-                iterative_preds, stats = decoder.decode(
+                iterative_preds, stats = prediction_model.iterative_forward(
                     x_tokens, type_ids, pred_mask, track_tokens=track
                 )
                 if track:
@@ -145,8 +323,8 @@ def evaluate(
                 iterative_accumulator.add_batch(
                     iter_logits, y_tokens, pred_mask, type_ids, x_tokens
                 )
-                # Semantic metrics (set-based comparison)
-                semantic_accumulator.add_batch(
+                # Iterative semantic metrics (set-based comparison)
+                iterative_semantic_accumulator.add_batch(
                     iterative_preds.cpu(), y_tokens.cpu(), x_tokens.cpu(), t2s
                 )
 
@@ -176,11 +354,14 @@ def evaluate(
 
     # summarize metrics
     oneshot_metrics = oneshot_accumulator.compute_metrics()
+    oneshot_semantic_metrics = oneshot_semantic_accumulator.compute_metrics()
     iterative_metrics = (
         iterative_accumulator.compute_metrics() if iterative_accumulator else None
     )
-    semantic_metrics = (
-        semantic_accumulator.compute_metrics() if semantic_accumulator else None
+    iterative_semantic_metrics = (
+        iterative_semantic_accumulator.compute_metrics()
+        if iterative_semantic_accumulator
+        else None
     )
     iter_stats = (
         iter_stats_accumulator.compute_results() if iter_stats_accumulator else None
@@ -188,8 +369,9 @@ def evaluate(
 
     return EvalResults(
         oneshot_metrics=oneshot_metrics,
+        oneshot_semantic_metrics=oneshot_semantic_metrics,
         iterative_metrics=iterative_metrics,
-        semantic_metrics=semantic_metrics,
+        iterative_semantic_metrics=iterative_semantic_metrics,
         examples=examples if num_examples > 0 else None,
         iter_stats=iter_stats,
         mask_counts=val_mask_counts,
@@ -206,10 +388,6 @@ def log_example_predictions(
 ):
     """
     Log example predictions to wandb with colored HTML output.
-
-    Green: masked input tokens
-    Blue: correct predictions
-    Red: incorrect predictions
     """
     if not examples:
         return
@@ -301,13 +479,6 @@ def log_iterative_decoding_process(
 ):
     """
     Log the iterative decoding process to wandb, showing tokens at each iteration.
-
-    Each row is an example, each column is an iteration (iter_0, iter_1, ..., final).
-    Tokens are colored:
-    - Green: still masked (will be predicted)
-    - Blue: correctly predicted (matches ground truth)
-    - Red: incorrectly predicted
-    - Black: original (never masked)
     """
     if not examples:
         return
@@ -560,21 +731,24 @@ def train(config, use_wandb: bool = True):
         persistent_workers=persistent,
     )
 
-    model = TeamTransformer(
-        max_seq_len=config.max_seq_len,
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    prediction_model = create_model(
+        model_type=config.model_type,
         d_model=config.d_model,
         nhead=config.nhead,
         num_layers=config.num_layers,
         dim_feedforward=config.dim_ff,
         dropout=config.dropout,
+        num_iterations=config.eval_num_iterations,
+        iterative_deterministic=True,  # For fair comparison with one-shot
+        oneshot_deterministic=True,  # Argmax for evaluation
+        device=device,
     )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
 
     # optimizer
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        prediction_model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
         betas=(0.9, 0.999),
@@ -599,11 +773,9 @@ def train(config, use_wandb: bool = True):
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"No checkpoint found at {ckpt_path}")
         print(f"Loading checkpoint from {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        global_step = ckpt.get("step", 0)
-        best_val_accuracy = ckpt.get("val_accuracy", 0.0)
+        extra_state = prediction_model.load_checkpoint(ckpt_path, optimizer)
+        global_step = extra_state.get("step", 0)
+        best_val_accuracy = extra_state.get("val_accuracy", 0.0)
         for _ in range(global_step):
             scheduler.step()
         print(
@@ -611,13 +783,10 @@ def train(config, use_wandb: bool = True):
         )
         print("\nRunning initial evaluation on loaded checkpoint...")
         val_results = evaluate(
-            model,
+            prediction_model,
             val_loader,
-            device,
-            vocab,
             max_steps=config.max_eval_steps,
             include_iterative=config.eval_with_iterative,
-            num_iterations=config.eval_num_iterations,
             num_examples=0,
         )
         val_oneshot = val_results.oneshot_metrics
@@ -635,8 +804,12 @@ def train(config, use_wandb: bool = True):
     train_revealed_counts = []
     train_iter = iter(train_loader)
     pbar = tqdm.tqdm(total=config.max_steps, initial=global_step, desc="Training")
+    t2s = Team2Seq()
+    train_semantic_accumulator = SemanticMetricsAccumulator(vocab)
 
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(
+        f"Model parameters: {sum(p.numel() for p in prediction_model.parameters()):,}"
+    )
 
     while global_step < config.max_steps:
         try:
@@ -656,30 +829,43 @@ def train(config, use_wandb: bool = True):
             train_dset.set_curriculum_percentile(new_percentile)
 
         # training
-        model.train()
+        prediction_model.train()
         x_tokens = x_tokens.to(device)
         type_ids = type_ids.to(device)
         y_tokens = y_tokens.to(device)
         pred_mask = pred_mask.to(device)
 
-        logits = model(x_tokens, type_ids)
+        logits = prediction_model.forward(x_tokens, type_ids)
         loss, metrics = compute_loss_and_metrics(
             logits, y_tokens, pred_mask, type_ids, vocab
         )
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(
+            prediction_model.parameters(), config.max_grad_norm
+        )
         optimizer.step()
         scheduler.step()
 
         train_mask_counts.extend(pred_mask.sum(dim=1).cpu().tolist())
-        # Count actually revealed tokens (not $missing_*$ in ground truth)
         missing_set = torch.tensor(vocab.missing_mask, device=y_tokens.device)
         is_revealed = ~torch.isin(y_tokens, missing_set)
         train_revealed_counts.extend(is_revealed.sum(dim=1).cpu().tolist())
         running_loss += loss.item()
         for k, v in metrics.items():
             running_metrics[k] = running_metrics.get(k, 0.0) + v
+
+        # accumulate semantic metrics every N steps (decoding is expensive)
+        semantic_accumulate_every = max(1, config.semantic_train_every_steps // 10)
+        if global_step % semantic_accumulate_every == 0:
+            with torch.no_grad():
+                probs = torch.softmax(logits, dim=-1)
+                filt = vocab.filter_probs(probs, type_ids)
+                train_preds = x_tokens.clone()
+                train_preds[pred_mask] = filt.argmax(dim=-1)[pred_mask]
+                train_semantic_accumulator.add_batch(
+                    train_preds.cpu(), y_tokens.cpu(), x_tokens.cpu(), t2s
+                )
 
         global_step += 1
         steps_since_eval += 1
@@ -723,6 +909,14 @@ def train(config, use_wandb: bool = True):
                 running_metrics = {}
                 steps_since_eval = 0
 
+        if use_wandb and global_step % config.semantic_train_every_steps == 0:
+            train_semantic_metrics = train_semantic_accumulator.compute_metrics()
+            wandb.log(
+                {f"train/semantic/{k}": v for k, v in train_semantic_metrics.items()},
+                step=global_step,
+            )
+            train_semantic_accumulator = SemanticMetricsAccumulator(vocab)
+
         # evaluation
         if global_step % config.eval_every_steps == 0:
             train_loss = running_loss / steps_since_eval
@@ -737,44 +931,43 @@ def train(config, use_wandb: bool = True):
             print(f"\n\nEvaluating at step {global_step}...")
 
             val_results = evaluate(
-                model,
+                prediction_model,
                 val_loader,
-                device,
-                vocab,
                 max_steps=config.max_eval_steps,
                 include_iterative=config.eval_with_iterative,
-                num_iterations=config.eval_num_iterations,
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
             val_clean_results = evaluate(
-                model,
+                prediction_model,
                 val_clean_loader,
-                device,
-                vocab,
                 max_steps=config.max_eval_steps,
                 include_iterative=config.eval_with_iterative,
-                num_iterations=config.eval_num_iterations,
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
             val_clean_hard_results = evaluate(
-                model,
+                prediction_model,
                 val_clean_hard_loader,
-                device,
-                vocab,
                 max_steps=config.max_eval_steps,
                 include_iterative=config.eval_with_iterative,
-                num_iterations=config.eval_num_iterations,
                 num_examples=config.num_examples if use_wandb else 0,
             )
 
+            # Position-based metrics
             val_oneshot = val_results.oneshot_metrics
             val_iter = val_results.iterative_metrics
             val_clean_oneshot = val_clean_results.oneshot_metrics
             val_clean_iter = val_clean_results.iterative_metrics
             val_clean_hard_oneshot = val_clean_hard_results.oneshot_metrics
             val_clean_hard_iter = val_clean_hard_results.iterative_metrics
+            # Semantic metrics (set-based)
+            val_oneshot_sem = val_results.oneshot_semantic_metrics
+            val_iter_sem = val_results.iterative_semantic_metrics
+            val_clean_oneshot_sem = val_clean_results.oneshot_semantic_metrics
+            val_clean_iter_sem = val_clean_results.iterative_semantic_metrics
+            val_clean_hard_oneshot_sem = val_clean_hard_results.oneshot_semantic_metrics
+            val_clean_hard_iter_sem = val_clean_hard_results.iterative_semantic_metrics
 
             print(f"\nStep {global_step}:")
             print(
@@ -814,7 +1007,7 @@ def train(config, use_wandb: bool = True):
                         f"    Gen{gen}: {val_oneshot[gen_key]:.3f}{iter_str} (n={int(count)})"
                     )
 
-            print("\n  Per-Attribute Validation Accuracy:")
+            print("\n  Per-Attribute Validation Accuracy (position-based):")
             for k, v in sorted(val_oneshot.items()):
                 if (
                     k.endswith("_accuracy")
@@ -824,68 +1017,97 @@ def train(config, use_wandb: bool = True):
                     print(f"    {k}: {v:.3f}")
 
             # Print semantic metrics (set-based comparison)
-            val_semantic = val_results.semantic_metrics
-            if val_semantic:
-                print("\n  Semantic Metrics (set-based, iterative):")
-                for k, v in sorted(val_semantic.items()):
-                    if k.endswith("_accuracy"):
-                        total_key = k.replace("_accuracy", "_total")
-                        total = val_semantic.get(total_key, 0)
-                        print(f"    {k}: {v:.3f} (n={int(total)})")
+            print("\n  Semantic Metrics (set-based):")
+            for attr in ["pokemon", "move", "ability", "item", "tera"]:
+                key = f"{attr}_accuracy"
+                if key in val_oneshot_sem:
+                    oneshot_val = val_oneshot_sem[key]
+                    total = val_oneshot_sem.get(f"{attr}_total", 0)
+                    iter_str = ""
+                    if val_iter_sem and key in val_iter_sem:
+                        iter_str = f" (iter: {val_iter_sem[key]:.3f})"
+                    print(f"    {attr}: {oneshot_val:.3f}{iter_str} (n={int(total)})")
 
             if use_wandb:
-                log_dict = {
-                    "global_step": global_step,
-                    **{f"val/one_shot/{k}": v for k, v in val_oneshot.items()},
-                    **{
-                        f"val_clean/one_shot/{k}": v
-                        for k, v in val_clean_oneshot.items()
-                    },
-                    **{
-                        f"val_clean_hard/one_shot/{k}": v
-                        for k, v in val_clean_hard_oneshot.items()
-                    },
-                }
+                log_dict = {"global_step": global_step}
 
+                # Position-based metrics: {dset}/one_shot/position/
+                log_dict.update(
+                    {f"val/one_shot/position/{k}": v for k, v in val_oneshot.items()}
+                )
+                log_dict.update(
+                    {
+                        f"val_clean/one_shot/position/{k}": v
+                        for k, v in val_clean_oneshot.items()
+                    }
+                )
+                log_dict.update(
+                    {
+                        f"val_clean_hard/one_shot/position/{k}": v
+                        for k, v in val_clean_hard_oneshot.items()
+                    }
+                )
+
+                # Semantic metrics for one-shot: {dset}/one_shot/semantic/
+                log_dict.update(
+                    {
+                        f"val/one_shot/semantic/{k}": v
+                        for k, v in val_oneshot_sem.items()
+                    }
+                )
+                log_dict.update(
+                    {
+                        f"val_clean/one_shot/semantic/{k}": v
+                        for k, v in val_clean_oneshot_sem.items()
+                    }
+                )
+                log_dict.update(
+                    {
+                        f"val_clean_hard/one_shot/semantic/{k}": v
+                        for k, v in val_clean_hard_oneshot_sem.items()
+                    }
+                )
+
+                # Position-based metrics for iterative: {dset}/iterative/position/
                 if val_iter:
                     log_dict.update(
-                        {f"val/iterative/{k}": v for k, v in val_iter.items()}
+                        {f"val/iterative/position/{k}": v for k, v in val_iter.items()}
                     )
                 if val_clean_iter:
                     log_dict.update(
                         {
-                            f"val_clean/iterative/{k}": v
+                            f"val_clean/iterative/position/{k}": v
                             for k, v in val_clean_iter.items()
                         }
                     )
                 if val_clean_hard_iter:
                     log_dict.update(
                         {
-                            f"val_clean_hard/iterative/{k}": v
+                            f"val_clean_hard/iterative/position/{k}": v
                             for k, v in val_clean_hard_iter.items()
                         }
                     )
 
-                # Semantic metrics (set-based comparison)
-                if val_results.semantic_metrics:
+                # Semantic metrics for iterative: {dset}/iterative/semantic/
+                if val_iter_sem:
                     log_dict.update(
                         {
-                            f"val/semantic/{k}": v
-                            for k, v in val_results.semantic_metrics.items()
+                            f"val/iterative/semantic/{k}": v
+                            for k, v in val_iter_sem.items()
                         }
                     )
-                if val_clean_results.semantic_metrics:
+                if val_clean_iter_sem:
                     log_dict.update(
                         {
-                            f"val_clean/semantic/{k}": v
-                            for k, v in val_clean_results.semantic_metrics.items()
+                            f"val_clean/iterative/semantic/{k}": v
+                            for k, v in val_clean_iter_sem.items()
                         }
                     )
-                if val_clean_hard_results.semantic_metrics:
+                if val_clean_hard_iter_sem:
                     log_dict.update(
                         {
-                            f"val_clean_hard/semantic/{k}": v
-                            for k, v in val_clean_hard_results.semantic_metrics.items()
+                            f"val_clean_hard/iterative/semantic/{k}": v
+                            for k, v in val_clean_hard_iter_sem.items()
                         }
                     )
 
@@ -947,11 +1169,14 @@ def train(config, use_wandb: bool = True):
                             table_name="val_clean_hard_iterative_process",
                         )
 
+                # Demo iterative decoding on fixed examples per generation
+                if config.eval_with_iterative:
+                    log_demo_decoding(prediction_model, vocab, step=global_step)
+
                 if val_results.iter_stats:
                     hist_dict = {}
                     for i, conf in enumerate(val_results.iter_stats["confidences"]):
                         if len(conf) > 0:
-                            # Filter out inf values (used as sentinel for non-masked positions)
                             finite_conf = conf[torch.isfinite(conf)]
                             if len(finite_conf) > 0:
                                 hist_dict[f"val/iterative/iter_{i}_confidences"] = (
@@ -1001,15 +1226,15 @@ def train(config, use_wandb: bool = True):
 
             # checkpointing
             if not config.debug_overfit:
-                # Use weighted accuracy as primary metric (prefer iterative if available)
-                if val_iter:
-                    val_score = val_iter.get(
-                        "weighted_accuracy", val_iter["token_accuracy"]
-                    )
+                # Use val_clean_hard semantic move accuracy as early stopping metric
+                # (prefer iterative if available, fallback to one-shot)
+                if (
+                    val_clean_hard_iter_sem
+                    and "move_accuracy" in val_clean_hard_iter_sem
+                ):
+                    val_score = val_clean_hard_iter_sem["move_accuracy"]
                 else:
-                    val_score = val_oneshot.get(
-                        "weighted_accuracy", val_oneshot["token_accuracy"]
-                    )
+                    val_score = val_clean_hard_oneshot_sem.get("move_accuracy", 0.0)
 
                 if val_score > best_val_accuracy:
                     # early stopping
@@ -1017,27 +1242,17 @@ def train(config, use_wandb: bool = True):
                     patience_count = 0
 
                     best_model_path = os.path.join(ckpt_dir, "best_model.pt")
-                    torch.save(
-                        {
+                    prediction_model.save_checkpoint(
+                        best_model_path,
+                        optimizer=optimizer,
+                        extra_state={
                             "step": global_step,
-                            "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "val_accuracy": val_score,
+                            "val_semantic_move_accuracy": val_score,
                             "val_loss": val_oneshot["loss"],
                         },
-                        best_model_path,
                     )
 
-                    print(f"\nNew best model! Accuracy: {val_score:.3f}")
-
-                    if use_wandb:
-                        artifact = wandb.Artifact(
-                            f"{config.run_name}-best-model",
-                            type="model",
-                            metadata={"val_accuracy": val_score},
-                        )
-                        artifact.add_file(best_model_path)
-                        wandb.log_artifact(artifact)
+                    print(f"\nNew best model! Semantic Move Acc: {val_score:.3f}")
                 else:
                     patience_count += 1
                     if patience_count >= config.patience:
@@ -1048,13 +1263,10 @@ def train(config, use_wandb: bool = True):
 
     print("\nTraining complete! Saving final model...")
     final_model_path = os.path.join(ckpt_dir, "final_model.pt")
-    torch.save(
-        {
-            "step": global_step,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-        },
+    prediction_model.save_checkpoint(
         final_model_path,
+        optimizer=optimizer,
+        extra_state={"step": global_step},
     )
 
     print(f"Models saved to {ckpt_dir}")
@@ -1090,7 +1302,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Build gen_weights from --gens argument
     if args.gens is not None:
         gen_weights = {g: 1.0 for g in args.gens}  # uniform across specified gens
     else:
@@ -1100,12 +1311,12 @@ if __name__ == "__main__":
         # dataset
         "train_data_dir": download_revealed_teams(),
         "val_ratio": 0.1,
-        "batch_size": 64,
+        "batch_size": 128,
         "num_workers": 4,
         "seed": 42,
         "gen_weights": gen_weights,
         # architecture
-        "max_seq_len": 64,
+        "model_type": "LocalGlobalTeamTransformer",  # or "LocalGlobalTeamTransformer"
         "d_model": 400,
         "nhead": 16,
         "num_layers": 8,
@@ -1118,6 +1329,7 @@ if __name__ == "__main__":
         "warmup_steps": 5000,
         "max_steps": 5_000_000,
         "log_train_every_steps": 100,
+        "semantic_train_every_steps": 5_000,
         "eval_every_steps": 5_000,
         "max_eval_steps": 10,
         "patience": 500,
@@ -1127,7 +1339,7 @@ if __name__ == "__main__":
         "mask_pokemon_prob": 0.15,
         "mask_attrs_prob": 0.4,
         "val_low_mask_attrs_prob": 0.1,
-        "name_only_prob": 0.05,  # coverage for iterative decoding intermediate states
+        "name_only_prob": 0.08,  # coverage for iterative decoding intermediate states
         "toy_names_only": False,
         "curriculum_mask": args.curriculum_mask,
         "curriculum_mask_warmup_steps": 100_000,
@@ -1139,7 +1351,7 @@ if __name__ == "__main__":
         "curriculum_dset": args.curriculum_dset,
         "curriculum_dset_start_pct": 10.0,
         "curriculum_dset_end_pct": 100.0,
-        "curriculum_dset_warmup_steps": 100_000,
+        "curriculum_dset_warmup_steps": 75_000,
     }
 
     if args.debug_overfit:
@@ -1147,6 +1359,7 @@ if __name__ == "__main__":
             {
                 "debug_overfit": True,
                 "log_train_every_steps": 1,
+                "semantic_train_every_steps": 10,
                 "eval_every_steps": 10,
                 "max_steps": 1000,
             }

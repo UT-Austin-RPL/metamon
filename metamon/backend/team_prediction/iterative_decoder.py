@@ -1,10 +1,27 @@
 import torch
 import torch.nn.functional as F
+from abc import ABC, abstractmethod
 from typing import Literal, Optional, List
 from dataclasses import dataclass, field
 import math
 
 from metamon.backend.team_prediction.team import TeamSet, Team2Seq
+
+
+class Decoder(ABC):
+    """Abstract base class for team prediction decoders."""
+
+    @property
+    @abstractmethod
+    def num_iterations(self) -> int:
+        """Number of decoding iterations."""
+        pass
+
+    @property
+    @abstractmethod
+    def vocab(self):
+        """Vocabulary for token filtering."""
+        pass
 
 
 @dataclass
@@ -108,7 +125,107 @@ class IterativeStatsAccumulator:
         }
 
 
-class IterativeTeamDecoder:
+class OneShotDecoder(Decoder):
+    """
+    Single-pass decoding with temperature and nucleus sampling.
+
+    Used for one-shot evaluation with the same sampling options as iterative decoding.
+    """
+
+    def __init__(
+        self,
+        model,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        deterministic: bool = False,
+        include_stats: bool = False,
+    ):
+        """
+        Args:
+            model: TeamTransformer model
+            temperature: Sampling temperature (lower = more deterministic)
+            top_p: Nucleus sampling threshold (1.0 = no filtering)
+            deterministic: If True, use argmax instead of sampling
+            include_stats: Whether sequences include nature/EVs/IVs
+        """
+        self.model = model
+        self.temperature = temperature
+        self.top_p = top_p
+        self.deterministic = deterministic
+        self.t2s = Team2Seq(include_stats=include_stats)
+
+    @property
+    def num_iterations(self) -> int:
+        return 1
+
+    @property
+    def vocab(self):
+        return self.t2s.vocab
+
+    def _nucleus_filter(self, probs: torch.Tensor) -> torch.Tensor:
+        """Apply nucleus (top-p) filtering and renormalize."""
+        if self.top_p >= 1.0:
+            return probs
+        sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        sorted_mask = cumulative_probs - sorted_probs > self.top_p
+        sorted_probs[sorted_mask] = 0.0
+        filtered_probs = torch.zeros_like(probs)
+        filtered_probs.scatter_(-1, sorted_indices, sorted_probs)
+        filtered_probs = filtered_probs / filtered_probs.sum(dim=-1, keepdim=True)
+        return filtered_probs
+
+    @torch.no_grad()
+    def decode(
+        self,
+        x_tokens: torch.Tensor,
+        type_ids: torch.Tensor,
+        pred_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Single-pass decoding with optional temperature scaling and nucleus sampling.
+
+        Args:
+            x_tokens: Input token IDs (batch_size, seq_len)
+            type_ids: Type IDs (batch_size, seq_len)
+            pred_mask: Boolean mask of positions to predict (batch_size, seq_len)
+
+        Returns:
+            pred_tokens: Predicted token IDs (batch_size, seq_len)
+        """
+        self.model.eval()
+        device = x_tokens.device
+
+        logits = self.model(x_tokens, type_ids)
+
+        # Apply temperature
+        if self.temperature != 1.0:
+            logits = logits / self.temperature
+
+        probs = torch.softmax(logits, dim=-1)
+
+        # Filter by valid token types
+        probs = self.vocab.filter_probs(probs, type_ids)
+
+        # Apply nucleus sampling filter
+        probs = self._nucleus_filter(probs)
+
+        # Sample or argmax
+        if self.deterministic:
+            sampled = probs.argmax(dim=-1)
+        else:
+            flat_probs = probs.view(-1, probs.shape[-1])
+            sampled = torch.multinomial(flat_probs, num_samples=1).squeeze(-1)
+            sampled = sampled.view(probs.shape[:-1])
+
+        # Only replace masked positions
+        pred_tokens = x_tokens.clone()
+        pred_tokens[pred_mask] = sampled[pred_mask]
+
+        return pred_tokens
+
+
+class IterativeTeamDecoder(Decoder):
     """
     MaskGIT-style iterative decoding with re-sorting after each fill.
 
@@ -138,12 +255,16 @@ class IterativeTeamDecoder:
             include_stats: Whether sequences include nature/EVs/IVs
         """
         self.model = model
-        self.num_iterations = num_iterations
+        self._num_iterations = num_iterations
         self.mask_schedule = mask_schedule
         self.temperature = temperature
         self.top_p = top_p
         self.deterministic = deterministic
         self.t2s = Team2Seq(include_stats=include_stats)
+
+    @property
+    def num_iterations(self) -> int:
+        return self._num_iterations
 
     @property
     def vocab(self):

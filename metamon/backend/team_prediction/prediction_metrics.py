@@ -415,9 +415,26 @@ def compute_semantic_metrics(
     return metrics
 
 
-def _compare_pokemon_attrs(input_p, pred_p, true_p, stats):
-    """Compare attributes of matched Pokemon using set-based comparison for moves."""
+def _compare_pokemon_attrs(input_p, pred_p, true_p, stats, gen_stats=None):
+    """Compare attributes of matched Pokemon using set-based comparison for moves.
+
+    Args:
+        input_p: Input PokemonSet (with masked values)
+        pred_p: Predicted PokemonSet
+        true_p: Ground truth PokemonSet
+        stats: Dict to accumulate overall stats into
+        gen_stats: Optional dict to accumulate per-generation stats into
+    """
     from metamon.backend.team_prediction.team import PokemonSet as P
+
+    def _incr(attr: str, correct: bool):
+        stats[attr]["total"] += 1
+        if correct:
+            stats[attr]["correct"] += 1
+        if gen_stats is not None:
+            gen_stats[attr]["total"] += 1
+            if correct:
+                gen_stats[attr]["correct"] += 1
 
     # Moves: set-based comparison
     # Get ground truth moves that were masked and have real labels
@@ -431,43 +448,46 @@ def _compare_pokemon_attrs(input_p, pred_p, true_p, stats):
 
     # Count how many ground truth moves are in predicted set
     for move in true_labeled_moves:
-        stats["move"]["total"] += 1
-        if move in pred_moves:
-            stats["move"]["correct"] += 1
+        _incr("move", move in pred_moves)
 
     # Ability - only count if masked AND ground truth is a real ability
     if input_p.ability == P.MISSING_ABILITY and true_p.ability not in (
         P.MISSING_ABILITY,
         P.NO_ABILITY,
     ):
-        stats["ability"]["total"] += 1
-        if pred_p.ability == true_p.ability:
-            stats["ability"]["correct"] += 1
+        _incr("ability", pred_p.ability == true_p.ability)
 
     # Item - only count if masked AND ground truth is a real item
     if input_p.item == P.MISSING_ITEM and true_p.item not in (
         P.MISSING_ITEM,
         P.NO_ITEM,
     ):
-        stats["item"]["total"] += 1
-        if pred_p.item == true_p.item:
-            stats["item"]["correct"] += 1
+        _incr("item", pred_p.item == true_p.item)
 
     # Tera type - only count if masked AND ground truth is a real tera
     if input_p.tera_type == P.MISSING_TERA_TYPE and true_p.tera_type not in (
         P.MISSING_TERA_TYPE,
         P.NO_TERA_TYPE,
     ):
-        stats["tera"]["total"] += 1
-        if pred_p.tera_type == true_p.tera_type:
-            stats["tera"]["correct"] += 1
+        _incr("tera", pred_p.tera_type == true_p.tera_type)
 
 
 class SemanticMetricsAccumulator:
-    """Accumulates semantic metrics across batches."""
+    """Accumulates semantic metrics across batches with per-generation tracking."""
 
-    def __init__(self):
+    def __init__(self, vocab):
+        self.vocab = vocab
+        # Overall stats
         self.stats = defaultdict(lambda: {"correct": 0, "total": 0})
+        # Per-generation stats
+        self.gen_stats = defaultdict(
+            lambda: defaultdict(lambda: {"correct": 0, "total": 0})
+        )
+
+    def _extract_gen_from_tokens(self, x_tokens: torch.Tensor) -> int:
+        """Extract generation number from the format token (first token)."""
+        format_token_id = x_tokens[0].item()
+        return self.vocab.format_token_to_gen.get(format_token_id, 0)
 
     def add_batch(
         self,
@@ -481,6 +501,7 @@ class SemanticMetricsAccumulator:
 
         batch_size = pred_tokens.shape[0]
         for b in range(batch_size):
+            gen = self._extract_gen_from_tokens(x_tokens[b])
             pred_team = t2s.decode(pred_tokens[b])
             true_team = t2s.decode(y_tokens[b])
             input_team = t2s.decode(x_tokens[b])
@@ -495,19 +516,37 @@ class SemanticMetricsAccumulator:
 
                 if name_was_masked and name_has_label:
                     self.stats["pokemon"]["total"] += 1
+                    self.gen_stats[gen]["pokemon"]["total"] += 1
                     if pred_p.name == true_p.name:
                         self.stats["pokemon"]["correct"] += 1
-                        _compare_pokemon_attrs(input_p, pred_p, true_p, self.stats)
+                        self.gen_stats[gen]["pokemon"]["correct"] += 1
+                        _compare_pokemon_attrs(
+                            input_p, pred_p, true_p, self.stats, self.gen_stats[gen]
+                        )
                 elif not name_was_masked:
-                    _compare_pokemon_attrs(input_p, pred_p, true_p, self.stats)
+                    _compare_pokemon_attrs(
+                        input_p, pred_p, true_p, self.stats, self.gen_stats[gen]
+                    )
 
     def compute_metrics(self) -> Dict[str, float]:
         """Compute final metrics from accumulated stats."""
         metrics = {}
+
+        # Overall semantic metrics
         for attr_name, counts in self.stats.items():
             if counts["total"] > 0:
-                metrics[f"semantic_{attr_name}_accuracy"] = (
-                    counts["correct"] / counts["total"]
-                )
-                metrics[f"semantic_{attr_name}_total"] = counts["total"]
+                metrics[f"{attr_name}_accuracy"] = counts["correct"] / counts["total"]
+                metrics[f"{attr_name}_total"] = counts["total"]
+
+        # Per-generation semantic metrics
+        for gen, gen_attr_stats in sorted(self.gen_stats.items()):
+            if gen == 0:
+                continue  # Skip unknown gen
+            for attr_name, counts in gen_attr_stats.items():
+                if counts["total"] > 0:
+                    metrics[f"gen{gen}_{attr_name}_accuracy"] = (
+                        counts["correct"] / counts["total"]
+                    )
+                    metrics[f"gen{gen}_{attr_name}_total"] = counts["total"]
+
         return metrics

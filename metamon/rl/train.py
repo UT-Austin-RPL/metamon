@@ -257,9 +257,14 @@ def create_offline_dataset(
 
     # 2. Self-Play Datasets
     if self_play_subsets is not None:
+        from metamon.data.download import SELF_PLAY_FORMATS
+
+        selfplay_formats = [f for f in formats if f in SELF_PLAY_FORMATS]
+        selfplay_dset_kwargs = {**dset_kwargs, "formats": selfplay_formats}
+
         for subset, weight in zip(self_play_subsets, self_play_weights):
             if weight > 0:
-                selfplay_dset = SelfPlayDataset(subset=subset, **dset_kwargs)
+                selfplay_dset = SelfPlayDataset(subset=subset, **selfplay_dset_kwargs)
                 datasets.append(
                     MetamonAMAGODataset(
                         dset_name=f"Self-Play ({subset})",
@@ -349,6 +354,8 @@ def create_offline_rl_trainer(
         "MetamonTstepEncoder.tokenizer": obs_space.tokenizer,
         "MetamonPerceiverTstepEncoder.tokenizer": obs_space.tokenizer,
         "MetamonGroupedTstepEncoder.tokenizer": obs_space.tokenizer,
+        # "amago.agent.MultiTaskAgent.use_multigamma" : False,
+        # "amago.agent.MultiTaskAgent.gamma" : 0.99,
     }
     if manual_gin_overrides is not None:
         config.update(manual_gin_overrides)
