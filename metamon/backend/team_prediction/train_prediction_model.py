@@ -1311,7 +1311,7 @@ if __name__ == "__main__":
         # dataset
         "train_data_dir": download_revealed_teams(),
         "val_ratio": 0.1,
-        "batch_size": 64,
+        "batch_size": 128,
         "num_workers": 4,
         "seed": 42,
         "gen_weights": gen_weights,
@@ -1330,7 +1330,7 @@ if __name__ == "__main__":
         "max_steps": 5_000_000,
         "log_train_every_steps": 100,
         "semantic_train_every_steps": 5_000,
-        "eval_every_steps": 10_000,
+        "eval_every_steps": 5_000,
         "max_eval_steps": 10,
         "patience": 500,
         "num_examples": 4,  # for wandb viz
@@ -1339,7 +1339,7 @@ if __name__ == "__main__":
         "mask_pokemon_prob": 0.15,
         "mask_attrs_prob": 0.4,
         "val_low_mask_attrs_prob": 0.1,
-        "name_only_prob": 0.05,  # coverage for iterative decoding intermediate states
+        "name_only_prob": 0.08,  # coverage for iterative decoding intermediate states
         "toy_names_only": False,
         "curriculum_mask": args.curriculum_mask,
         "curriculum_mask_warmup_steps": 100_000,
@@ -1351,7 +1351,7 @@ if __name__ == "__main__":
         "curriculum_dset": args.curriculum_dset,
         "curriculum_dset_start_pct": 10.0,
         "curriculum_dset_end_pct": 100.0,
-        "curriculum_dset_warmup_steps": 100_000,
+        "curriculum_dset_warmup_steps": 75_000,
     }
 
     if args.debug_overfit:
