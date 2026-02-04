@@ -903,6 +903,28 @@ class SmallG1BaselineSeed2(LocalPretrainedModel):
 
 
 @pretrained_model()
+class SmallG1BaselineOnline(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/mnt/nfs_client/jake/metamon_scratchpad/metamonv2_ckpts/",
+            model_name="v2_small_rl_baseline_online_only",
+            model_gin_config="smaller_multitaskagent.gin",
+            train_gin_config="alakazam3_online.gin",
+            default_checkpoint=26,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+
+@pretrained_model()
 class SmallG1BaselineNoMG(LocalPretrainedModel):
     def __init__(self):
         super().__init__(
@@ -922,6 +944,30 @@ class SmallG1BaselineNoMG(LocalPretrainedModel):
                 ),
                 "MultiTaskAgent.use_multigamma": False,
                 "MultiTaskAgent.gamma": 0.99,
+            },
+        )
+
+
+@pretrained_model()
+class SmallG1BaselineIL(LocalPretrainedModel):
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir="/mnt/nfs_client/jake/metamon_scratchpad/metamonv2_ckpts/",
+            model_name="v2_small_il_baseline",
+            model_gin_config="smaller_multitaskagent.gin",
+            train_gin_config="il.gin",
+            default_checkpoint=26,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("OpponentMoveObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonPerceiverTstepEncoder.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+                "MetamonAMAGOExperiment.learning_rate": 1.25e-4,
+                "MetamonAMAGOExperiment.lr_warmup_steps": 2000,
             },
         )
 
@@ -956,7 +1002,7 @@ class SmallG1BaselineGroupedBottomHeavy(LocalPretrainedModel):
             model_name="v2_small_rl_grouped_bottom_heavy",
             model_gin_config="smaller_multitaskagent_grouped_bottom_heavy.gin",
             train_gin_config="alakazam3.gin",
-            default_checkpoint=26,  # hasn't finished yet
+            default_checkpoint=26,
             action_space=get_action_space("DefaultActionSpace"),
             observation_space=get_observation_space("GroupedObservationSpace"),
             reward_function=get_reward_function("AggressiveShapedReward"),
