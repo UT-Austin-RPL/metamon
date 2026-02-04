@@ -30,8 +30,189 @@ from metamon.backend.team_prediction.prediction_metrics import (
     EvaluationAccumulator,
     SemanticMetricsAccumulator,
 )
-from metamon.backend.team_prediction.team import Team2Seq
+from metamon.backend.team_prediction.team import Team2Seq, TeamSet, PokemonSet
 from metamon.backend.team_prediction.iterative_decoder import IterativeStatsAccumulator
+
+
+def create_demo_teams() -> list[TeamSet]:
+    """
+    Create demonstration teams for iterative decoding visualization.
+    Each team has minimal information to show the full decoding process.
+    """
+    demos = []
+
+    # Gen 1: Only Gengar name visible
+    gen1_lead = PokemonSet(
+        name="Gengar",
+        gen=1,
+        ability=PokemonSet.NO_ABILITY,
+        item=PokemonSet.NO_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen1ou",
+            lead=gen1_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=1) for _ in range(5)],
+        )
+    )
+
+    # Gen 2: Only Cloyster name visible
+    gen2_lead = PokemonSet(
+        name="Cloyster",
+        gen=2,
+        ability=PokemonSet.NO_ABILITY,
+        item=PokemonSet.MISSING_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen2ou",
+            lead=gen2_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=2) for _ in range(5)],
+        )
+    )
+
+    # Gen 3: Only Tyranitar name visible
+    gen3_lead = PokemonSet(
+        name="Tyranitar",
+        gen=3,
+        ability=PokemonSet.MISSING_ABILITY,
+        item=PokemonSet.MISSING_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen3ou",
+            lead=gen3_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=3) for _ in range(5)],
+        )
+    )
+
+    # Gen 4: Only Metagross name visible
+    gen4_lead = PokemonSet(
+        name="Metagross",
+        gen=4,
+        ability=PokemonSet.MISSING_ABILITY,
+        item=PokemonSet.MISSING_ITEM,
+        nature=PokemonSet.NO_NATURE,
+        moves=[PokemonSet.MISSING_MOVE] * 4,
+        evs=[252] * 6,
+        ivs=[31] * 6,
+        tera_type=PokemonSet.NO_TERA_TYPE,
+    )
+    demos.append(
+        TeamSet(
+            format="gen4ou",
+            lead=gen4_lead,
+            reserve=[PokemonSet.missing_pokemon(gen=4) for _ in range(5)],
+        )
+    )
+
+    # Gen 9: All 6 names visible, everything else masked
+    gen9_names = [
+        "Gholdengo",
+        "Darkrai",
+        "Clefable",
+        "Ting-Lu",
+        "Dragonite",
+        "Pecharunt",
+    ]
+
+    def gen9_pokemon(name: str) -> PokemonSet:
+        return PokemonSet(
+            name=name,
+            gen=9,
+            ability=PokemonSet.MISSING_ABILITY,
+            item=PokemonSet.MISSING_ITEM,
+            nature=PokemonSet.NO_NATURE,
+            moves=[PokemonSet.MISSING_MOVE] * 4,
+            evs=[252] * 6,
+            ivs=[31] * 6,
+            tera_type=PokemonSet.MISSING_TERA_TYPE,
+        )
+
+    demos.append(
+        TeamSet(
+            format="gen9ou",
+            lead=gen9_pokemon(gen9_names[0]),
+            reserve=[gen9_pokemon(n) for n in gen9_names[1:]],
+        )
+    )
+
+    return demos
+
+
+def log_demo_decoding(
+    prediction_model: TeamPredictionModel,
+    vocab: Vocabulary,
+    step: int,
+):
+    """
+    Log iterative decoding demonstrations showing progression for each generation.
+    Highlights tokens committed at each iteration.
+    """
+    demos = create_demo_teams()
+
+    # tokens_per_iter has num_iterations + 1 entries: initial state + each iteration
+    num_cols = prediction_model.iterative_decoder.num_iterations + 1
+    columns = ["format", "input"] + [f"iter_{i}" for i in range(1, num_cols)]
+    table = wandb.Table(columns=columns)
+
+    for team in demos:
+        # Use the high-level predict API with stats tracking
+        _, stats = prediction_model.predict(team, return_stats=True)
+
+        tokens_per_iter = stats.tokens_per_iter  # List of tensors per iteration
+
+        # Build row with format and each iteration
+        row_data = [team.format]
+
+        prev_seq = None
+        for iter_idx, tokens in enumerate(tokens_per_iter):
+            seq = vocab.ints_to_pokeset_seq(tokens[0].tolist())  # batch dim 0
+
+            parts = []
+            for pos, tok_str in enumerate(seq):
+                tok_escaped = html.escape(tok_str)
+
+                # Check if this token was newly committed this iteration
+                was_committed_now = False
+                if prev_seq is not None:
+                    # Committed if: was $missing$ before, now is not
+                    if "$" in prev_seq[pos] and "$" not in tok_str:
+                        was_committed_now = True
+
+                if was_committed_now:
+                    # Highlight newly committed tokens in orange/bold
+                    parts.append(
+                        f'<span style="color: darkorange; font-weight: bold; background-color: #fff3e0">{tok_escaped}</span>'
+                    )
+                elif "$" in tok_str:
+                    # Still masked - gray
+                    parts.append(f'<span style="color: gray">{tok_escaped}</span>')
+                else:
+                    # Already visible from input or previous iterations
+                    parts.append(tok_escaped)
+
+            row_data.append(wandb.Html(" ".join(parts)))
+            prev_seq = seq
+
+        table.add_data(*row_data)
+
+    wandb.log({"demo_iterative_decoding": table}, step=step)
 
 
 @dataclass
@@ -987,6 +1168,10 @@ def train(config, use_wandb: bool = True):
                             table_name="val_clean_hard_iterative_process",
                         )
 
+                # Demo iterative decoding on fixed examples per generation
+                if config.eval_with_iterative:
+                    log_demo_decoding(prediction_model, vocab, step=global_step)
+
                 if val_results.iter_stats:
                     hist_dict = {}
                     for i, conf in enumerate(val_results.iter_stats["confidences"]):
@@ -1143,7 +1328,7 @@ if __name__ == "__main__":
         "max_steps": 5_000_000,
         "log_train_every_steps": 100,
         "semantic_train_every_steps": 5_000,
-        "eval_every_steps": 5_000,
+        "eval_every_steps": 10_000,
         "max_eval_steps": 10,
         "patience": 500,
         "num_examples": 4,  # for wandb viz
