@@ -64,7 +64,7 @@ def add_cli(parser):
         "--ckpt_interval",
         type=int,
         default=2,
-        help="Save checkpoints every N epochs. Set to 1 to save all epochs (useful for EMA experiments). Default is 2.",
+        help="Save checkpoints every N epochs. Set to 1 to save all epochs.",
     )
     parser.add_argument(
         "--train_gin_config",
@@ -219,8 +219,7 @@ if __name__ == "__main__":
         start_checkpoint,
         is_accelerate_state=False,
     )
-    # Update reference policy for dynamic damping (if enabled)
-    if hasattr(experiment, 'update_reference_policy'):
+    if hasattr(experiment, "update_reference_policy"):
         experiment.update_reference_policy()
     # finetune!
     experiment.learn()
