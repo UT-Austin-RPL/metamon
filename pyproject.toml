@@ -34,7 +34,9 @@ dependencies = [
   "huggingface_hub",
   "datasets",
   "ratarmountcore",
-  "poke-env @ git+https://github.com/UT-Austin-RPL/poke-env.git"
+  "gradio",
+  "typer==0.12.5",
+  "poke-env @ git+https://github.com/UT-Austin-RPL/poke-env.git@cde9ac99cea5783e3ac289602e3d3f60dd06fa4d"
 ]
 
 [project.urls]
@@ -43,4 +45,3 @@ Repository = "https://github.com/UT-Austin-RPL/metamon"
 
 [tool.setuptools]
 packages = ["metamon"]
-

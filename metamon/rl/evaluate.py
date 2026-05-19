@@ -16,6 +16,7 @@ from metamon.rl.metamon_to_amago import (
     make_local_ladder_env,
     make_pokeagent_ladder_env,
 )
+from metamon.rl.showdown_preview import run_showdown_with_preview
 
 
 HEURISTIC_COMPOSITE_BASELINES = [
@@ -92,6 +93,10 @@ def _pretrained_on_ladder(
     log_to_wandb: bool,
     action_temperature: float = 1.0,
     team_preview_model: Optional[TeamPreviewModel] = None,
+    step_preview: bool = False,
+    step_preview_host: str = "127.0.0.1",
+    step_preview_port: int = 7860,
+    step_preview_share: bool = False,
     **ladder_kwargs,
 ) -> Dict[str, Any]:
     """Helper function for ladder-based evaluation."""
@@ -111,6 +116,18 @@ def _pretrained_on_ladder(
         team_preview_model=team_preview_model,
         **ladder_kwargs,
     )
+
+    if step_preview:
+        return run_showdown_with_preview(
+            experiment=agent,
+            make_env=make_env,
+            action_space=pretrained_model.action_space,
+            timesteps=total_battles * 1000,
+            episodes=total_battles,
+            server_name=step_preview_host,
+            server_port=step_preview_port,
+            share=step_preview_share,
+        )
 
     results = agent.evaluate_test(
         [make_env],
@@ -134,6 +151,10 @@ def pretrained_vs_local_ladder(
     save_team_results_to: Optional[str] = None,
     log_to_wandb: bool = False,
     team_preview_model: Optional[TeamPreviewModel] = None,
+    step_preview: bool = False,
+    step_preview_host: str = "127.0.0.1",
+    step_preview_port: int = 7860,
+    step_preview_share: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate a pretrained model on the ladder of your Local Showdown server.
 
@@ -162,6 +183,10 @@ def pretrained_vs_local_ladder(
         battle_format=battle_format,
         save_trajectories_to=save_trajectories_to,
         save_team_results_to=save_team_results_to,
+        step_preview=step_preview,
+        step_preview_host=step_preview_host,
+        step_preview_port=step_preview_port,
+        step_preview_share=step_preview_share,
     )
 
 
@@ -180,6 +205,10 @@ def pretrained_vs_pokeagent_ladder(
     save_team_results_to: Optional[str] = None,
     log_to_wandb: bool = False,
     team_preview_model: Optional[TeamPreviewModel] = None,
+    step_preview: bool = False,
+    step_preview_host: str = "127.0.0.1",
+    step_preview_port: int = 7860,
+    step_preview_share: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate a pretrained model on the PokéAgent Challenge ladder.
 
@@ -209,6 +238,10 @@ def pretrained_vs_pokeagent_ladder(
         battle_format=battle_format,
         save_trajectories_to=save_trajectories_to,
         save_team_results_to=save_team_results_to,
+        step_preview=step_preview,
+        step_preview_host=step_preview_host,
+        step_preview_port=step_preview_port,
+        step_preview_share=step_preview_share,
     )
 
 
@@ -254,9 +287,18 @@ def _get_default_eval(args, base_eval_kwargs):
 
 
 def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
+    if args.custom_checkpoint_path is None and args.agent is None:
+        raise ValueError("Must provide either --agent or --custom_checkpoint_path")
+    if args.custom_checkpoint_path is not None and args.agent is None:
+        raise ValueError(
+            "When using --custom_checkpoint_path, also specify --agent to indicate which base model config to use"
+        )
+
     pretrained_model = get_pretrained_model(args.agent)
     all_results = collections.defaultdict(list)
     backend = args.battle_backend or pretrained_model.battle_backend
+    if args.step and args.eval_type not in {"ladder", "pokeagent"}:
+        raise ValueError("--step is only supported with --eval_type ladder or pokeagent")
 
     # Load team preview model if checkpoint provided
     team_preview_model = None
@@ -295,12 +337,17 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
                 battle_format, args.team_set, set_type=team_set_type
             )
             for checkpoint in args.checkpoints:
+                if args.custom_checkpoint_path:
+                    checkpoint_to_use = args.custom_checkpoint_path
+                else:
+                    checkpoint_to_use = checkpoint
+
                 eval_kwargs = {
                     "pretrained_model": pretrained_model,
                     "battle_format": battle_format,
                     "team_set": player_team_set,
                     "total_battles": args.total_battles,
-                    "checkpoint": checkpoint,
+                    "checkpoint": checkpoint_to_use,
                     "battle_backend": backend,
                     "save_trajectories_to": args.save_trajectories_to,
                     "action_temperature": args.temperature,
@@ -309,6 +356,15 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
                     "team_preview_model": team_preview_model,
                 }
                 eval_function = _get_default_eval(args, eval_kwargs)
+                if args.step:
+                    eval_kwargs.update(
+                        {
+                            "step_preview": True,
+                            "step_preview_host": args.step_ui_host,
+                            "step_preview_port": args.step_ui_port,
+                            "step_preview_share": args.step_ui_share,
+                        }
+                    )
                 results = eval_function(**eval_kwargs)
                 print(json.dumps(results, indent=4, sort_keys=True))
                 all_results[battle_format].append(results)
@@ -318,9 +374,15 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
 def add_cli(parser):
     parser.add_argument(
         "--agent",
-        required=True,
+        required=False,
         choices=get_pretrained_model_names(),
-        help="Choose a pretrained model to evaluate.",
+        help="Choose a pretrained model to evaluate. Required unless using --custom_checkpoint_path.",
+    )
+    parser.add_argument(
+        "--custom_checkpoint_path",
+        type=str,
+        default=None,
+        help="Path to a custom checkpoint file (.pt). When provided, --agent specifies which base model config to use.",
     )
     parser.add_argument(
         "--eval_type",
@@ -442,6 +504,30 @@ def add_cli(parser):
             "If set, use argmax for team preview lead selection instead of sampling from the distribution. "
             "Only applies when --team_preview_checkpoint is provided."
         ),
+    )
+    parser.add_argument(
+        "--step",
+        action="store_true",
+        help=(
+            "Run Showdown ladder evaluation through a single-agent Gradio AI preview UI. "
+            "Shows the current state, full policy distribution, and value-head estimate."
+        ),
+    )
+    parser.add_argument(
+        "--step_ui_host",
+        default="127.0.0.1",
+        help="Host/interface for the Gradio AI preview UI used by --step.",
+    )
+    parser.add_argument(
+        "--step_ui_port",
+        type=int,
+        default=7860,
+        help="Port for the Gradio AI preview UI used by --step.",
+    )
+    parser.add_argument(
+        "--step_ui_share",
+        action="store_true",
+        help="Create a public Gradio share link for the --step preview UI.",
     )
     return parser
 

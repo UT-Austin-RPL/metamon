@@ -11,6 +11,7 @@ def red_warning(msg: str):
 
 
 import huggingface_hub
+import gin
 import torch
 import amago
 
@@ -155,13 +156,7 @@ class PretrainedModel:
         os.makedirs(self.hf_cache_dir, exist_ok=True)
 
     @property
-    def base_config(self) -> dict:
-        """
-        Override to set one-off changes to the gin config files
-
-        By default, adds ability to fallback to vanilla attention if flash attention is not available,
-        sets the tokenizer, and enbables faster initialization.
-        """
+    def _attention_type(self):
         has_gpu = torch.cuda.is_available()
         try:
             import flash_attn
@@ -174,6 +169,17 @@ class PretrainedModel:
         else:
             attn_type = amago.nets.transformer.VanillaAttention
             red_warning("Warning: Using unofficial VanillaAttention implementation")
+        return attn_type
+
+    @property
+    def base_config(self) -> dict:
+        """
+        Override to set one-off changes to the gin config files
+
+        By default, adds ability to fallback to vanilla attention if flash attention is not available,
+        sets the tokenizer, and enbables faster initialization.
+        """
+        attn_type = self._attention_type
         config = {
             "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": attn_type,
             "MetamonTstepEncoder.tokenizer": self.tokenizer,
@@ -185,7 +191,9 @@ class PretrainedModel:
             config.update(self.gin_overrides)
         return config
 
-    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+    def get_path_to_checkpoint(self, checkpoint: int | str) -> str:
+        if isinstance(checkpoint, str):
+            return checkpoint
         # Download checkpoint from HF Hub
         checkpoint_path = huggingface_hub.hf_hub_download(
             repo_id=self.HF_REPO_ID,
@@ -196,7 +204,7 @@ class PretrainedModel:
 
     def initialize_agent(
         self,
-        checkpoint: Optional[int] = None,
+        checkpoint: Optional[int | str] = None,
         log: bool = False,
         action_temperature: float = 1.0,
     ) -> amago.Experiment:
@@ -205,6 +213,12 @@ class PretrainedModel:
             self.base_config | {"MetamonDiscrete.temperature": action_temperature},
             [self.model_gin_config_path, self.train_gin_config_path],
             finalize=False,
+        )
+        # AMAGO parses gin files after binding Python overrides, so model config files
+        # can reintroduce FlashAttention. Re-bind after parsing to preserve the fallback.
+        gin.bind_parameter(
+            "amago.nets.traj_encoders.TformerTrajEncoder.attention_type",
+            self._attention_type,
         )
         checkpoint = checkpoint if checkpoint is not None else self.default_checkpoint
         ckpt_path = self.get_path_to_checkpoint(checkpoint)
@@ -219,9 +233,8 @@ class PretrainedModel:
         )
         # starting the experiment will build the initial model
         experiment.start()
-        if checkpoint > 0:
-            # replace the weights with the pretrained checkpoint
-            experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
+        # replace the weights with the requested checkpoint
+        experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
         return experiment
 
 
@@ -243,7 +256,9 @@ class LocalPretrainedModel(PretrainedModel):
                 f"Checkpoint directory {self.local_ckpt_dir} was not found. Check the amago_ckpt_dir and model_name arguments."
             )
 
-    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+    def get_path_to_checkpoint(self, checkpoint: int | str) -> str:
+        if isinstance(checkpoint, str):
+            return checkpoint
         return os.path.join(
             self.local_ckpt_dir,
             "policy_weights",
