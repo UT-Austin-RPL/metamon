@@ -183,6 +183,8 @@ class PretrainedModel:
         config = {
             "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": attn_type,
             "MetamonTstepEncoder.tokenizer": self.tokenizer,
+            "MetamonPerceiverTstepEncoder.tokenizer": self.tokenizer,
+            "MetamonPokemonSlotTstepEncoder.tokenizer": self.tokenizer,
             # skip cpu-intensive init, because we're going to be replacing the weights
             # with a checkpoint anyway....
             "amago.nets.transformer.SigmaReparam.fast_init": True,
