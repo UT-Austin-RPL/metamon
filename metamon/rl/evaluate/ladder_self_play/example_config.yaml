@@ -1,0 +1,24 @@
+# Ladder self-play example: paper Synthetic line + PokéAgent Kadabra/Minikazam/Alakazam.
+defaults:
+  team_set: competitive
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0, 1.25, 1.5, 2.0]
+  num_agents: 1
+
+agents:
+  SynRLV2:
+    model_name: SyntheticRLV2
+    num_agents: 2
+
+  Kadabra:
+    model_name: Kadabra
+    num_agents: 2
+
+  Minikazam:
+    model_name: Minikazam
+
+  Alakazam:
+    model_name: Alakazam
+    checkpoints: [null, 8]
+    num_agents: 2

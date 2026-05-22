@@ -8,9 +8,9 @@ from collections import defaultdict
 from huggingface_hub import hf_hub_download
 
 import metamon
-from metamon import SUPPORTED_BATTLE_FORMATS, METAMON_CACHE_DIR
+from metamon.config import SUPPORTED_BATTLE_FORMATS, METAMON_CACHE_DIR
 
-SELF_PLAY_SUBSETS = ["pac-base", "pac-exploratory"]
+SELF_PLAY_SUBSETS = ["pac-base", "pac-exploratory", "pac-tauros"]
 SELF_PLAY_FORMATS = [
     "gen1ou",
     "gen2ou",
@@ -18,16 +18,69 @@ SELF_PLAY_FORMATS = [
     "gen4ou",
     "gen9ou",
 ]  # OU formats available for self-play
+SELF_PLAY_SUBSET_FORMATS = {
+    "pac-base": SELF_PLAY_FORMATS,
+    "pac-exploratory": SELF_PLAY_FORMATS,
+    "pac-tauros": ["gen1ou"],
+}
+
+# Replay-derived team sets on HF are published for OU tiers only (gen1-4ou, gen9ou).
+REPLAY_DERIVED_OU_ONLY_TEAM_SETS = frozenset(
+    {
+        "paper_replays",
+        "modern_replays",
+        "modern_replays_v2",
+        "gl_05_26",
+        "hl_05_26",
+    }
+)
+
+
+def get_self_play_formats(subset: str) -> list[str]:
+    """Formats published on HF for a self-play subset."""
+    if subset not in SELF_PLAY_SUBSET_FORMATS:
+        raise ValueError(
+            f"Invalid subset: {subset}. Must be one of {list(SELF_PLAY_SUBSET_FORMATS)}"
+        )
+    return SELF_PLAY_SUBSET_FORMATS[subset]
+
+
+def iter_self_play_downloads(
+    subsets: list[str] | None = None,
+    formats: list[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Resolve (subset, format) pairs to download for self-play data."""
+    selected_subsets = subsets or SELF_PLAY_SUBSETS
+    unknown = [subset for subset in selected_subsets if subset not in SELF_PLAY_SUBSETS]
+    if unknown:
+        raise ValueError(
+            f"Invalid subset(s): {unknown}. Must be one of {SELF_PLAY_SUBSETS}"
+        )
+
+    downloads: list[tuple[str, str]] = []
+    for subset in selected_subsets:
+        available_formats = get_self_play_formats(subset)
+        requested_formats = formats or available_formats
+        for battle_format in requested_formats:
+            if battle_format not in available_formats:
+                print(
+                    f"Skipping {subset}/{battle_format}: "
+                    f"not published for this subset (available: {available_formats})"
+                )
+                continue
+            downloads.append((subset, battle_format))
+    return downloads
+
 
 if METAMON_CACHE_DIR is not None:
     VERSION_REFERENCE_PATH = os.path.join(METAMON_CACHE_DIR, "version_reference.json")
 else:
     VERSION_REFERENCE_PATH = None
 
-LATEST_RAW_REPLAY_REVISION = "v4"
-LATEST_PARSED_REPLAY_REVISION = "v4"
-LATEST_TEAMS_REVISION = "v4"
-LATEST_USAGE_STATS_REVISION = "v2"
+LATEST_RAW_REPLAY_REVISION = "v6"
+LATEST_PARSED_REPLAY_REVISION = "v6"
+LATEST_TEAMS_REVISION = "v5"
+LATEST_USAGE_STATS_REVISION = "v5"
 
 
 def _update_version_reference(key: str, name: str, version: str):
@@ -212,7 +265,7 @@ def download_self_play_data(
     """Download self-play data from the metamon-parsed-pile dataset.
 
     Args:
-        subset: The subset to download. Options: "pac-base", "pac-exploratory"
+        subset: The subset to download. Options: "pac-base", "pac-exploratory", "pac-tauros"
         battle_format: Showdown battle format (e.g. "gen1ou")
         version: Version/revision of the dataset to download. Defaults to "main".
         force_download: If True, download the dataset even if a previous version
@@ -399,8 +452,11 @@ Examples:
     # Download (anonymized) Showdown replay logs (all formats)
     python -m metamon.data.download raw-replays
 
-    # Download self-play datasets (pac-base and pac-exploratory)
+    # Download self-play datasets (pac-base, pac-exploratory, pac-tauros)
     python -m metamon.data.download self-play --formats gen1ou gen9ou
+
+    # Download only pac-tauros (defaults to gen1ou for that subset)
+    python -m metamon.data.download self-play --subsets pac-tauros
 
 Note: Requires METAMON_CACHE_DIR environment variable to be set.
 
@@ -429,7 +485,7 @@ For current dataset versions, see `get_active_dataset_versions()` or run:
 Dataset to download:
     raw-replays: Unprocessed Showdown replays (stripped of usernames/chat)
     parsed-replays: RL-compatible version of replays with reconstructed player actions
-    self-play: Self-play battle data (pac-base and pac-exploratory subsets)
+    self-play: Self-play battle data (pac-base, pac-exploratory, pac-tauros subsets)
     revealed-teams: Teams that were revealed during battles
     replay-stats: Statistics generated from revealed teams. Used to predict team sets.
     teams: Various team sets (competitive, paper_variety, paper_replays)
@@ -443,10 +499,24 @@ Dataset to download:
         help="""
 Battle formats to download. Defaults depend on dataset type:
   - parsed-replays, teams, usage-stats: All Gen 1-4 formats (OU, UU, NU, Ubers) + Gen 9 OU
-  - self-play: gen1ou, gen2ou, gen3ou, gen4ou, gen9ou (only OU available)
+  - self-play: gen1ou, gen2ou, gen3ou, gen4ou, gen9ou (only OU available; defaults depend on subset)
 Examples:
     --formats gen1ou gen2ou    # Only Gen 1-2 OU
     --formats gen3uu gen4uu    # Only Gen 3-4 UU
+""",
+    )
+    parser.add_argument(
+        "--subsets",
+        nargs="+",
+        type=str,
+        choices=SELF_PLAY_SUBSETS,
+        default=None,
+        help="""
+Self-play subsets to download. Defaults to all subsets (pac-base, pac-exploratory, pac-tauros).
+When --formats is omitted, each subset uses its published formats (e.g. pac-tauros -> gen1ou only).
+Examples:
+    --subsets pac-tauros
+    --subsets pac-base pac-exploratory --formats gen1ou
 """,
     )
     parser.add_argument(
@@ -456,10 +526,10 @@ Examples:
         help="""
 Specific version to download. Defaults to latest version.
 Available versions:
-    raw-replays: v1, v2, v3, v4
-    parsed-replays: v0 (deprecated) v1, v2, v3-beta, v3, v4
-    teams: v0, v1, v2, v3, v4
-    usage-stats: v0, v1, v2
+    raw-replays: v1, v2, v3, v4, v5, v6
+    parsed-replays: v0 (deprecated) v1, v2, v3-beta, v3, v4, v5, v6
+    teams: v0, v1, v2, v3, v4, v5
+    usage-stats: v0, v1, v2, v3, v4, v5
     
     The huggingface READMEs have changelogs.
 """,
@@ -476,14 +546,20 @@ Available versions:
             download_parsed_replays(format, version=version, force_download=True)
     elif args.dataset == "self-play":
         version = args.version or "main"
-        formats = args.formats or SELF_PLAY_FORMATS
-        print(f"Downloading self-play data for formats: {formats}")
-        for subset in SELF_PLAY_SUBSETS:
-            print(f"\nDownloading {subset}...")
-            for format in formats:
-                download_self_play_data(
-                    subset, format, version=version, force_download=True
-                )
+        downloads = iter_self_play_downloads(
+            subsets=args.subsets,
+            formats=args.formats,
+        )
+        if not downloads:
+            raise ValueError(
+                "No self-play downloads matched the requested subsets/formats"
+            )
+        print(f"Downloading self-play data: {downloads}")
+        for subset, battle_format in downloads:
+            print(f"\nDownloading {subset}/{battle_format}...")
+            download_self_play_data(
+                subset, battle_format, version=version, force_download=True
+            )
     elif args.dataset == "revealed-teams":
         version = args.version or LATEST_PARSED_REPLAY_REVISION
         download_revealed_teams(version=version, force_download=True)
@@ -502,10 +578,11 @@ Available versions:
         set_names = ["competitive", "paper_variety", "paper_replays"]
         if version > "v0":
             set_names += ["modern_replays", "modern_replays_v2"]
+        if version > "v4":
+            set_names += ["gl_05_26", "hl_05_26"]
         for set_name in set_names:
             for format in formats:
-                if "ou" not in format and "replays" in set_name:
-                    # only OU tiers have replay sets currently
+                if "ou" not in format and set_name in REPLAY_DERIVED_OU_ONLY_TEAM_SETS:
                     continue
                 if "gen9" in format and "paper" in set_name:
                     # gen 9 was not supported

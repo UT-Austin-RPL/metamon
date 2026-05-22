@@ -24,6 +24,8 @@ def fill_missing_team_info(
     date_played: datetime.date,
     poke_list: List[Pokemon],
     team_predictor: TeamPredictor,
+    rating: Optional[int | str] = None,
+    gameid: Optional[str] = None,
 ) -> List[Pokemon]:
     """
     Team prediction works by:
@@ -45,7 +47,9 @@ def fill_missing_team_info(
 
     # 2. Predict the team
     try:
-        predicted_team = team_predictor.predict(revealed_team, date=date_played)
+        predicted_team = team_predictor.predict(
+            revealed_team, date=date_played, rating=rating, gameid=gameid
+        )
     except Exception as e:
         raise BackwardException(f"Error predicting team: {e}")
     if not revealed_team.is_consistent_with(predicted_team):
@@ -306,12 +310,16 @@ def add_filled_final_turn(
         date_played=date_played,
         poke_list=replay[-1].pokemon_1,
         team_predictor=team_predictor,
+        rating=replay.ratings[0],
+        gameid=replay.gameid,
     )
     filled_turn.pokemon_2, revealed_team_2 = fill_missing_team_info(
         replay.format,
         date_played=date_played,
         poke_list=replay[-1].pokemon_2,
         team_predictor=team_predictor,
+        rating=replay.ratings[1],
+        gameid=replay.gameid,
     )
     replay.turnlist.append(filled_turn)
     return replay, (revealed_team_1, revealed_team_2)

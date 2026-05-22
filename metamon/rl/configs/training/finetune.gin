@@ -1,0 +1,45 @@
+import amago.agent
+import metamon.rl.custom_agent
+
+MetamonAMAGOExperiment.agent_type = @custom_agent.MetamonFinetuneAgent
+
+agent.Agent.reward_multiplier = 10.
+agent.MultiTaskAgent.reward_multiplier = 10.
+
+agent.Agent.tau = .008
+agent.MultiTaskAgent.tau = .008
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 4
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 4
+
+agent.Agent.online_coeff = 0.0
+agent.MultiTaskAgent.online_coeff = 0.0
+agent.Agent.offline_coeff = 1.0
+agent.MultiTaskAgent.offline_coeff = 1.0
+
+agent.Agent.fbc_filter_func = @custom_agent.ISAdvantageFilter()
+agent.MultiTaskAgent.fbc_filter_func = @custom_agent.ISAdvantageFilter()
+custom_agent.ISAdvantageFilter.beta = 3.0
+custom_agent.ISAdvantageFilter.clip_weights_low = 1e-6
+custom_agent.ISAdvantageFilter.clip_weights_high = 100.
+custom_agent.ISAdvantageFilter.seq_p_low = 0.4
+custom_agent.ISAdvantageFilter.seq_p_full = 0.8
+custom_agent.ISAdvantageFilter.seq_floor = 0.05
+custom_agent.ISAdvantageFilter.seq_floor_warmup_steps = 4000
+custom_agent.ISAdvantageFilter.seq_buffer_size = 10000
+custom_agent.ISAdvantageFilter.seq_warmup = 200
+
+custom_agent.MetamonFinetuneAgent.bc_coeff = 1.0
+custom_agent.MetamonFinetuneAgent.tortoise_tau = 0.005
+custom_agent.MetamonFinetuneAgent.use_tortoise_for_inference = False
+custom_agent.MetamonFinetuneAgent.use_is_correction = False
+
+MetamonAMAGOExperiment.l2_coeff = 1e-4
+MetamonAMAGOExperiment.learning_rate = 8e-5
+MetamonAMAGOExperiment.grad_clip = 1.5
+agent.Agent.critic_loss_weight = 13.5
+agent.MultiTaskAgent.critic_loss_weight = 13.5
+MetamonAMAGOExperiment.lr_warmup_steps = 5000

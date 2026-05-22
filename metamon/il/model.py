@@ -93,7 +93,7 @@ class MultiModalEmbedding(nn.Module):
     ) -> torch.Tensor:
         text_emb = F.leaky_relu(self.dropout(self.text_emb(text_emb)))
         num_emb = F.leaky_relu(self.dropout(self.num_emb(numerical_features)))
-        num_emb = rearrange(num_emb, "b l (l2 d) -> b l l2 d", l2=self.numerical_tokens)
+        num_emb = num_emb.unflatten(-1, (self.numerical_tokens, -1))
         seq = torch.cat((text_emb, num_emb), dim=-2)
         return seq
 
@@ -206,13 +206,15 @@ class PerceiverEncoder(nn.Module):
         )
         self.output_dim = latent_tokens * d_model
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, flatten: bool = True) -> torch.Tensor:
         B, L, D = x.shape
         latents = self.latents.unsqueeze(0).expand(B, -1, -1)
         for cross, self_attn in zip(self.cross_blocks, self.self_blocks):
             latents = cross(latents, x)
             latents = self_attn(latents)
-        return rearrange(latents, "b n d -> b 1 (n d)")
+        if flatten:
+            return rearrange(latents, "b n d -> b 1 (n d)")
+        return latents  # (B, latent_tokens, d_model)
 
 
 class TimestepTransformer(nn.Module):

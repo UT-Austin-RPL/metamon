@@ -389,7 +389,7 @@ if __name__ == "__main__":
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument(
         "--formats",
-        default=metamon.SUPPORTED_BATTLE_FORMATS,
+        default=metamon.config.SUPPORTED_BATTLE_FORMATS,
         nargs="+",
         help="Filter the dataset directory by pokemon format (e.g., `--formats gen1ou gen2nu gen3ou`",
     )

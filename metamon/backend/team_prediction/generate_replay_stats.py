@@ -23,7 +23,11 @@ def load_replay_teams(
     pokemon_sets = defaultdict(list)
     team_rosters = []
 
-    dataset = TeamDataset(revealed_team_dir, format, max_teams=max_teams)
+    dataset = TeamDataset(
+        format=format,
+        max_teams=max_teams,
+        team_file_dir=revealed_team_dir,
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=16,

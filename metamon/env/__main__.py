@@ -12,7 +12,6 @@ from metamon.interface import (
 from metamon.tokenizer import get_tokenizer
 from metamon.env.wrappers import get_metamon_teams, BattleAgainstBaseline
 
-
 if __name__ == "__main__":
 
     parser = ArgumentParser()
@@ -54,7 +53,6 @@ if __name__ == "__main__":
             obs, reward, terminated, truncated, info = env.step(
                 env.action_space.sample()
             )
-            legal_actions = info["legal_actions"]
             return_ += reward
             done = terminated or truncated
             timesteps += 1

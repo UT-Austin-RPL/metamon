@@ -17,14 +17,21 @@ from metamon.backend.team_prediction.usage_stats.legacy_team_builder import (
 )
 from metamon.backend.team_prediction.usage_stats import (
     PreloadedSmogonUsageStats,
+    DEFAULT_USAGE_RANK,
+    resolve_usage_rank,
 )
 from metamon.backend.replay_parser.str_parsing import pokemon_name
 from metamon.backend.team_prediction.team import TeamSet, PokemonSet, Roster
 
 
 class TeamPredictor(ABC):
-    def __init__(self, replay_stats_dir: Optional[str] = None):
+    def __init__(
+        self,
+        replay_stats_dir: Optional[str] = None,
+        usage_stats_rank: int = DEFAULT_USAGE_RANK,
+    ):
         self.replay_stats_dir = replay_stats_dir
+        self.usage_stats_rank = usage_stats_rank
 
     def bin_usage_stats_dates(
         self, date: datetime.date
@@ -44,26 +51,70 @@ class TeamPredictor(ABC):
             end_date = datetime.date(year, 12, 1)
         return start_date, end_date
 
-    def get_legacy_team_builder(self, format: str, date: datetime.date) -> TeamBuilder:
+    def get_legacy_team_builder(
+        self,
+        format: str,
+        date: datetime.date,
+        rating: Optional[int | str] = None,
+        gameid: Optional[str] = None,
+    ) -> TeamBuilder:
+        """
+        Build a TeamBuilder using two independent axes:
+
+        - **Time window** (from battle date): ``bin_usage_stats_dates`` picks the
+          half-year bin containing the battle, then monthly JSON files in that
+          range are merged (e.g. Feb 2026 battle -> Jan 1 .. Jun 1 2026).
+        - **Skill tier** (from player rating/gameid): ``resolve_usage_rank`` picks
+          the Smogon Glicko cutoff subdir (0, 1500, 1630, 1760, ...).
+
+        Final path shape: ``movesets_data/gen{N}/{tier}/{rank}/{YYYY-MM}.json``.
+        Per-Pokemon field gaps may still be filled from lower ranks or all_tiers
+        at lookup time inside ``PreloadedSmogonUsageStats._inclusive_search``;
+        that is a separate completeness fallback, not a substitute for rank
+        or date selection.
+        """
         start_date, end_date = self.bin_usage_stats_dates(date)
+        if rating is not None or gameid is not None:
+            rank = resolve_usage_rank(format, rating=rating, gameid=gameid)
+        else:
+            rank = self.usage_stats_rank
         return TeamBuilder(
             format=format,
             start_date=start_date,
             end_date=end_date,
+            rank=rank,
         )
 
     def get_usage_stats(
-        self, format: str, date: datetime.date
+        self,
+        format: str,
+        date: datetime.date,
+        rating: Optional[int | str] = None,
+        gameid: Optional[str] = None,
     ) -> PreloadedSmogonUsageStats:
         # route this through the same binning method as the TeamBuilder
-        return self.get_legacy_team_builder(format, date).stat
+        return self.get_legacy_team_builder(
+            format, date, rating=rating, gameid=gameid
+        ).stat
 
-    def predict(self, team: TeamSet, date: datetime.date) -> TeamSet:
+    def predict(
+        self,
+        team: TeamSet,
+        date: datetime.date,
+        rating: Optional[int | str] = None,
+        gameid: Optional[str] = None,
+    ) -> TeamSet:
         copy_team = copy.deepcopy(team)
-        return self.fill_team(copy_team, date=date)
+        return self.fill_team(copy_team, date=date, rating=rating, gameid=gameid)
 
     @abstractmethod
-    def fill_team(self, team: TeamSet, date: datetime.date):
+    def fill_team(
+        self,
+        team: TeamSet,
+        date: datetime.date,
+        rating: Optional[int | str] = None,
+        gameid: Optional[str] = None,
+    ):
         raise NotImplementedError
 
 
@@ -77,8 +128,16 @@ class NaiveUsagePredictor(TeamPredictor):
     the generated team.
     """
 
-    def fill_team(self, team: TeamSet, date: datetime.date):
-        team_builder = self.get_legacy_team_builder(team.format, date)
+    def fill_team(
+        self,
+        team: TeamSet,
+        date: datetime.date,
+        rating: Optional[int | str] = None,
+        gameid: Optional[str] = None,
+    ):
+        team_builder = self.get_legacy_team_builder(
+            team.format, date, rating=rating, gameid=gameid
+        )
         gen = int(team.format.split("gen")[1][0])
         pokemon = [team.lead] + team.reserve
         # use legacy team builder to generate a team of 6 Pokémon based on the ones we already
@@ -148,7 +207,7 @@ class NaiveUsagePredictor(TeamPredictor):
         return final_team
 
 
-@lru_cache(maxsize=len(metamon.SUPPORTED_BATTLE_FORMATS))
+@lru_cache(maxsize=len(metamon.config.SUPPORTED_BATTLE_FORMATS))
 def load_replay_stats_by_format(format: str, replay_stats_dir: Optional[str] = None):
     """
     This loads large json files that are created by the `generate_replay_stats` script.
@@ -209,9 +268,13 @@ class ReplayPredictor(NaiveUsagePredictor):
         top_k_scored_teams: int = 10,
         top_k_scored_movesets: int = 3,
         replay_stats_dir: Optional[str] = None,
+        usage_stats_rank: int = DEFAULT_USAGE_RANK,
     ):
         assert not isinstance(top_k_consistent_teams, str)
-        super().__init__(replay_stats_dir)
+        super().__init__(
+            replay_stats_dir,
+            usage_stats_rank=usage_stats_rank,
+        )
         self.stat_format = None
         self.top_k_consistent_teams = top_k_consistent_teams
         self.top_k_consistent_movesets = top_k_consistent_movesets
@@ -407,12 +470,20 @@ class ReplayPredictor(NaiveUsagePredictor):
                     pokemon.name = extra
                     break
 
-    def fill_team(self, team: TeamSet, date: datetime.date) -> TeamSet:
+    def fill_team(
+        self,
+        team: TeamSet,
+        date: datetime.date,
+        rating: Optional[int | str] = None,
+        gameid: Optional[str] = None,
+    ) -> TeamSet:
         if team.format not in {"gen1ou", "gen2ou", "gen3ou", "gen4ou"}:
             # we only trust our stats for the big OU formats for now
-            return super().fill_team(team, date=date)
+            return super().fill_team(team, date=date, rating=rating, gameid=gameid)
 
-        self.smogon_stat = self.get_usage_stats(team.format, date)
+        self.smogon_stat = self.get_usage_stats(
+            team.format, date, rating=rating, gameid=gameid
+        )
 
         if self.stat_format != team.format:
             # load the stats on a format change
@@ -465,7 +536,7 @@ class ReplayPredictor(NaiveUsagePredictor):
                 pokemon.fill_from_PokemonSet(new_pokemon)
 
         # fall back to old method for any remaining info
-        return super().fill_team(team, date=date)
+        return super().fill_team(team, date=date, rating=rating, gameid=gameid)
 
 
 ALL_PREDICTORS = {

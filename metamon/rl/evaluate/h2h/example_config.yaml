@@ -1,0 +1,22 @@
+# Head-to-head example: paper policies (SmallRL, SyntheticRLV2) vs PokéAgent line (Kadabra, Alakazam).
+battle_format: gen1ou
+battles_per_matchup: 50
+
+defaults:
+  team_set: competitive
+  battle_backend: metamon
+  checkpoint: null
+  temperature: 1.0
+
+policies:
+  SmallRL: {}
+
+  SyntheticRLV2:
+    checkpoint: 40
+
+  Kadabra: {}
+
+  Alakazam:
+    variants:
+      - { checkpoint: null, team_set: competitive }
+      - { checkpoint: 8, team_set: modern_replays_v2 }

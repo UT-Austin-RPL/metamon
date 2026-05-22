@@ -7,7 +7,10 @@ from termcolor import colored
 import numpy as np
 
 import metamon
-from metamon.backend.team_prediction.usage_stats import get_usage_stats
+from metamon.backend.team_prediction.usage_stats import (
+    get_usage_stats,
+    DEFAULT_USAGE_RANK,
+)
 from metamon.backend.team_prediction.usage_stats.constants import (
     HIDDEN_POWER_IVS,
     HIDDEN_POWER_DVS,
@@ -43,12 +46,18 @@ class TeamBuilder:
         format: str,
         start_date: datetime.date,
         end_date: datetime.date,
+        rank: int = DEFAULT_USAGE_RANK,
         verbose: bool = False,
         remove_banned: bool = False,
     ):
         self.format = format
         self.gen = metamon.backend.format_to_gen(format)
-        self.stat = get_usage_stats(format, start_date, end_date)
+        self.stat = get_usage_stats(
+            format,
+            start_date,
+            end_date,
+            rank=rank,
+        )
         if remove_banned:
             self.stat.remove_banned_pm()
         self.verbose = verbose
@@ -197,10 +206,22 @@ class TeamBuilder:
                 if self.verbose:
                     print(f"Hidden Power {hp_type} detected, IVs set to {ivs}")
                 break
+
+        # Gen 1-2 had no abilities; gen 1 had no held items.
+        # Usage stats contain bogus data for these, so we override.
+        if self.gen <= 2:
+            ability = "No Ability"
+        else:
+            ability = weighted_random_choice(abilities, 1)[0]
+        if self.gen <= 1:
+            item = ""
+        else:
+            item = weighted_random_choice(items, 1)[0]
+
         return {
             "name": pokemon,
-            "ability": weighted_random_choice(abilities, 1)[0],
-            "item": weighted_random_choice(items, 1)[0],
+            "ability": ability,
+            "item": item,
             "spread": weighted_random_choice(spreads, 1)[0],
             "tera_type": weighted_random_choice(tera_types, 1)[0],
             "IVs": ivs,
@@ -247,10 +268,16 @@ class TeamBuilder:
                         print(f"Hidden Power {hp_type} detected, IVs set to {ivs}")
                     break
 
-        if not ability:
+        # Gen 1-2 had no abilities; gen 1 had no held items.
+        # Usage stats contain bogus data for these, so we override.
+        if self.gen <= 2:
+            ability = "No Ability"
+        elif not ability:
             ability = weighted_random_choice(abilities, 1)[0]
 
-        if not item:
+        if self.gen <= 1:
+            item = ""
+        elif not item:
             item = weighted_random_choice(items, 1)[0]
 
         if not spread:

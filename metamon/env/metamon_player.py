@@ -6,6 +6,7 @@ from poke_env.player import Player
 from poke_env.environment import AbstractBattle
 from poke_env.exceptions import ShowdownException
 
+from metamon.config import format_for_agent
 from metamon.env.metamon_battle import MetamonBackendBattle, PokeAgentBackendBattle
 from metamon.backend.showdown_dex import Dex
 from metamon.backend.replay_parser.str_parsing import pokemon_name, move_name
@@ -208,11 +209,12 @@ class MetamonPlayer(Player):
             # fallback to random if no model provided
             return self.random_teampreview(battle)
 
-        # fallback to random for non-team-preview (or untrained teampreview) formats
-        battle_format = self._format.replace("-", "").lower()  # e.g., "gen9ou"
-        if battle_format not in self.team_preview_model.trained_formats:
+        # Map Showdown variants (e.g. gen9oulongtimer) to the format the preview model knows.
+        agent_format = format_for_agent(self._format.replace("-", "").lower())
+        if agent_format not in self.team_preview_model.trained_formats:
             self.logger.warning(
-                f"Battle format {battle_format} not in trained formats {self.team_preview_model.trained_formats}. "
+                f"Battle format {self._format} (agent: {agent_format}) not in trained formats "
+                f"{self.team_preview_model.trained_formats}. "
                 f"Falling back to random."
             )
             return self.random_teampreview(battle)
@@ -245,7 +247,7 @@ class MetamonPlayer(Player):
             our_team_abilities=our_team_abilities,
             our_team_items=our_team_items,
             opponent_team=opponent_team_names,
-            battle_format=battle_format,
+            battle_format=agent_format,
         )
 
         # format team preview prediction output to showdown command

@@ -1,0 +1,51 @@
+name: Black (auto-fix)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  black_fix:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Black
+        run: pip install black
+
+      - name: Run Black on changed files
+        run: |
+          BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
+          FILES=$(git diff --name-only --diff-filter=d "$BASE" HEAD -- '*.py')
+          if [ -z "$FILES" ]; then
+            echo "No Python files changed."
+            exit 0
+          fi
+          echo "Formatting:"
+          echo "$FILES"
+          echo "$FILES" | xargs black
+
+      - name: Commit and push changes (if any)
+        run: |
+          if git diff --quiet; then
+            echo "No formatting changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -u
+          git commit -m "style: auto-format with black"
+          git push origin HEAD:${{ github.head_ref }}

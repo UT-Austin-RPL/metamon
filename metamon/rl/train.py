@@ -2,8 +2,6 @@ import os
 from functools import partial
 from typing import List, Optional
 
-import gin
-import torch
 import wandb
 
 import amago
@@ -17,16 +15,19 @@ from metamon.interface import (
     RewardFunction,
 )
 from metamon.tokenizer import get_tokenizer
-from metamon.data import ParsedReplayDataset, SelfPlayDataset, MetamonDataset
 from metamon.rl.metamon_to_amago import (
     MetamonAMAGOExperiment,
     MetamonAMAGODataset,
     make_baseline_env,
     make_placeholder_env,
 )
-from metamon.rl.pretrained import get_pretrained_model
+from metamon.rl.dataset_config import (
+    load_dataset_config,
+    save_dataset_config,
+    flatten_config,
+    build_dataset,
+)
 from metamon import baselines
-
 
 WANDB_PROJECT = os.environ.get("METAMON_WANDB_PROJECT")
 WANDB_ENTITY = os.environ.get("METAMON_WANDB_ENTITY")
@@ -37,26 +38,6 @@ EVAL_OPPONENTS = [
     baselines.heuristic.basic.GymLeader,
     baselines.heuristic.kaizo.EmeraldKaizo,
 ]
-
-
-def _training_attention_type():
-    has_gpu = torch.cuda.is_available()
-    try:
-        import flash_attn  # noqa: F401
-
-        has_flash_attn = True
-    except ImportError:
-        has_flash_attn = False
-
-    if has_gpu and has_flash_attn:
-        return amago.nets.transformer.FlashAttention
-
-    print(
-        "Warning: FlashAttention is unavailable; using AMAGO VanillaAttention. "
-        "This avoids the startup crash, but superkazam-sized training will be slower "
-        "and may use more memory."
-    )
-    return amago.nets.transformer.VanillaAttention
 
 
 def add_cli(parser):
@@ -96,16 +77,16 @@ def add_cli(parser):
         help="Resume training from an existing run with this run_name. Provide the epoch checkpoint to load.",
     )
     parser.add_argument(
-        "--init_from_checkpoint",
-        type=str,
-        default=None,
-        help="Initialize from a pretrained checkpoint (e.g., 'SyntheticRLV2'). Use this to fine-tune from a pretrained model.",
-    )
-    parser.add_argument(
         "--epochs",
         type=int,
         default=100,
         help="Number of epochs to train for. In offline RL model, an epoch is an arbitrary interval (here: 25k) of training steps on a fixed dataset.",
+    )
+    parser.add_argument(
+        "--ckpt_interval",
+        type=int,
+        default=2,
+        help="Save a checkpoint every N epochs.",
     )
     parser.add_argument(
         "--batch_size_per_gpu",
@@ -144,47 +125,10 @@ def add_cli(parser):
         help="Number of workers for the data loader.",
     )
     parser.add_argument(
-        "--parsed_replay_dir",
+        "--dataset_config",
         type=str,
-        default=None,
-        help="Path to the parsed replay directory. Defaults to the official huggingface version.",
-    )
-    parser.add_argument(
-        "--replay_weight",
-        type=float,
-        default=1.0,
-        help="Sampling weight for the human parsed replay dataset (metamon-parsed-replays). Will be renormalized with other weights.",
-    )
-    parser.add_argument(
-        "--self_play_subsets",
-        type=str,
-        nargs="+",
-        default=None,
-        help="Official self-play dataset (metamon-parsed-pile) subsets to include (e.g., 'pac-base', 'pac-exploratory'). If not provided, self-play data is not used.",
-    )
-    parser.add_argument(
-        "--self_play_weights",
-        type=float,
-        nargs="+",
-        default=None,
-        help="Sampling weights for each self-play subset. Must match length of --self_play_subsets.",
-    )
-    parser.add_argument(
-        "--custom_replay_dir",
-        type=str,
-        default=None,
-        help="Path to an optional custom parsed replay dataset (e.g., additional self-play data you've collected).",
-    )
-    parser.add_argument(
-        "--custom_replay_weight",
-        type=float,
-        default=0.25,
-        help="Sampling weight for the custom dataset (if provided). Will be renormalized with other weights.",
-    )
-    parser.add_argument(
-        "--use_cached_filenames",
-        action="store_true",
-        help="Use cached filename index for faster startup when reusing an identical training set.",
+        required=True,
+        help="Path to a dataset config YAML file. See metamon/rl/configs/datasets/ for examples.",
     )
     parser.add_argument(
         "--async_env_mp_context",
@@ -199,215 +143,8 @@ def add_cli(parser):
         default=[1, 2, 3, 4, 9],
         help="Generations (of OU) to play against heuristics between training epochs. Win rates usually saturate at 90%%+ quickly, so this is mostly a sanity-check. Reduce gens to save time on launch! Use `--eval_gens` (no arguments) to disable evaluation.",
     )
-    parser.add_argument(
-        "--formats",
-        nargs="+",
-        default=None,
-        help="Showdown battle formats to include in the dataset. Defaults to all supported formats.",
-    )
     parser.add_argument("--log", action="store_true", help="Log to wandb.")
-    parser.add_argument(
-        "--kakuna_ladder_eval",
-        action="store_true",
-        help=(
-            "After each saved checkpoint, move training state off GPU, run a "
-            "CPU-only Kakuna local ladder opponent plus a checkpoint eval "
-            "subprocess, then log the result to the same W&B run."
-        ),
-    )
-    parser.add_argument(
-        "--kakuna_ladder_total_battles",
-        type=int,
-        default=100,
-        help="Number of local ladder battles to run for each Kakuna comparison eval.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_interval",
-        type=int,
-        default=1,
-        help="Run the Kakuna comparison every N saved checkpoints.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_username",
-        default=None,
-        help="Local Showdown username for the training policy during Kakuna comparison evals.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_opponent_username",
-        default="Kakuna0001",
-        help="Local Showdown username for the CPU-only Kakuna opponent subprocess.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_agent",
-        default="Bulba",
-        help="Registered pretrained-model wrapper to use for the saved checkpoint eval.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_avatar",
-        default="red-gen1main",
-        help="Avatar for the training policy during Kakuna comparison evals.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_gen",
-        type=int,
-        default=1,
-        help="Generation for the Kakuna comparison ladder eval.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_format",
-        default="ou",
-        choices=["ubers", "ou", "uu", "nu"],
-        help="Format tier for the Kakuna comparison ladder eval.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_team_set",
-        default="competitive",
-        help="Team set for the training policy during Kakuna comparison evals.",
-    )
-    parser.add_argument(
-        "--kakuna_ladder_wandb_key",
-        default="kakuna-ladder",
-        help="W&B metric namespace for Kakuna comparison evals.",
-    )
     return parser
-
-
-def create_offline_dataset(
-    obs_space: TokenizedObservationSpace,
-    action_space: ActionSpace,
-    reward_function: RewardFunction,
-    parsed_replay_dir: Optional[str] = None,
-    replay_weight: float = 1.0,
-    self_play_subsets: Optional[List[str]] = None,
-    self_play_weights: Optional[List[float]] = None,
-    custom_replay_dir: Optional[str] = None,
-    custom_replay_weight: float = 0.25,
-    verbose: bool = True,
-    formats: Optional[List[str]] = None,
-    use_cached_filenames: bool = False,
-) -> amago.loading.RLDataset:
-    """
-    Create a mixed offline RL dataset from multiple sources.
-
-    Args:
-        obs_space: Tokenized observation space
-        action_space: Action space
-        reward_function: Reward function
-        parsed_replay_dir: Path to parsed replays (None = download from HuggingFace)
-        replay_weight: Sampling weight for parsed replays
-        self_play_subsets: List of self-play subsets to include (e.g., ["pac-base", "pac-exploratory"])
-        self_play_weights: Sampling weights for each self-play subset (must match length of self_play_subsets)
-        custom_replay_dir: Path to custom replay directory
-        custom_replay_weight: Sampling weight for custom replays
-        verbose: Print dataset loading progress
-        formats: Battle formats to include
-        use_cached_filenames: Use cached filename index for faster startup
-
-    Returns:
-        AMAGO RLDataset (possibly a MixtureOfDatasets)
-    """
-    formats = formats or metamon.SUPPORTED_BATTLE_FORMATS
-
-    # Validate self-play weights
-    if self_play_subsets is not None:
-        if self_play_weights is None:
-            # Default to equal weights
-            self_play_weights = [1.0] * len(self_play_subsets)
-        elif len(self_play_weights) != len(self_play_subsets):
-            raise ValueError(
-                f"--self_play_weights ({len(self_play_weights)}) must match "
-                f"--self_play_subsets ({len(self_play_subsets)})"
-            )
-
-    # Common dataset kwargs
-    dset_kwargs = {
-        "observation_space": obs_space,
-        "action_space": action_space,
-        "reward_function": reward_function,
-        "max_seq_len": None,  # amago handles sequence lengths
-        "formats": formats,
-        "verbose": verbose,
-        "use_cached_filenames": use_cached_filenames,
-    }
-
-    # Collect all datasets and weights
-    datasets = []
-    weights = []
-    dataset_info = []  # For pretty printing
-
-    # 1. Parsed Replays (human battles)
-    if replay_weight > 0:
-        parsed_dset = ParsedReplayDataset(dset_root=parsed_replay_dir, **dset_kwargs)
-        datasets.append(
-            MetamonAMAGODataset(
-                dset_name="Parsed Replays (Human)",
-                parsed_replay_dset=parsed_dset,
-            )
-        )
-        weights.append(replay_weight)
-        dataset_info.append(("Parsed Replays (Human)", len(parsed_dset), replay_weight))
-
-    # 2. Self-Play Datasets
-    if self_play_subsets is not None:
-        for subset, weight in zip(self_play_subsets, self_play_weights):
-            if weight > 0:
-                selfplay_dset = SelfPlayDataset(subset=subset, **dset_kwargs)
-                datasets.append(
-                    MetamonAMAGODataset(
-                        dset_name=f"Self-Play ({subset})",
-                        parsed_replay_dset=selfplay_dset,
-                    )
-                )
-                weights.append(weight)
-                dataset_info.append(
-                    (f"Self-Play ({subset})", len(selfplay_dset), weight)
-                )
-
-    # 3. Custom Replay Directory
-    if custom_replay_dir is not None and custom_replay_weight > 0:
-        custom_dset = MetamonDataset(dset_root=custom_replay_dir, **dset_kwargs)
-        datasets.append(
-            MetamonAMAGODataset(
-                dset_name="Custom Replays",
-                parsed_replay_dset=custom_dset,
-            )
-        )
-        weights.append(custom_replay_weight)
-        dataset_info.append(("Custom Replays", len(custom_dset), custom_replay_weight))
-
-    if not datasets:
-        raise ValueError(
-            "No datasets configured! Provide at least one of: parsed replays, self-play subsets, or custom replay dir."
-        )
-
-    # Renormalize weights to sum to 1
-    total_weight = sum(weights)
-    normalized_weights = [w / total_weight for w in weights]
-
-    # Print pretty summary
-    print("\n" + "=" * 70)
-    print("TRAINING DATASET SUMMARY")
-    print("=" * 70)
-    print(f"{'Dataset':<35} {'Files':>12} {'Weight':>10} {'Norm Weight':>12}")
-    print("-" * 70)
-    total_files = 0
-    for (name, num_files, raw_weight), norm_weight in zip(
-        dataset_info, normalized_weights
-    ):
-        total_files += num_files
-        print(f"{name:<35} {num_files:>12,} {raw_weight:>10.2f} {norm_weight:>11.1%}")
-    print("-" * 70)
-    print(f"{'TOTAL':<35} {total_files:>12,} {total_weight:>10.2f} {'100.0%':>12}")
-    print("=" * 70 + "\n")
-
-    # Create final dataset
-    if len(datasets) == 1:
-        return datasets[0]
-    else:
-        return amago.loading.MixtureOfDatasets(
-            datasets=datasets,
-            sampling_weights=normalized_weights,
-        )
 
 
 def create_offline_rl_trainer(
@@ -427,22 +164,11 @@ def create_offline_rl_trainer(
     grad_accum: int = 1,
     steps_per_epoch: int = 25_000,
     batch_size_per_gpu: int = 16,
-    ckpt_interval: int = 2,
     log: bool = False,
     wandb_project: str = WANDB_PROJECT,
     wandb_entity: str = WANDB_ENTITY,
     manual_gin_overrides: Optional[dict] = None,
-    kakuna_ladder_eval: bool = False,
-    kakuna_ladder_total_battles: int = 100,
-    kakuna_ladder_interval: int = 1,
-    kakuna_ladder_username: Optional[str] = None,
-    kakuna_ladder_opponent_username: str = "Kakuna0001",
-    kakuna_ladder_agent: str = "Bulba",
-    kakuna_ladder_avatar: str = "red-gen1main",
-    kakuna_ladder_gen: int = 1,
-    kakuna_ladder_format: str = "ou",
-    kakuna_ladder_team_set: str = "competitive",
-    kakuna_ladder_wandb_key: str = "kakuna-ladder",
+    ckpt_interval: int = 2,
 ):
     """
     Convenience function that creates an AMAGO experiment with default arguments
@@ -452,7 +178,7 @@ def create_offline_rl_trainer(
     config = {
         "MetamonTstepEncoder.tokenizer": obs_space.tokenizer,
         "MetamonPerceiverTstepEncoder.tokenizer": obs_space.tokenizer,
-        "MetamonPokemonSlotTstepEncoder.tokenizer": obs_space.tokenizer,
+        "MetamonGroupedTstepEncoderV2.tokenizer": obs_space.tokenizer,
     }
     if manual_gin_overrides is not None:
         config.update(manual_gin_overrides)
@@ -460,16 +186,7 @@ def create_offline_rl_trainer(
     training_config_path = os.path.join(
         metamon.rl.TRAINING_CONFIG_DIR, train_gin_config
     )
-    amago.cli_utils.use_config(
-        config, [model_config_path, training_config_path], finalize=False
-    )
-    # Model gin files can force FlashAttention after Python overrides are bound.
-    # Re-bind after parsing so training works in environments without flash_attn.
-    gin.bind_parameter(
-        "amago.nets.traj_encoders.TformerTrajEncoder.attention_type",
-        _training_attention_type(),
-    )
-    gin.finalize()
+    amago.cli_utils.use_config(config, [model_config_path, training_config_path])
 
     # validation environments (evaluated throughout training)
     if eval_gens:
@@ -495,21 +212,17 @@ def create_offline_rl_trainer(
         ## required ##
         run_name=run_name,
         ckpt_base_dir=ckpt_dir,
-        # max_seq_len = should be set in the gin file
         dataset=amago_dataset,
-        # tstep_encoder_type = should be set in the gin file
-        # traj_encoder_type = should be set in the gin file
-        # agent_type = should be set in the gin file
-        val_timesteps_per_epoch=val_timesteps_per_epoch,  # per actor
+        val_timesteps_per_epoch=val_timesteps_per_epoch,
         ## environment ##
         make_train_env=partial(make_placeholder_env, obs_space, action_space),
         make_val_env=make_envs,
         env_mode="async",
         async_env_mp_context=async_env_mp_context,
         parallel_actors=len(make_envs),
-        # no exploration
         exploration_wrapper_type=None,
-        sample_actions=True,
+        sample_actions_train=True,
+        sample_actions_val=True,
         force_reset_train_envs_every=None,
         ## logging ##
         log_to_wandb=log,
@@ -522,7 +235,6 @@ def create_offline_rl_trainer(
         dloader_workers=dloader_workers,
         ## learning schedule ##
         epochs=epochs,
-        # entirely offline RL
         start_learning_at_epoch=0,
         start_collecting_at_epoch=float("inf"),
         train_timesteps_per_epoch=0,
@@ -534,21 +246,6 @@ def create_offline_rl_trainer(
         batches_per_update=grad_accum,
         mixed_precision="no",
     )
-    if kakuna_ladder_eval:
-        username = kakuna_ladder_username or f"{run_name}KakunaEval"
-        experiment.configure_checkpoint_subprocess_eval(
-            total_battles=kakuna_ladder_total_battles,
-            wandb_key=kakuna_ladder_wandb_key,
-            interval=kakuna_ladder_interval,
-            agent=kakuna_ladder_agent,
-            opponent_agent="Kakuna",
-            opponent_username=kakuna_ladder_opponent_username,
-            eval_username=username,
-            avatar=kakuna_ladder_avatar,
-            gen=kakuna_ladder_gen,
-            battle_format=kakuna_ladder_format,
-            team_set=kakuna_ladder_team_set,
-        )
     return experiment
 
 
@@ -572,6 +269,7 @@ if __name__ == "__main__":
     print(
         f"  Run: {args.run_name}  |  Model: {args.model_gin_config}  |  Training: {args.train_gin_config}"
     )
+    print(f"  Dataset config: {args.dataset_config}")
     print()
 
     # agent input/output/rewards
@@ -581,20 +279,19 @@ if __name__ == "__main__":
     reward_function = get_reward_function(args.reward_function)
     action_space = get_action_space(args.action_space)
 
-    # metamon dataset
-    amago_dataset = create_offline_dataset(
+    # load dataset config and build dataset
+    dataset_config = load_dataset_config(args.dataset_config)
+    amago_dataset = build_dataset(
+        config=dataset_config,
         obs_space=obs_space,
         action_space=action_space,
         reward_function=reward_function,
-        parsed_replay_dir=args.parsed_replay_dir,
-        replay_weight=args.replay_weight,
-        self_play_subsets=args.self_play_subsets,
-        self_play_weights=args.self_play_weights,
-        custom_replay_dir=args.custom_replay_dir,
-        custom_replay_weight=args.custom_replay_weight,
-        formats=args.formats,
-        use_cached_filenames=args.use_cached_filenames,
     )
+
+    # auto-save effective config to checkpoint directory
+    config_save_path = os.path.join(args.save_dir, args.run_name, "dataset_config.yaml")
+    save_dataset_config(flatten_config(dataset_config), config_save_path)
+    print(f"  Dataset config saved to: {config_save_path}\n")
 
     # quick-setup for an offline RL experiment
     experiment = create_offline_rl_trainer(
@@ -615,53 +312,10 @@ if __name__ == "__main__":
         log=args.log,
         wandb_project=WANDB_PROJECT,
         wandb_entity=WANDB_ENTITY,
-        kakuna_ladder_eval=args.kakuna_ladder_eval,
-        kakuna_ladder_total_battles=args.kakuna_ladder_total_battles,
-        kakuna_ladder_interval=args.kakuna_ladder_interval,
-        kakuna_ladder_username=args.kakuna_ladder_username,
-        kakuna_ladder_opponent_username=args.kakuna_ladder_opponent_username,
-        kakuna_ladder_agent=args.kakuna_ladder_agent,
-        kakuna_ladder_avatar=args.kakuna_ladder_avatar,
-        kakuna_ladder_gen=args.kakuna_ladder_gen,
-        kakuna_ladder_format=args.kakuna_ladder_format,
-        kakuna_ladder_team_set=args.kakuna_ladder_team_set,
-        kakuna_ladder_wandb_key=args.kakuna_ladder_wandb_key,
+        ckpt_interval=args.ckpt_interval,
     )
     experiment.start()
-    if args.log and args.kakuna_ladder_eval and wandb.run is not None:
-        wandb.config.update(
-            {
-                "kakuna_ladder_eval": True,
-                "kakuna_ladder_expected_opponent": "Kakuna",
-                "kakuna_ladder_total_battles": args.kakuna_ladder_total_battles,
-                "kakuna_ladder_interval": args.kakuna_ladder_interval,
-                "kakuna_ladder_username": args.kakuna_ladder_username
-                or f"{args.run_name}KakunaEval",
-                "kakuna_ladder_opponent_username": args.kakuna_ladder_opponent_username,
-                "kakuna_ladder_agent": args.kakuna_ladder_agent,
-                "kakuna_ladder_avatar": args.kakuna_ladder_avatar,
-                "kakuna_ladder_battle_format": (
-                    f"gen{args.kakuna_ladder_gen}{args.kakuna_ladder_format.lower()}"
-                ),
-                "kakuna_ladder_team_set": args.kakuna_ladder_team_set,
-                "kakuna_ladder_wandb_key": args.kakuna_ladder_wandb_key,
-            },
-            allow_val_change=True,
-        )
-
-    # Load pretrained checkpoint if specified
-    if args.init_from_checkpoint is not None and args.init_from_checkpoint.strip():
-        print(f"\nInitializing from pretrained checkpoint: {args.init_from_checkpoint}")
-        pretrained_model = get_pretrained_model(args.init_from_checkpoint)
-        # Get the checkpoint path from the pretrained model
-        ckpt_path = pretrained_model.get_path_to_checkpoint(pretrained_model.default_checkpoint)
-        print(f"  Loading weights from: {ckpt_path}")
-        experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
-        print(f"  ✓ Successfully initialized from {args.init_from_checkpoint}")
-
     if args.ckpt is not None:
-        # resume training from a checkpoint
         experiment.load_checkpoint(args.ckpt)
-
     experiment.learn()
     wandb.finish()

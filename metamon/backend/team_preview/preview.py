@@ -18,6 +18,7 @@ from einops import rearrange
 import wandb
 from tqdm import tqdm
 
+from metamon.config import format_for_agent
 from metamon.interface import (
     UniversalState,
     consistent_pokemon_order,
@@ -403,6 +404,9 @@ class TeamPreviewModel(nn.Module):
         """
         if device is None:
             device = next(self.parameters()).device
+
+        if battle_format is not None:
+            battle_format = format_for_agent(battle_format)
 
         # sort teams consistently
         our_team_with_info = list(

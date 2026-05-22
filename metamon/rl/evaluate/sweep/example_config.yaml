@@ -1,0 +1,17 @@
+# Sweep example: paper SyntheticRLV2 checkpoints vs fixed PokéAgent Kadabra opponent.
+battle_format: gen1ou
+battles_per_matchup: 50
+
+defaults:
+  team_set: competitive
+  battle_backend: metamon
+
+opponent:
+  model_name: Kadabra
+  checkpoint: null
+  temperature: 1.0
+
+sweep:
+  model_name: SyntheticRLV2
+  checkpoints: "range(40, 50, 2)"
+  temperatures: [1.0, 1.5, 2.0]

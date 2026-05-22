@@ -39,11 +39,11 @@ def move_name(name: str) -> str:
 
 
 def parse_hp_fraction(raw: str) -> tuple[int, int]:
-    fracs = re.findall(r"\b\d+/\d+\b", raw)
-    if len(fracs) != 1 or "/" not in fracs[0]:
+    # Showdown may suffix the denominator with g/y/r (HP bar color hints).
+    m = re.search(r"(\d+)/(\d+)(?:[gyr])?\b", raw)
+    if not m:
         raise StrParsingException("parse_hp_fraction", raw)
-    num, den = [int(x) for x in fracs[0].split("/")]
-    return num, den
+    return int(m.group(1)), int(m.group(2))
 
 
 def parse_condition(raw: str) -> str:

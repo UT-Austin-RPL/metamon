@@ -1,0 +1,8 @@
+# Baseline training mix: parsed human replays + public self-play (pac-base / pac-exploratory).
+# pac-tauros (~4.9M gen1ou) is also available as a self_play subset when referenced explicitly.
+# Omit `formats` to include all metamon battle formats (gen1–4 OU/UU/NU/Ubers + gen9ou).
+# Self-play subsets only cover gen1–4ou and gen9ou; other formats use human replays only.
+replay_weight: 0.05
+self_play:
+  pac-base: 0.6
+  pac-exploratory: 0.35

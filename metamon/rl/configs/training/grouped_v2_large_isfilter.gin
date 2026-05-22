@@ -1,0 +1,43 @@
+import amago.agent
+import metamon.rl.custom_agent
+
+# Based on alakazam3_isfilter.gin but with tuning for the larger model:
+#   - Lower learning rate (1e-4) and longer warmup for stability at scale
+#   - Slightly lower grad clip
+#   - Same ISAdvantageFilter with sequence-level filtering
+
+agent.Agent.reward_multiplier = 10.
+agent.MultiTaskAgent.reward_multiplier = 10.
+
+agent.Agent.tau = .008
+agent.MultiTaskAgent.tau = .008
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 4
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 4
+
+agent.Agent.online_coeff = 0.0
+agent.MultiTaskAgent.online_coeff = 0.0
+agent.Agent.offline_coeff = 1.0
+agent.MultiTaskAgent.offline_coeff = 1.0
+
+agent.Agent.fbc_filter_func = @custom_agent.ISAdvantageFilter()
+agent.MultiTaskAgent.fbc_filter_func = @custom_agent.ISAdvantageFilter()
+custom_agent.ISAdvantageFilter.beta = 3.0
+custom_agent.ISAdvantageFilter.clip_weights_low = 1e-6
+custom_agent.ISAdvantageFilter.clip_weights_high = 100.
+custom_agent.ISAdvantageFilter.seq_p_low = 0.2
+custom_agent.ISAdvantageFilter.seq_p_full = 0.7
+custom_agent.ISAdvantageFilter.seq_floor = 0.1
+custom_agent.ISAdvantageFilter.seq_floor_warmup_steps = 100_000
+custom_agent.ISAdvantageFilter.seq_buffer_size = 10000
+custom_agent.ISAdvantageFilter.seq_warmup = 200
+
+MetamonAMAGOExperiment.l2_coeff = 1e-4
+MetamonAMAGOExperiment.learning_rate = 1e-4
+MetamonAMAGOExperiment.grad_clip = 1.0
+agent.Agent.critic_loss_weight = 13.5
+agent.MultiTaskAgent.critic_loss_weight = 13.5
+MetamonAMAGOExperiment.lr_warmup_steps = 5000

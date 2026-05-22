@@ -1,0 +1,16 @@
+{
+    "folder-color.pathColors": [
+        {
+            "folderPath": "metamon/data/",
+            "color": "foldercolorizer.color_336633"
+        },
+        {
+            "folderPath": "metamon/backend/",
+            "color": "foldercolorizer.color_6666ff"
+        },
+        {
+            "folderPath": "metamon/il/",
+            "color": "foldercolorizer.color_666666"
+        }
+    ]
+}

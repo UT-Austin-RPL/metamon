@@ -1,0 +1,25 @@
+# Template: sweep sampling temperatures for a paper or PAC model vs itself at temp 1.0.
+#
+# Usage:
+#   python -m metamon.rl.evaluate.sweep \
+#       --config metamon/rl/evaluate/sweep/temperature_sweep_self_play.yaml \
+#       --model Kadabra --format gen1ou --team_set competitive \
+#       --gpus 0 1 --output_dir ./results --dry_run
+
+battle_format: ${format}
+battles_per_matchup: ${battles:150}
+
+defaults:
+  team_set: ${team_set}
+  battle_backend: metamon
+
+opponent:
+  model_name: ${model}
+  checkpoint: ${checkpoint:null}
+  temperature: 1.0
+
+sweep:
+  model_name: ${model}
+  checkpoints:
+    - ${checkpoint:null}
+  temperatures: "linspace(${temp_min:0.25}, ${temp_max:3.0}, ${temp_steps:12})"

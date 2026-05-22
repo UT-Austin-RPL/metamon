@@ -24,5 +24,6 @@ agent.MultiTaskAgent.fbc_filter_func = @agent.exp_filter
 MetamonAMAGOExperiment.l2_coeff = 1e-4
 MetamonAMAGOExperiment.learning_rate = 1.5e-4
 MetamonAMAGOExperiment.grad_clip = 1.5
-MetamonAMAGOExperiment.critic_loss_weight = 10.
+agent.Agent.critic_loss_weight = 10.
+agent.MultiTaskAgent.critic_loss_weight = 10.
 MetamonAMAGOExperiment.lr_warmup_steps = 1000

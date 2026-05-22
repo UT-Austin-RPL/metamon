@@ -1,0 +1,75 @@
+import amago.nets.actor_critic
+import amago.nets.traj_encoders
+import amago.nets.transformer
+import amago.agent
+import amago.experiment
+
+MetamonAMAGOExperiment.agent_type = @agent.MultiTaskAgent
+MetamonAMAGOExperiment.tstep_encoder_type = @MetamonGroupedTstepEncoderV2
+MetamonAMAGOExperiment.traj_encoder_type = @traj_encoders.TformerTrajEncoder
+MetamonAMAGOExperiment.max_seq_len = 128
+
+# actor
+MultiTaskAgent.actor_type = @MetamonMaskedResidualActor
+MultiTaskAgent.pass_obs_keys_to_actor = ["illegal_actions"]
+MetamonMaskedResidualActor.activation = "leaky_relu"
+MetamonMaskedResidualActor.feature_dim = 300
+MetamonMaskedResidualActor.residual_ff_dim = 400
+MetamonMaskedResidualActor.residual_blocks = 2
+
+# critic
+MultiTaskAgent.critic_type = @actor_critic.NCriticsTwoHot
+actor_critic.NCriticsTwoHot.activation = "leaky_relu"
+actor_critic.NCriticsTwoHot.n_layers = 2
+actor_critic.NCriticsTwoHot.d_hidden = 512
+MultiTaskAgent.popart = True
+MultiTaskAgent.num_critics = 4
+actor_critic.NCriticsTwoHot.output_bins = 64
+actor_critic.NCriticsTwoHot.min_return = -100
+actor_critic.NCriticsTwoHot.max_return = 2100
+actor_critic.NCriticsTwoHot.use_symlog = False
+
+
+# MetamonGroupedTstepEncoderV2: Pokemon encoder (shared for 7 entities)
+MetamonGroupedTstepEncoderV2.d_pokemon = 64
+MetamonGroupedTstepEncoderV2.n_heads_pokemon = 4
+MetamonGroupedTstepEncoderV2.n_layers_pokemon = 3
+MetamonGroupedTstepEncoderV2.latent_tokens_pokemon = 4
+MetamonGroupedTstepEncoderV2.numerical_tokens_pokemon = 4
+MetamonGroupedTstepEncoderV2.pokemon_out_norm = "layer"
+
+# MetamonGroupedTstepEncoderV2: Global encoder (misc/aggregate features)
+MetamonGroupedTstepEncoderV2.d_global = 48
+MetamonGroupedTstepEncoderV2.n_heads_global = 4
+MetamonGroupedTstepEncoderV2.n_layers_global = 1
+MetamonGroupedTstepEncoderV2.latent_tokens_global = 3
+MetamonGroupedTstepEncoderV2.numerical_tokens_global = 2
+MetamonGroupedTstepEncoderV2.global_out_norm = "layer"
+
+# MetamonGroupedTstepEncoderV2: Fusion encoder (combines 8 entity embeddings)
+MetamonGroupedTstepEncoderV2.d_fusion = 84
+MetamonGroupedTstepEncoderV2.n_heads_fusion = 4
+MetamonGroupedTstepEncoderV2.n_layers_fusion = 3
+MetamonGroupedTstepEncoderV2.latent_tokens_fusion = 5
+MetamonGroupedTstepEncoderV2.fusion_out_norm = "layer"
+
+# MetamonGroupedTstepEncoderV2: General
+MetamonGroupedTstepEncoderV2.extra_emb_dim = 18
+MetamonGroupedTstepEncoderV2.dropout = 0.05
+MetamonGroupedTstepEncoderV2.use_flex_attention = False
+MetamonGroupedTstepEncoderV2.normformer_norms = True
+MetamonGroupedTstepEncoderV2.ff_mult = 3
+MetamonGroupedTstepEncoderV2.pokemon_role_emb = True
+
+
+traj_encoders.TformerTrajEncoder.n_layers = 3
+traj_encoders.TformerTrajEncoder.n_heads = 8
+traj_encoders.TformerTrajEncoder.d_ff = 1600
+traj_encoders.TformerTrajEncoder.d_model = 400
+traj_encoders.TformerTrajEncoder.normformer_norms = True
+traj_encoders.TformerTrajEncoder.sigma_reparam = True
+traj_encoders.TformerTrajEncoder.norm = "layer"
+traj_encoders.TformerTrajEncoder.head_scaling = True
+traj_encoders.TformerTrajEncoder.activation = "leaky_relu"
+traj_encoders.TformerTrajEncoder.attention_type = @transformer.FlashAttention
+transformer.FlashAttention.window_size = (32, 0)

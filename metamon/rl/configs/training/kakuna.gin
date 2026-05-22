@@ -27,5 +27,6 @@ agent.leaky_relu_filter.clip_weights_high = 15.
 MetamonAMAGOExperiment.l2_coeff = 1e-4
 MetamonAMAGOExperiment.learning_rate = 1e-4
 MetamonAMAGOExperiment.grad_clip = 1.0
-MetamonAMAGOExperiment.critic_loss_weight = 12.5
+agent.Agent.critic_loss_weight = 12.5
+agent.MultiTaskAgent.critic_loss_weight = 12.5
 MetamonAMAGOExperiment.lr_warmup_steps = 10000

@@ -264,9 +264,9 @@ class MetamonBackendBattle(pe.AbstractBattle):
                     active_move.get("pp", known_active_moves[move_id].pp)
                 )
                 move = known_active_moves[move_id]
-            elif move_id in {"recharge", "struggle"}:
+            elif move_id in {"recharge", "struggle", "fight"}:
                 # these are handled as special cases in the action space, replay parser,
-                # and here. The agent does not see recharge or struggle as its moves.
+                # and here. The agent does not see recharge, struggle, or fight as its moves.
                 move = Move(move_name, gen=self._gen)
                 move.set_pp(active_move.get("pp", move.pp))
                 override_active_moves = False

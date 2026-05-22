@@ -4,17 +4,18 @@ import json
 import datetime
 import functools
 import warnings
-from typing import Optional
+from typing import Optional, List
 
 from termcolor import colored
 import metamon
+from metamon.config import format_for_agent
+from metamon.data.download import download_usage_stats
 from metamon.backend.team_prediction.usage_stats.format_rules import (
     get_valid_pokemon,
     Tier,
 )
 from metamon.backend.replay_parser.str_parsing import pokemon_name
 from metamon.backend.showdown_dex.dex import Dex
-
 
 TIER_MAP = {
     "ubers": Tier.UBERS,
@@ -27,7 +28,148 @@ TIER_MAP = {
 }
 
 EARLIEST_USAGE_STATS_DATE = datetime.date(2014, 1, 1)
-LATEST_USAGE_STATS_DATE = datetime.date(2025, 7, 1)
+LATEST_USAGE_STATS_DATE = datetime.date(2026, 4, 1)
+DEFAULT_USAGE_RANK = 1500
+
+ELITE_REPLAY_SOURCES = ("smogtours",)
+
+
+class UsageStatsLoadError(Exception):
+    """Raised when usage stats cannot be loaded at the requested rank/time window."""
+
+
+def assert_usage_rank_available(format: str, rank: int) -> None:
+    available = list_available_usage_ranks(format)
+    if not available:
+        raise UsageStatsLoadError(
+            f"No usage rank directories found for {format}. "
+            f"Run `python -m metamon download usage-stats`."
+        )
+    if rank not in available:
+        raise UsageStatsLoadError(
+            f"Usage rank {rank} is not available for {format}. "
+            f"Available ranks on disk: {available}."
+        )
+
+
+def assert_usage_stats_loaded(
+    format: str,
+    start_date: datetime.date,
+    end_date: datetime.date,
+    requested_rank: int,
+    stats: "PreloadedSmogonUsageStats",
+) -> None:
+    if stats.rank != requested_rank:
+        raise UsageStatsLoadError(
+            f"Usage stats for {format} fell back from rank={requested_rank} "
+            f"to rank={stats.rank} between {start_date} and {end_date}. "
+            f"Refusing to use a different skill tier silently."
+        )
+    if not stats.movesets:
+        raise UsageStatsLoadError(
+            f"Usage stats for {format} at rank={requested_rank} "
+            f"between {start_date} and {end_date} loaded empty movesets."
+        )
+
+
+def _is_elite_replay_source(gameid: Optional[str]) -> bool:
+    if not gameid:
+        return False
+    gameid_lower = gameid.lower()
+    return any(src in gameid_lower for src in ELITE_REPLAY_SOURCES)
+
+
+def resolve_effective_rating(
+    rating: Optional[int | str],
+    gameid: Optional[str],
+    format: str,
+) -> int:
+    if isinstance(rating, int):
+        return rating
+    if _is_elite_replay_source(gameid):
+        ranks = list_available_usage_ranks(format)
+        positive = [r for r in ranks if r > 0]
+        if positive:
+            return max(positive)
+    return DEFAULT_USAGE_RANK
+
+
+def rating_to_usage_rank(effective_rating: int, available_ranks: List[int]) -> int:
+    if not available_ranks:
+        raise UsageStatsLoadError(
+            "Cannot map rating to usage rank: no rank directories found on disk."
+        )
+    eligible = [r for r in available_ranks if r <= effective_rating]
+    return max(eligible) if eligible else min(available_ranks)
+
+
+def resolve_usage_rank(
+    format: str,
+    rating: Optional[int | str] = None,
+    gameid: Optional[str] = None,
+) -> int:
+    available_ranks = list_available_usage_ranks(format)
+    if not available_ranks:
+        raise UsageStatsLoadError(
+            f"No usage rank directories found for {format}. "
+            f"Run `python -m metamon download usage-stats`."
+        )
+    effective = resolve_effective_rating(rating, gameid, format)
+    rank = rating_to_usage_rank(effective, available_ranks)
+    assert_usage_rank_available(format, rank)
+    return rank
+
+
+def rank_from_moveset_filename(fmt: str, filename: str) -> Optional[int]:
+    """
+    Extract the baseline/rank from a Smogon moveset filename.
+    Examples: gen1ou-0.txt, gen1ou-1500.txt, gen1ou-1630.txt, gen1ou-1760.txt
+    Returns rank as int or None if not applicable.
+    """
+    if not filename.startswith(fmt):
+        return None
+    if filename.endswith(".txt.gz") or filename.endswith(".gz"):
+        return None
+    if not filename.endswith(".txt"):
+        return None
+
+    stem = filename[:-4]
+    if stem == fmt:
+        # Smogon convention: no explicit baseline means 1500.
+        return 1500
+
+    m = re.match(rf"^{re.escape(fmt)}-(\d+(?:\.\d+)?)$", stem)
+    if not m:
+        return None
+    return int(float(m.group(1)))
+
+
+def list_available_ranks_in_moveset_dir(moveset_dir: str, fmt: str) -> List[int]:
+    if not os.path.isdir(moveset_dir):
+        return []
+    ranks = set()
+    for fn in os.listdir(moveset_dir):
+        r = rank_from_moveset_filename(fmt, fn)
+        if r is not None:
+            ranks.add(r)
+    return sorted(ranks)
+
+
+def list_available_usage_ranks(format: str) -> List[int]:
+    """
+    List available baseline/rank subdirectories in the processed usage-stats dataset
+    for a given format (e.g., gen4ou).
+    """
+    gen, tier = int(format[3]), format[4:]
+    usage_stats_path = download_usage_stats(gen)
+    base = os.path.join(usage_stats_path, "movesets_data", f"gen{gen}", f"{tier}")
+    if not os.path.isdir(base):
+        return []
+    ranks = []
+    for d in os.listdir(base):
+        if os.path.isdir(os.path.join(base, d)) and re.fullmatch(r"\d+", d):
+            ranks.append(int(d))
+    return sorted(ranks)
 
 
 def parse_pokemon_moveset(file_path):
@@ -44,16 +186,23 @@ def parse_pokemon_moveset(file_path):
     }
 
     def p_name(data_cache):
+        if not data_cache:
+            return moveset_data_list
         name = data_cache[0][2:-2].strip()
         moveset_data_list["name"].append(name)
         return moveset_data_list
 
     def p_count(data_cache):
+        if not data_cache:
+            return moveset_data_list
         count = int(data_cache[0][2:-2].split(":")[1].strip())
         moveset_data_list["count"].append(count)
         return moveset_data_list
 
     def p_abilities(data_cache):
+        if not data_cache:
+            moveset_data_list["abilities"].append({})
+            return moveset_data_list
         _abilities = {}
         assert "Abilities" in data_cache[0], "Abilities not found"
         for line in data_cache[1:]:
@@ -67,6 +216,9 @@ def parse_pokemon_moveset(file_path):
         return moveset_data_list
 
     def p_items(data_cache):
+        if not data_cache:
+            moveset_data_list["items"].append({})
+            return moveset_data_list
         _items = {}
         assert "Items" in data_cache[0], "Items not found"
         for line in data_cache[1:]:
@@ -80,6 +232,9 @@ def parse_pokemon_moveset(file_path):
         return moveset_data_list
 
     def p_spreads(data_cache):
+        if not data_cache:
+            moveset_data_list["spreads"].append({})
+            return moveset_data_list
         _spreads = {}
         assert "Spreads" in data_cache[0], "Spreads not found"
         for line in data_cache[1:]:
@@ -91,6 +246,9 @@ def parse_pokemon_moveset(file_path):
         return moveset_data_list
 
     def p_moves(data_cache):
+        if not data_cache:
+            moveset_data_list["moves"].append({})
+            return moveset_data_list
         _moves = {}
         assert "Moves" in data_cache[0], "Moves not found"
         for line in data_cache[1:]:
@@ -103,6 +261,9 @@ def parse_pokemon_moveset(file_path):
         return moveset_data_list
 
     def p_tera_types(data_cache):
+        if not data_cache:
+            moveset_data_list["tera_types"].append({})
+            return moveset_data_list
         _tera_types = {}
         assert "Tera Types" in data_cache[0], "Tera Types not found"
         for line in data_cache[1:]:
@@ -114,6 +275,9 @@ def parse_pokemon_moveset(file_path):
         return moveset_data_list
 
     def p_teammates(data_cache):
+        if not data_cache:
+            moveset_data_list["teammates"].append({})
+            return moveset_data_list
         _teammates = {}
         assert "Teammates" in data_cache[0], "Teammates not found"
         for line in data_cache[1:]:
@@ -132,6 +296,9 @@ def parse_pokemon_moveset(file_path):
         return moveset_data_list
 
     def p_checks(data_cache):
+        if not data_cache:
+            moveset_data_list["checks"].append({})
+            return moveset_data_list
         _checks = {}
         assert "Checks and Counters" in data_cache[0], "Checks and Counters not found"
         for i in range(1, len(data_cache), 2):
@@ -179,17 +346,41 @@ def parse_pokemon_moveset(file_path):
 
     data_cache = []
     for line in lines:
-        # print(line)
-        if line.startswith(" +-"):
+        stripped = line.lstrip()
+        if stripped.startswith("+-"):
             section_order[current_section](data_cache)
             current_section = (current_section + 1) % len(section_order)
             data_cache = []
-        elif line.startswith(" |"):
-            data_cache.append(line.strip())
+        elif stripped.startswith("|"):
+            if (
+                current_section >= 0
+                and section_order[current_section] is section_order[-1]
+            ):
+                # After the trailing noop section (double boundary between
+                # Pokemon), the next row is the following Pokemon's name.
+                current_section = 0
+                data_cache = [" " + stripped]
+            else:
+                data_cache.append(" " + stripped)
 
     n = len(moveset_data_list["name"])
     if len(moveset_data_list["tera_types"]) == 0:
         moveset_data_list["tera_types"] = [{"Nothing": 1.0} for _ in range(n)]
+    else:
+        while len(moveset_data_list["tera_types"]) < n:
+            moveset_data_list["tera_types"].append({"Nothing": 1.0})
+
+    for key, default in (
+        ("count", 0),
+        ("abilities", {}),
+        ("items", {}),
+        ("spreads", {}),
+        ("moves", {}),
+        ("teammates", {}),
+        ("checks", {}),
+    ):
+        while len(moveset_data_list[key]) < n:
+            moveset_data_list[key].append(default)
 
     moveset_data = {}
     for i in range(n):
@@ -254,7 +445,7 @@ class SmogonStat:
         format: str,
         raw_stats_dir: str,
         date=None,
-        rank=None,
+        rank: Optional[int] = None,
         verbose: bool = True,
     ) -> None:
         if date and type(date) == str:
@@ -272,10 +463,20 @@ class SmogonStat:
         self._movesets = {}
         self._inclusive = {}
         self._usage = None
+        self._available_ranks: List[int] = []
         self._load()
         self._name_conversion = {
             pokemon_name(pokemon): pokemon for pokemon in self._movesets.keys()
         }
+
+    @staticmethod
+    def available_ranks(format: str, raw_stats_dir: str, date: str) -> List[int]:
+        moveset_dir = os.path.join(raw_stats_dir, date, "moveset")
+        return list_available_ranks_in_moveset_dir(moveset_dir, format)
+
+    @property
+    def available_ranks_loaded(self) -> List[int]:
+        return list(self._available_ranks)
 
     def _load(self):
         moveset_paths = []
@@ -285,21 +486,49 @@ class SmogonStat:
                 moveset_paths.append(moveset_path)
 
         if len(moveset_paths) == 0:
-            print(f"No moveset data found for {self.format} in {self.data_paths}")
+            if self.verbose:
+                print(f"No moveset data found for {self.format} in {self.data_paths}")
             self._movesets = {}
+            self._available_ranks = []
             return
 
         _movesets = []
+        ranks_seen = set()
         for moveset_path in moveset_paths:
-            format_data = [
-                x for x in os.listdir(moveset_path) if x.startswith(self.format + "-")
-            ]
-            if self.rank is not None:
-                format_data = [x for x in format_data if self.rank in x]
-            _movesets += [
-                parse_pokemon_moveset(os.path.join(moveset_path, x))
-                for x in format_data
-            ]
+            files_by_rank = {}
+            for fn in os.listdir(moveset_path):
+                r = rank_from_moveset_filename(self.format, fn)
+                if r is None:
+                    continue
+                files_by_rank.setdefault(r, []).append(fn)
+
+            ranks_seen.update(files_by_rank.keys())
+
+            if not files_by_rank:
+                continue
+
+            if self.rank is None:
+                available = sorted(files_by_rank.keys())
+                raise ValueError(
+                    f"SmogonStat requires a baseline/rank for {self.format}. "
+                    f"Available ranks in {moveset_path}: {available}"
+                )
+            filenames = files_by_rank.get(self.rank, [])
+
+            for fn in filenames:
+                fp = os.path.join(moveset_path, fn)
+                try:
+                    _movesets.append(parse_pokemon_moveset(fp))
+                except Exception as e:
+                    if self.verbose:
+                        warnings.warn(colored(f"Failed parsing {fp}: {e}", "red"))
+
+        self._available_ranks = sorted(ranks_seen)
+
+        if not _movesets:
+            self._movesets = {}
+            return
+
         self._movesets = {
             pokemon_name(k): v for k, v in merge_movesets(_movesets).items()
         }
@@ -359,12 +588,30 @@ class SmogonStat:
 
 
 def load_between_dates(
-    dir_path: str, start_year: int, start_month: int, end_year: int, end_month: int
+    dir_path: str,
+    start_year: int,
+    start_month: int,
+    end_year: int,
+    end_month: int,
+    warn_if_empty: bool = True,
 ) -> dict:
     start_date = datetime.date(start_year, start_month, 1)
     end_date = datetime.date(end_year, end_month, 1)
+
+    if start_date > LATEST_USAGE_STATS_DATE:
+        start_date = LATEST_USAGE_STATS_DATE
+    elif start_date < EARLIEST_USAGE_STATS_DATE:
+        start_date = EARLIEST_USAGE_STATS_DATE
+
+    if end_date > LATEST_USAGE_STATS_DATE:
+        end_date = LATEST_USAGE_STATS_DATE
+    elif end_date < EARLIEST_USAGE_STATS_DATE:
+        end_date = EARLIEST_USAGE_STATS_DATE
+
     selected_data = []
     for json_file in os.listdir(dir_path):
+        if not json_file.endswith(".json"):
+            continue
         year, month = json_file.replace(".json", "").split("-")
         date = datetime.date(year=int(year), month=int(month), day=1)
         if not start_date <= date <= end_date:
@@ -372,7 +619,7 @@ def load_between_dates(
         with open(os.path.join(dir_path, json_file), "r") as file:
             data = json.load(file)
         selected_data.append(data)
-    if not selected_data:
+    if not selected_data and warn_if_empty:
         warnings.warn(
             colored(
                 f"No Showdown usage stats found in {dir_path} between {start_date} and {end_date}",
@@ -388,23 +635,76 @@ class PreloadedSmogonUsageStats(SmogonStat):
         format,
         start_date: datetime.date,
         end_date: datetime.date,
+        rank: int = DEFAULT_USAGE_RANK,
+        load_nearest_lower_rank: bool = True,
+        search_lower_ranks_on_miss: bool = True,
         verbose: bool = True,
     ):
         self.format = format.strip().lower()
-        self.rank = None
+        self.rank = int(rank)
         self.start_date = start_date
         self.end_date = end_date
         self.verbose = verbose
         self._usage = None
         gen, tier = int(self.format[3]), self.format[4:]
         self.gen = gen
-        usage_stats_path = metamon.data.download.download_usage_stats(gen)
-        movesets_path = os.path.join(
+        usage_stats_path = download_usage_stats(gen)
+        movesets_base = os.path.join(
             usage_stats_path, "movesets_data", f"gen{gen}", f"{tier}"
         )
-        inclusive_path = os.path.join(
+        inclusive_base = os.path.join(
             usage_stats_path, "movesets_data", f"gen{gen}", "all_tiers"
         )
+        movesets_path = os.path.join(movesets_base, str(self.rank))
+        inclusive_path = os.path.join(inclusive_base, str(self.rank))
+
+        def _avail_ranks(base: str) -> list[int]:
+            if not os.path.isdir(base):
+                return []
+            ranks = []
+            for d in os.listdir(base):
+                if os.path.isdir(os.path.join(base, d)) and re.fullmatch(r"\d+", d):
+                    ranks.append(int(d))
+            return sorted(ranks)
+
+        def _nearest_lower_rank(target: int, candidates: list[int]) -> Optional[int]:
+            lower = [r for r in candidates if r < target]
+            return max(lower) if lower else None
+
+        if not os.path.isdir(movesets_path):
+            avail = _avail_ranks(movesets_base)
+            fallback_rank = (
+                _nearest_lower_rank(self.rank, avail)
+                if load_nearest_lower_rank
+                else None
+            )
+            if fallback_rank is not None:
+                if self.verbose:
+                    warnings.warn(
+                        colored(
+                            f"Requested rank={self.rank} not found for {self.format}. "
+                            f"Falling back to nearest rank={fallback_rank}.",
+                            "yellow",
+                        )
+                    )
+                self.rank = fallback_rank
+                movesets_path = os.path.join(movesets_base, str(self.rank))
+                inclusive_path = os.path.join(inclusive_base, str(self.rank))
+            else:
+                raise FileNotFoundError(
+                    f"Movesets data not found for {self.format} at rank={self.rank}. "
+                    f"Available ranks: {avail}. "
+                    f"Run `python -m metamon download usage-stats` to get the latest data."
+                )
+
+        if not os.path.isdir(inclusive_path):
+            avail = _avail_ranks(inclusive_base)
+            raise FileNotFoundError(
+                f"All-tiers movesets not found for gen{gen} at rank={self.rank}. "
+                f"Available ranks: {avail}. "
+                f"Run `python -m metamon download usage-stats` to get the latest data."
+            )
+
         # data is split by year and month
         if not os.path.exists(movesets_path) or not os.path.exists(inclusive_path):
             raise FileNotFoundError(
@@ -417,6 +717,11 @@ class PreloadedSmogonUsageStats(SmogonStat):
             end_year=end_date.year,
             end_month=end_date.month,
         )
+        if not self._movesets:
+            raise FileNotFoundError(
+                f"No usage stats found for {self.format} at rank={self.rank} "
+                f"between {start_date} and {end_date} in {movesets_path}."
+            )
         self._inclusive = load_between_dates(
             inclusive_path,
             start_year=EARLIEST_USAGE_STATS_DATE.year,
@@ -424,6 +729,38 @@ class PreloadedSmogonUsageStats(SmogonStat):
             end_year=LATEST_USAGE_STATS_DATE.year,
             end_month=LATEST_USAGE_STATS_DATE.month,
         )
+        self._lower_rank_fallbacks: list[tuple[int, dict, dict]] = []
+        if search_lower_ranks_on_miss:
+            avail = _avail_ranks(movesets_base)
+            lower_ranks = [r for r in avail if r < self.rank]
+            lower_ranks.sort(reverse=True)
+            for r in lower_ranks:
+                lower_movesets_path = os.path.join(movesets_base, str(r))
+                lower_inclusive_path = os.path.join(inclusive_base, str(r))
+                if not os.path.isdir(lower_movesets_path) or not os.path.isdir(
+                    lower_inclusive_path
+                ):
+                    continue
+                lower_movesets = load_between_dates(
+                    lower_movesets_path,
+                    start_year=start_date.year,
+                    start_month=start_date.month,
+                    end_year=end_date.year,
+                    end_month=end_date.month,
+                    warn_if_empty=False,
+                )
+                lower_inclusive = load_between_dates(
+                    lower_inclusive_path,
+                    start_year=EARLIEST_USAGE_STATS_DATE.year,
+                    start_month=EARLIEST_USAGE_STATS_DATE.month,
+                    end_year=LATEST_USAGE_STATS_DATE.year,
+                    end_month=LATEST_USAGE_STATS_DATE.month,
+                    warn_if_empty=False,
+                )
+                if lower_movesets or lower_inclusive:
+                    self._lower_rank_fallbacks.append(
+                        (r, lower_movesets, lower_inclusive)
+                    )
 
     def _load(self):
         pass
@@ -433,18 +770,38 @@ class PreloadedSmogonUsageStats(SmogonStat):
         key_id = pokemon_name(key)
         recent = self._movesets.get(key_id, {})
         alltime = self._inclusive.get(key_id, {})
-        if not (recent or alltime):
+        if not (recent or alltime or self._lower_rank_fallbacks):
             return None
 
-        if recent and alltime:
-            # use the alltime stats to selectively get keys that exist
-            # in recent but are unhelpful for team prediction.
-            no_info = {"Nothing": 1.0}
-            for key, value in recent.items():
+        no_info = {"Nothing": 1.0}
+
+        def _apply_field_fallback(primary: dict, fallback: dict) -> dict:
+            if not fallback:
+                return primary
+            if not primary:
+                return fallback
+            for field, value in fallback.items():
                 if value == no_info:
-                    if alltime.get(key, {}) != no_info:
-                        recent[key] = alltime[key]
-        return recent if recent else alltime
+                    continue
+                if field not in primary or primary.get(field) == no_info:
+                    primary[field] = value
+            return primary
+
+        # Start with tier stats for the requested rank; do not use all_tiers yet.
+        primary = recent if recent else {}
+
+        # First, walk downward through lower-rank tier stats.
+        for _, lower_recent, _ in self._lower_rank_fallbacks:
+            primary = _apply_field_fallback(primary, lower_recent.get(key_id, {}))
+
+        # If still missing, fall back to all_tiers for the requested rank.
+        primary = _apply_field_fallback(primary, alltime)
+
+        # Finally, use lower-rank all_tiers as a last resort.
+        for _, _, lower_alltime in self._lower_rank_fallbacks:
+            primary = _apply_field_fallback(primary, lower_alltime.get(key_id, {}))
+
+        return primary if primary else None
 
     def __getitem__(self, key):
         entry = Dex.from_gen(self.gen).get_pokedex_entry(key)
@@ -462,7 +819,11 @@ def get_usage_stats(
     format,
     start_date: Optional[datetime.date] = None,
     end_date: Optional[datetime.date] = None,
+    rank: int = DEFAULT_USAGE_RANK,
+    load_nearest_lower_rank: bool = True,
+    search_lower_ranks_on_miss: bool = True,
 ) -> PreloadedSmogonUsageStats:
+    format = format_for_agent(format)
     if start_date is None or start_date < EARLIEST_USAGE_STATS_DATE:
         start_date = EARLIEST_USAGE_STATS_DATE
     else:
@@ -473,20 +834,47 @@ def get_usage_stats(
     else:
         # force to start of months to prevent cache miss (we only have monthly stats anyway)
         end_date = datetime.date(end_date.year, end_date.month, 1)
-    return _cached_smogon_stats(format, start_date, end_date)
+    return _cached_smogon_stats(
+        format,
+        start_date,
+        end_date,
+        int(rank),
+        load_nearest_lower_rank,
+        search_lower_ranks_on_miss,
+    )
 
 
 @functools.lru_cache(maxsize=64)
-def _cached_smogon_stats(format, start_date: datetime.date, end_date: datetime.date):
-    print(f"Loading usage stats for {format} between {start_date} and {end_date}")
-    return PreloadedSmogonUsageStats(
-        format=format, start_date=start_date, end_date=end_date, verbose=False
+def _cached_smogon_stats(
+    format,
+    start_date: datetime.date,
+    end_date: datetime.date,
+    rank: int,
+    load_nearest_lower_rank: bool,
+    search_lower_ranks_on_miss: bool,
+):
+    print(
+        f"Loading usage stats for {format} between {start_date} and {end_date} (rank={rank})"
     )
+    assert_usage_rank_available(format, rank)
+    stats = PreloadedSmogonUsageStats(
+        format=format,
+        start_date=start_date,
+        end_date=end_date,
+        rank=rank,
+        load_nearest_lower_rank=load_nearest_lower_rank,
+        search_lower_ranks_on_miss=search_lower_ranks_on_miss,
+        verbose=False,
+    )
+    assert_usage_stats_loaded(format, start_date, end_date, rank, stats)
+    return stats
 
 
 if __name__ == "__main__":
     stats = get_usage_stats(
-        "gen9ou", datetime.date(2023, 1, 1), datetime.date(2025, 6, 1)
+        "gen9ou",
+        datetime.date(2023, 1, 1),
+        datetime.date(2025, 6, 1),
     )
     print(len(stats.usage))
     for mon in sorted(

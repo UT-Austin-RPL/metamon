@@ -39,6 +39,7 @@ from metamon.data.download import (
     download_self_play_data,
     SELF_PLAY_SUBSETS,
     SELF_PLAY_FORMATS,
+    get_self_play_formats,
     METAMON_CACHE_DIR,
 )
 
@@ -105,8 +106,16 @@ class MetamonDataset(Dataset):
         verbose: bool = False,
         shuffle: bool = False,
         use_cached_filenames: bool = False,
+        split: Optional[str] = None,
+        test_fraction: float = 0.1,
+        split_seed: int = 42,
     ):
         assert os.path.exists(dset_root), f"Dataset root not found: {dset_root}"
+        assert split in (
+            None,
+            "train",
+            "test",
+        ), f"split must be None, 'train', or 'test', got {split!r}"
 
         self.dset_root = dset_root
         self.observation_space = copy.deepcopy(observation_space)
@@ -122,6 +131,9 @@ class MetamonDataset(Dataset):
         self.verbose = verbose
         self.shuffle = shuffle
         self.use_cached_filenames = use_cached_filenames
+        self.split = split
+        self.test_fraction = test_fraction
+        self.split_seed = split_seed
 
         self.index_path = os.path.join(self.dset_root, "index.csv")
 
@@ -231,20 +243,27 @@ class MetamonDataset(Dataset):
     #############################
 
     def _index_directory(self, format_name: str) -> List[str]:
-        """DIRECTORY: Scan directory for json files."""
         format_dir = os.path.join(self.dset_root, format_name)
+        if not os.path.isdir(format_dir):
+            if self.verbose:
+                print(f"  Warning: Directory does not exist: {format_dir}")
+            return []
+
+        result = []
         try:
-            files = os.listdir(format_dir)
+            for root, _, files in os.walk(format_dir):
+                for f in files:
+                    if f.endswith((".json", ".json.lz4")):
+                        # Store path relative to dset_root
+                        full_path = os.path.join(root, f)
+                        rel_path = os.path.relpath(full_path, self.dset_root)
+                        result.append(rel_path)
         except (OSError, PermissionError) as e:
             if self.verbose:
                 print(f"  Warning: Could not read {format_dir}: {e}")
             return []
 
-        return [
-            os.path.join(format_name, f)
-            for f in files
-            if f.endswith((".json", ".json.lz4"))
-        ]
+        return result
 
     ########################
     ## Filename Filtering ##
@@ -307,6 +326,21 @@ class MetamonDataset(Dataset):
         except ValueError:
             return datetime.strptime(date_str, "%m-%d-%Y-%H:%M:%S")
 
+    ##########################
+    ## Train / Test Split  ##
+    ##########################
+
+    def _apply_split(self):
+        """Partition filenames into train/test via deterministic seeded shuffle."""
+        if self.split is None:
+            return
+        fnames = sorted(self.filenames)
+        random.Random(self.split_seed).shuffle(fnames)
+        cutoff = int(len(fnames) * (1 - self.test_fraction))
+        self.filenames = fnames[:cutoff] if self.split == "train" else fnames[cutoff:]
+        if self.verbose:
+            print(f"  Split '{self.split}': {len(self.filenames)} battles")
+
     ###################
     ## File Indexing ##
     ###################
@@ -333,6 +367,8 @@ class MetamonDataset(Dataset):
 
         if self.verbose:
             print(f"Total: {len(self.filenames)} battles after filtering")
+
+        self._apply_split()
 
         if self.shuffle:
             random.shuffle(self.filenames)
@@ -515,8 +551,11 @@ class ParsedReplayDataset(MetamonDataset):
         verbose: bool = False,
         shuffle: bool = False,
         use_cached_filenames: bool = False,
+        split: Optional[str] = None,
+        test_fraction: float = 0.1,
+        split_seed: int = 42,
     ):
-        formats = formats or metamon.SUPPORTED_BATTLE_FORMATS
+        formats = formats or metamon.config.SUPPORTED_BATTLE_FORMATS
 
         if dset_root is None:
             for format_name in formats:
@@ -538,6 +577,9 @@ class ParsedReplayDataset(MetamonDataset):
             verbose=verbose,
             shuffle=shuffle,
             use_cached_filenames=use_cached_filenames,
+            split=split,
+            test_fraction=test_fraction,
+            split_seed=split_seed,
         )
 
 
@@ -549,8 +591,10 @@ class SelfPlayDataset(MetamonDataset):
     Args:
         subset: Which self-play subset to load:
             - "pac-base": 11M trajectories from PokéAgent Challenge training
-            - "pac-exploratory": 7M trajectories from higher-temperature sampling.
-        formats: Defaults to SELF_PLAY_FORMATS (gen1-4ou, gen9ou).
+            - "pac-exploratory": 7M trajectories from higher-temperature sampling
+            - "pac-tauros": ~4.9M gen1ou trajectories from Tauros self-play iterations
+        formats: Defaults to the formats published for this subset on HF
+            (all self-play OUs for pac-base/pac-exploratory; gen1ou only for pac-tauros).
 
     See MetamonDataset for remaining argument documentation.
     """
@@ -569,6 +613,9 @@ class SelfPlayDataset(MetamonDataset):
         verbose: bool = False,
         shuffle: bool = False,
         use_cached_filenames: bool = False,
+        split: Optional[str] = None,
+        test_fraction: float = 0.1,
+        split_seed: int = 42,
     ):
         if subset not in SELF_PLAY_SUBSETS:
             raise ValueError(
@@ -576,7 +623,7 @@ class SelfPlayDataset(MetamonDataset):
             )
 
         self.subset = subset
-        formats = formats or SELF_PLAY_FORMATS
+        formats = formats or get_self_play_formats(subset)
 
         # Download tar files (without extracting)
         for format_name in formats:
@@ -596,10 +643,14 @@ class SelfPlayDataset(MetamonDataset):
             verbose=verbose,
             shuffle=shuffle,
             use_cached_filenames=use_cached_filenames,
+            split=split,
+            test_fraction=test_fraction,
+            split_seed=split_seed,
         )
 
 
 if __name__ == "__main__":
+    import argparse
     from argparse import ArgumentParser
     from metamon.interface import (
         DefaultShapedReward,
@@ -608,25 +659,68 @@ if __name__ == "__main__":
         DefaultActionSpace,
     )
     from metamon.tokenizer import get_tokenizer
+    from metamon.data.download import SELF_PLAY_SUBSETS
 
-    parser = ArgumentParser()
-    parser.add_argument("--dset_root", type=str, default=None)
+    parser = ArgumentParser(
+        description="Load and iterate parsed battle trajectories.",
+        epilog="""
+Examples:
+  # Human replays (default)
+  python -m metamon.data.parsed_replay_dset --formats gen1ou
+
+  # Self-play
+  python -m metamon.data.parsed_replay_dset --subset pac-tauros --formats gen1ou
+  python -m metamon.data.parsed_replay_dset --subset pac-base --formats gen2ou --max-samples 100
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--subset",
+        type=str,
+        default=None,
+        choices=SELF_PLAY_SUBSETS,
+        help=(
+            "Load self-play data from this HuggingFace subset "
+            f"({', '.join(SELF_PLAY_SUBSETS)}) instead of human parsed replays."
+        ),
+    )
+    parser.add_argument(
+        "--dset_root",
+        type=str,
+        default=None,
+        help="Root directory for human replays (ignored when --subset is set).",
+    )
     parser.add_argument("--formats", type=str, default=None, nargs="+")
     parser.add_argument("--obs_space", type=str, default="DefaultObservationSpace")
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Stop after this many trajectories (default: iterate the full dataset).",
+    )
     args = parser.parse_args()
 
-    dset = ParsedReplayDataset(
-        dset_root=args.dset_root,
-        observation_space=TokenizedObservationSpace(
-            get_observation_space(args.obs_space),
-            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
-        ),
+    obs_space = TokenizedObservationSpace(
+        get_observation_space(args.obs_space),
+        tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+    )
+    dset_kwargs = dict(
+        observation_space=obs_space,
         action_space=DefaultActionSpace(),
         reward_function=DefaultShapedReward(),
         formats=args.formats,
         verbose=True,
         shuffle=True,
-        use_cached_filenames=True,
+        use_cached_filenames=False,
     )
-    for i in tqdm.tqdm(range(len(dset))):
+
+    if args.subset:
+        dset = SelfPlayDataset(subset=args.subset, **dset_kwargs)
+    else:
+        dset = ParsedReplayDataset(dset_root=args.dset_root, **dset_kwargs)
+
+    n_iter = len(dset) if args.max_samples is None else min(args.max_samples, len(dset))
+    label = args.subset or "human parsed replays"
+    print(f"Loaded {len(dset):,} trajectories ({label}); iterating {n_iter:,}")
+    for i in tqdm.tqdm(range(n_iter)):
         obs, actions, rewards, dones = dset[i]

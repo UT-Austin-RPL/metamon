@@ -222,7 +222,7 @@ def check_action_alignment(replay):
         active = turn.active_pokemon_1 if replay.from_p1_pov else turn.active_pokemon_2
         switches = turn.get_switches(replay.from_p1_pov)
         for active_pokemon, action in zip(active, team_actions):
-            if action is None or action.name in ["Struggle"] or action.is_noop:
+            if action is None or action.name in {"Struggle", "Fight"} or action.is_noop:
                 # considered a "no-op"
                 continue
             elif action.name == "Switch":
@@ -269,7 +269,7 @@ def check_action_idxs(
             raise ActionIndexError(f"Found Tera action in gen {gen}")
         if tera > 1:
             raise ActionIndexError(f"Found {tera} Tera actions")
-        if action.name in {"Struggle", "Recharge"} and action_idx != 0:
+        if action.name in {"Struggle", "Recharge", "Fight"} and action_idx != 0:
             # check struggle and recharge special case move overrides
             raise ActionIndexError(
                 f"{action.name} is action index {action_idx}; expected to be 0"

@@ -12,7 +12,8 @@ amago.agent.MultiTaskAgent.use_multigamma = False
 amago.agent.MultiTaskAgent.fake_filter = True
 
 MetamonAMAGOExperiment.l2_coeff = 1e-4
-MetamonAMAGOExperiment.learning_rate = 1.5e-4
+MetamonAMAGOExperiment.learning_rate = 1.25e-4
 MetamonAMAGOExperiment.grad_clip = 1.5
-MetamonAMAGOExperiment.critic_loss_weight = 10.
-MetamonAMAGOExperiment.lr_warmup_steps = 1000
+agent.Agent.critic_loss_weight = 10.
+agent.MultiTaskAgent.critic_loss_weight = 10.
+MetamonAMAGOExperiment.lr_warmup_steps = 2000

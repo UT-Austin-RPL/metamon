@@ -4,7 +4,7 @@ from datetime import date
 
 import numpy as np
 
-from metamon import SUPPORTED_BATTLE_FORMATS
+from metamon.config import SUPPORTED_BATTLE_FORMATS
 from metamon.backend.replay_parser.str_parsing import (
     clean_no_numbers,
     pokemon_name,

@@ -1,17 +1,66 @@
+import csv
 import os
 import random
 import pathlib
+from dataclasses import dataclass
 from typing import List, Tuple, Optional, Union, Iterable, Literal, Dict, Set
 from datetime import datetime
 
 import torch
+import torch.multiprocessing as mp
 from torch.utils.data import Dataset
 from poke_env.data import to_id_str
 
 import metamon
 from metamon.backend.team_prediction.team import TeamSet, Roster, PokemonSet
-from metamon.backend.team_prediction.vocabulary import Vocabulary
-from metamon import METAMON_CACHE_DIR
+from metamon.backend.team_prediction.team import Team2Seq
+from metamon.backend.team_prediction.masking import TeamMasker
+from metamon.config import METAMON_CACHE_DIR
+
+
+@dataclass(frozen=True)
+class ReplayTeamFilenameMeta:
+    battle_id: str
+    rating_raw: str
+    rating_int: int
+    date: datetime
+    is_smogtours: bool
+
+
+def parse_replay_team_filename(
+    filename: str, format: str
+) -> Optional[ReplayTeamFilenameMeta]:
+    suffix = f".{format}_team"
+    if not filename.endswith(suffix):
+        return None
+    stem = filename[: -len(suffix)]
+    parts = stem.split("_")
+    if len(parts) < 7:
+        return None
+    battle_id, rating_raw, _, _, _, mm_dd_yyyy, result = parts[:7]
+    if result not in ("WIN", "LOSS"):
+        return None
+    try:
+        date = datetime.strptime(mm_dd_yyyy, "%m-%d-%Y")
+    except ValueError:
+        return None
+    try:
+        rating_int = int(rating_raw)
+    except ValueError:
+        rating_int = 1000
+    return ReplayTeamFilenameMeta(
+        battle_id=battle_id,
+        rating_raw=rating_raw,
+        rating_int=rating_int,
+        date=date,
+        is_smogtours="smogtours" in battle_id.lower(),
+    )
+
+
+def default_revealed_teams_dir() -> str:
+    if METAMON_CACHE_DIR is None:
+        raise ValueError("METAMON_CACHE_DIR is not set")
+    return os.path.join(METAMON_CACHE_DIR, "parsed-replays", "revealed_teams")
 
 
 class TeamDataset(Dataset):
@@ -30,7 +79,12 @@ class TeamDataset(Dataset):
         self.load_filenames(max_teams=max_teams)
 
     def load_filenames(self, max_teams: Optional[int] = None):
-        self.filenames = os.listdir(self.team_path)
+        self.filenames = []
+        for root, _, files in os.walk(self.team_path):
+            for f in files:
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, self.team_path)
+                self.filenames.append(rel_path)
         random.shuffle(self.filenames)
         if max_teams is not None:
             self.filenames = self.filenames[:max_teams]
@@ -74,222 +128,255 @@ class FilteredTeamsFromReplaysDataset(TeamDataset):
         max_date: Optional[str] = None,
         min_rating: Optional[int] = None,
         max_rating: Optional[int] = None,
+        sort_by_date: bool = False,
     ):
         self.min_date = min_date
         self.max_date = max_date
         self.min_rating = min_rating
         self.max_rating = max_rating
+        self.sort_by_date = sort_by_date
         super().__init__(
             team_file_dir=replay_teamfile_dir, format=format, max_teams=max_teams
         )
 
     def load_filenames(self, max_teams: Optional[int] = None):
         self.filenames = []
+        entries: list[tuple[str, datetime]] = []
 
-        def _rating_to_int(rating: str) -> int:
-            # mainly maps "Unrated" to 1000
-            try:
-                return int(rating)
-            except ValueError:
-                return 1000
+        for root, _, files in os.walk(self.team_path):
+            for filename in files:
+                if not filename.endswith(f".{self.format}_team"):
+                    continue
+                meta = parse_replay_team_filename(filename, self.format)
+                if meta is None:
+                    continue
+                if self.min_rating is not None and meta.rating_int < self.min_rating:
+                    continue
+                if self.max_rating is not None and meta.rating_int > self.max_rating:
+                    continue
+                if self.min_date is not None and meta.date < datetime.strptime(
+                    self.min_date, "%m-%d-%Y"
+                ):
+                    continue
+                if self.max_date is not None and meta.date > datetime.strptime(
+                    self.max_date, "%m-%d-%Y"
+                ):
+                    continue
 
-        for filename in os.listdir(self.team_path):
-            if not filename.endswith(f".{self.format}_team"):
-                continue
-            try:
-                (
-                    battle_id,
-                    rating,
-                    username,
-                    _,
-                    opponent_username,
-                    mm_dd_yyyy,
-                    result,
-                ) = filename[: -len(f".{self.format}_team")].split("_")
-            except ValueError:
-                continue
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, self.team_path)
+                entries.append((rel_path, meta.date))
 
-            rating = _rating_to_int(rating)
-            date = datetime.strptime(mm_dd_yyyy, "%m-%d-%Y")
-            if (
-                (self.min_rating is not None and rating < self.min_rating)
-                or (self.max_rating is not None and rating > self.max_rating)
-                or (
-                    self.min_date is not None
-                    and date < datetime.strptime(self.min_date, "%m-%d-%Y")
-                )
-                or (
-                    self.max_date is not None
-                    and date > datetime.strptime(self.max_date, "%m-%d-%Y")
-                )
-            ):
-                continue
-
-            self.filenames.append(filename)
-
-        random.shuffle(self.filenames)
+        if self.sort_by_date:
+            entries.sort(key=lambda item: item[1], reverse=True)
+        else:
+            random.shuffle(entries)
+        self.filenames = [rel_path for rel_path, _ in entries]
         if max_teams is not None:
             self.filenames = self.filenames[:max_teams]
 
 
 class TeamPredictionDataset(Dataset):
+    """
+    Dataset for team prediction using index_scored.csv.
+
+    Supports generation-weighted sampling. Loads files grouped by generation
+    with their revealed scores for efficient sampling.
+    """
+
     def __init__(
         self,
-        data_dir: Union[str, Iterable[str]],
-        mask_pokemon_prob_range: Tuple[float, float],
-        mask_attrs_prob_range: Tuple[float, float],
+        data_dir: str,
+        masker: TeamMasker,
+        gen_weights: Optional[Dict[int, float]] = None,
         split: Literal["train", "val"] = "train",
         validation_ratio: float = 0.1,
         seed: Optional[int] = None,
+        verbose: bool = False,
+        include_stats: bool = False,
     ):
-        """
-        Args:
-            data_dir: Directory or iterable of directories containing .team files (will be searched recursively)
-            split: Whether this is the training or validation split
-            validation_ratio: Fraction of data to use for validation
-            mask_pokemon_prob_range: Range of probabilities to use for masking an entire Pokemon
-            mask_attrs_prob_range: Range of probabilities to use for masking an indivudal attribute
-            seed: Random seed for reproducibility
-        """
-        (
-            self.mask_pokemon_prob_low,
-            self.mask_pokemon_prob_high,
-        ) = mask_pokemon_prob_range
-        self.mask_attrs_prob_low, self.mask_attrs_prob_high = mask_attrs_prob_range
-        assert self.mask_pokemon_prob_low <= self.mask_pokemon_prob_high
-        assert self.mask_attrs_prob_low <= self.mask_attrs_prob_high
-        assert 0 <= validation_ratio <= 1, "validation_ratio must be in [0, 1)"
+        self.masker = masker
+        self.t2s = Team2Seq(include_stats=include_stats)
+        self.verbose = verbose
+        self.data_dir = pathlib.Path(data_dir)
+        self._rng = random.Random(seed)
 
-        self.vocab = Vocabulary()
-        if seed is not None:
-            random.seed(seed)
-            torch.manual_seed(seed)
+        # load index_scored.csv
+        scored_index_path = self.data_dir / "index_scored.csv"
+        if not scored_index_path.exists():
+            raise FileNotFoundError(
+                f"index_scored.csv not found at {scored_index_path}. "
+                "Run compute_revealed_scores.py first."
+            )
 
-        # Accept a string or an iterable of strings for data_dir
-        if isinstance(data_dir, str):
-            data_dirs = [data_dir]
-        else:
-            data_dirs = list(data_dir)
+        # parse csv: group by gen, sorted by score descending
+        files_by_gen: Dict[int, List[Tuple[str, float]]] = {}
+        with open(scored_index_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                filepath = str(self.data_dir / row["filename"])
+                gen = int(row["gen"])
+                score = float(row["revealed_score"])
+                if gen not in files_by_gen:
+                    files_by_gen[gen] = []
+                files_by_gen[gen].append((filepath, score))
 
-        # Collect all team files
-        team_files_set = set()
-        for d in data_dirs:
-            d_path = pathlib.Path(d)
-            for f in d_path.rglob("*"):
-                if f.is_file() and f.suffix.endswith("team"):
-                    team_files_set.add(str(f))
-        all_team_files = sorted(team_files_set)
+        # Verify sorted by score descending within each gen
+        for gen, files in files_by_gen.items():
+            for i in range(len(files) - 1):
+                assert (
+                    files[i][1] >= files[i + 1][1]
+                ), f"Files not sorted by score descending for gen {gen}"
 
-        # Create deterministic train/val split
-        n_total = len(all_team_files)
-        n_val = int(n_total * validation_ratio)
-
-        # Use a separate random state for splitting to ensure same split regardless of other randomness
+        # train/val split
         split_rng = random.Random(seed)
-        indices = list(range(n_total))
-        split_rng.shuffle(indices)
+        self.files_by_gen: Dict[int, List[Tuple[str, float]]] = {}
+        for gen, files in files_by_gen.items():
+            n_val = int(len(files) * validation_ratio)
+            indices = list(range(len(files)))
+            split_rng.shuffle(indices)
+            val_indices = set(indices[:n_val])
 
-        val_indices = set(indices[:n_val])
+            if split == "train":
+                selected = [files[i] for i in range(len(files)) if i not in val_indices]
+            else:
+                selected = [files[i] for i in range(len(files)) if i in val_indices]
+            selected.sort(key=lambda x: -x[1])
+            self.files_by_gen[gen] = selected
 
-        # Assign files based on split
-        if split == "train":
-            self.team_files = [
-                f for i, f in enumerate(all_team_files) if i not in val_indices
-            ]
-        else:  # val
-            self.team_files = [
-                f for i, f in enumerate(all_team_files) if i in val_indices
-            ]
+        # extract just scores for subclass use (binary search)
+        self.scores_by_gen: Dict[int, List[float]] = {
+            gen: [s for _, s in files] for gen, files in self.files_by_gen.items()
+        }
 
-        print(f"Created {split} split with {len(self.team_files)} team files")
+        # generation weights
+        self.gens = sorted(self.files_by_gen.keys())
+        if gen_weights is None:
+            # natural distribution: probability proportional to file count
+            self.gen_weights = {g: len(self.files_by_gen[g]) for g in self.gens}
+        else:
+            self.gen_weights = {g: gen_weights.get(g, 0.0) for g in self.gens}
+        total_weight = sum(self.gen_weights.values())
+        if total_weight <= 0:
+            raise ValueError(
+                "Invalid generation weights: sum(gen_weights) must be > 0. "
+                f"Got {self.gen_weights}"
+            )
+        self.gen_probs = [self.gen_weights[g] / total_weight for g in self.gens]
+
+        self._total_files = sum(len(f) for f in self.files_by_gen.values())
+        if verbose:
+            print(
+                f"Dataset ({split}): {self._total_files:,} files, gens={list(self.gens)}"
+            )
+
+    def _get_sample_range(self, gen: int) -> int:
+        """Get the max index to sample from for a generation. Base class uses all files."""
+        return len(self.files_by_gen[gen]) - 1
 
     def __len__(self) -> int:
-        return len(self.team_files)
+        return self._total_files
 
-    def _mask(self, seq: list[str]) -> list[str]:
-        mask_out = []
-        for token in seq:
-            if random.random() < self.mask_pokemon_prob:
-                mask_out.append(self.vocab.special_tokens["Mon"])
-            else:
-                mask_out.append(token)
-        return mask_out
+    def _load_and_process_team(self, filepath: str):
+        """Load a team file and process it through masker and Team2Seq."""
+        format_str = to_id_str(os.path.splitext(filepath)[1].split("_")[0])
+        assert format_str.startswith("gen"), f"Invalid format: {format_str}"
+        team = TeamSet.from_showdown_file(filepath, format=format_str)
+        x, y = self.masker.mask(team)
+        x_tokens, type_ids, y_tokens, pred_mask = self.t2s.encode_pair(x, y)
+        assert len(x_tokens) == (8 * 6) + 1
+        return x_tokens, type_ids, y_tokens, pred_mask
 
-    def __getitem__(self, idx: int) -> Tuple[TeamSet, TeamSet]:
-        """
-        Returns:
-            x: Masked team
-            x_type_ids: Type indicating ints (pokemon, ability, item, etc.)
-            y: Complete team (ground truth)
-            pred_mask: Mask indicating which values are eligible for loss function
-        """
-        path = self.team_files[idx]
-        # Extract format from file extension (e.g. .gen4ou_team -> gen4ou)
-        format = to_id_str(os.path.splitext(path)[1].split("_")[0])
-        assert format.startswith("gen"), f"Invalid format: {format}"
-        team = TeamSet.from_showdown_file(path, format=format)
-        mask_pokemon_prob = random.uniform(
-            self.mask_pokemon_prob_low, self.mask_pokemon_prob_high
-        )
-        mask_attrs_prob = random.uniform(
-            self.mask_attrs_prob_low, self.mask_attrs_prob_high
-        )
-        x, y = team.to_prediction_pair(
-            mask_pokemon_prob=mask_pokemon_prob,
-            mask_attrs_prob=mask_attrs_prob,
-        )
-        x_seq, x_needs_pred = x.to_seq(include_stats=False)
-        y_seq, y_needs_pred = y.to_seq(include_stats=False)
-        # we will only train on values that are missing from x but provided by y
-        pred_mask = torch.logical_and(
-            torch.tensor(x_needs_pred), ~torch.tensor(y_needs_pred)
-        )
-        x_tokens, x_type_ids = self.vocab.pokeset_seq_to_ints(x_seq)
-        y_tokens, y_type_ids = self.vocab.pokeset_seq_to_ints(y_seq)
-        assert len(x_tokens) == len(x_type_ids)
-        assert len(y_tokens) == len(y_type_ids)
-        assert len(x_tokens) == (7 * 6) + 1
-        assert (x_type_ids == y_type_ids).all()
-        x_tokens = torch.from_numpy(x_tokens).long()
-        x_type_ids = torch.from_numpy(x_type_ids).long()
-        y_tokens = torch.from_numpy(y_tokens).long()
-        return x_tokens, x_type_ids, y_tokens, pred_mask
+    def __getitem__(self, idx: int):
+        max_retries = 50
+        for attempt in range(max_retries):
+            try:
+                gen = self._rng.choices(self.gens, weights=self.gen_probs, k=1)[0]
+                max_idx = self._get_sample_range(gen)
+                if max_idx < 0:
+                    continue
+                file_idx = self._rng.randint(0, max_idx)
+                filepath, score = self.files_by_gen[gen][file_idx]
+                return self._load_and_process_team(filepath)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise RuntimeError(
+                        f"Failed after {max_retries} attempts. Last error: {e}"
+                    )
+                continue
 
 
-class CompetitiveTeamPredictionDataset(TeamPredictionDataset):
+class ScoredTeamPredictionDataset(TeamPredictionDataset):
+    """
+    Dataset with percentile-based filtering and curriculum support.
+
+    Inherits gen-weighted sampling from TeamPredictionDataset, adds:
+    - Percentile-based filtering (e.g., top 10% most complete teams)
+    - Curriculum learning with dynamically changing percentile threshold
+
+    Files are sorted by revealed_score descending, so percentile=10 means
+    only sample from the top 10% most complete teams per generation.
+    """
+
     def __init__(
         self,
-        mask_pokemon_prob_range: Tuple[float, float] = (0.1, 0.1),
-        mask_attrs_prob_range: Tuple[float, float] = (0.1, 0.1),
+        data_dir: str,
+        masker: TeamMasker,
+        gen_weights: Optional[Dict[int, float]] = None,
+        percentile: float = 100.0,
+        split: Literal["train", "val"] = "train",
+        validation_ratio: float = 0.1,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+        include_stats: bool = False,
     ):
-        team_dirs = []
-        for gen in range(1, 5):
-            for tier in ["ou", "uu", "ubers", "nu"]:
-                team_dirs.append(
-                    os.path.join(
-                        METAMON_CACHE_DIR, "teams", f"gen{gen}", tier, "competitive"
-                    )
-                )
         super().__init__(
-            data_dir=team_dirs,
-            split="val",
-            validation_ratio=1.0,
-            mask_pokemon_prob_range=mask_pokemon_prob_range,
-            mask_attrs_prob_range=mask_attrs_prob_range,
+            data_dir=data_dir,
+            masker=masker,
+            gen_weights=gen_weights,
+            split=split,
+            validation_ratio=validation_ratio,
+            seed=seed,
+            verbose=verbose,
+            include_stats=include_stats,
         )
 
+        # Static percentile (can be overridden by curriculum)
+        self._static_percentile = percentile
 
-if __name__ == "__main__":
-    # Test dataset loading
-    dataset = CompetitiveTeamPredictionDataset()
+        # Shared value for curriculum (if used)
+        self._shared_percentile: Optional[mp.Value] = None
 
-    print(f"Dataset size: {len(dataset)}")
+    def enable_curriculum(self, initial_percentile: float = 10.0) -> None:
+        """Enable curriculum learning with a shared percentile that can be updated."""
+        self._shared_percentile = mp.Value("d", initial_percentile)
 
-    # Test loading a single item
-    x, type_ids, y = dataset[0]
-    print("\nMasked team (x):")
-    print(x)
-    print("\nType IDs:")
-    print(type_ids)
-    print("\nComplete team (y):")
-    print(y)
+    def set_curriculum_percentile(self, percentile: float) -> None:
+        """Update the curriculum percentile (call from main process)."""
+        if self._shared_percentile is not None:
+            self._shared_percentile.value = percentile
+
+    @property
+    def percentile(self) -> float:
+        """Get current percentile threshold."""
+        if self._shared_percentile is not None:
+            return self._shared_percentile.value
+        return self._static_percentile
+
+    def _get_sample_range(self, gen: int) -> int:
+        """
+        Override to restrict sampling to top percentile of files by score.
+
+        Returns the last valid index for sampling.
+        Returns -1 if no files available.
+        """
+        n_files = len(self.files_by_gen[gen])
+        if n_files == 0:
+            return -1
+
+        # percentile=10 means top 10%, so cutoff = n_files * 10 / 100
+        cutoff = int(n_files * self.percentile / 100.0)
+        # Ensure at least 1 file if percentile > 0
+        if self.percentile > 0:
+            cutoff = max(1, cutoff)
+        return cutoff - 1  # Convert count to max index

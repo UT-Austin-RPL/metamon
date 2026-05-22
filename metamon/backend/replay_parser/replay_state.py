@@ -326,7 +326,7 @@ class Pokemon:
             return self.moves[move_name].pp
 
     def reveal_move(self, move: Move):
-        if move.name in {"Struggle", "Recharge"}:
+        if move.name in {"Struggle", "Recharge", "Fight"}:
             return
 
         if self.transformed_into is not None:

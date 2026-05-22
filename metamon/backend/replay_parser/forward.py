@@ -312,7 +312,7 @@ class SimProtocol:
                 if (
                     command == "move"
                     and choice_args
-                    and choice_args.lower() not in {"recharge", "struggle"}
+                    and choice_args.lower() not in {"recharge", "struggle", "fight"}
                 ):
                     user_pokemon = (
                         self.curr_turn.active_pokemon_1[poke_idx]

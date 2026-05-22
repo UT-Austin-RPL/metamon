@@ -1,9 +1,5 @@
 from typing import Optional, Any, Type
-import json
 import os
-import subprocess
-import sys
-import time
 import warnings
 
 import gin
@@ -12,8 +8,8 @@ import gymnasium as gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 import einops
-from einops import rearrange
 
 
 from metamon.interface import (
@@ -27,8 +23,8 @@ from metamon.il.model import (
     PerceiverTurnEmbedding,
     TokenEmbedding,
     MultiModalEmbedding,
-    PerceiverEncoder,
     LearnablePosEmb,
+    PerceiverEncoder,
 )
 from metamon.tokenizer import PokemonTokenizer, UNKNOWN_TOKEN
 from metamon.data import ParsedReplayDataset
@@ -37,9 +33,9 @@ from metamon.env import (
     PokeEnvWrapper,
     BattleAgainstBaseline,
     QueueOnLocalLadder,
+    ChallengeByUsername,
     PokeAgentLadder,
 )
-
 
 try:
     import amago
@@ -49,18 +45,88 @@ except ImportError:
     )
 else:
     assert (
-        hasattr(amago, "__version__") and amago.__version__ >= "3.1.1"
-    ), "Update to the latest AMAGO version!"
+        hasattr(amago, "__version__") and amago.__version__ >= "3.4.0"
+    ), f"AMAGO v3.4.0+ required; found {getattr(amago, '__version__', 'unknown')}."
     from amago.envs import AMAGOEnv
-    from amago.nets.utils import symlog
-    from amago.loading import RLData, RLDataset, Batch
+    from amago.nets.utils import symlog, add_activation_log
+    from amago.loading import RLData, RLDataset, Batch, MAGIC_PAD_VAL
     from amago.envs.amago_env import AMAGO_ENV_LOG_PREFIX
+    from amago.nets.ff import Normalization
 
 
 def _block_warnings():
     """Suppress common gymnasium warnings during environment creation."""
     warnings.filterwarnings("ignore", category=UserWarning)
     warnings.filterwarnings("ignore", category=amago.utils.AmagoWarning)
+
+
+@gin.configurable
+class BatchNormalizedExpFilter:
+    """Batch-normalized exponential weighting for filtered behavior cloning.
+
+    Z-scores advantages over *unmasked* positions before applying the
+    exponential, making ``beta`` invariant to the absolute scale of
+    Q-values / rewards.  Inspired by GRPO-style relative advantage
+    normalization.
+
+    Because amago's ``fbc_filter_func`` interface only passes the advantage
+    tensor, the mask must be injected externally via :meth:`set_mask` before
+    the agent forward pass.  :class:`MetamonAMAGOExperiment` handles this
+    automatically in :meth:`train_step`.
+
+    Args:
+        beta: Scale applied after normalization.  With unit-variance inputs,
+            values in [1, 3] give a stable curriculum.
+        eps: Small constant for numerical stability in std computation.
+        clip_weights_low: Floor for output weights.
+        clip_weights_high: Ceiling for output weights.
+    """
+
+    def __init__(
+        self,
+        beta: float = 1.0,
+        eps: float = 1e-8,
+        clip_weights_low: Optional[float] = 1e-7,
+        clip_weights_high: Optional[float] = 100.0,
+    ):
+        self.beta = beta
+        self.eps = eps
+        self.clip_weights_low = clip_weights_low
+        self.clip_weights_high = clip_weights_high
+        self._mask: Optional[torch.Tensor] = None
+
+    def set_mask(self, mask: Optional[torch.Tensor]):
+        """Set the boolean mask for the next ``__call__``.
+
+        Args:
+            mask: (Batch, Length, 1) or broadcastable bool tensor. ``True``
+                where the advantage is valid.  Cleared after each call.
+        """
+        self._mask = mask
+
+    def __call__(self, adv: torch.Tensor) -> torch.Tensor:
+        mask = self._mask
+        self._mask = None
+
+        if mask is not None:
+            mask = mask[:, : adv.shape[1], ...]
+            while mask.ndim < adv.ndim:
+                mask = mask.unsqueeze(-1)
+            mask = mask.expand_as(adv)
+            valid = adv[mask]
+            mu = valid.mean()
+            sigma = valid.std() + self.eps
+        else:
+            mu = adv.mean()
+            sigma = adv.std() + self.eps
+
+        adv_norm = (adv - mu) / sigma
+        weights = torch.exp(self.beta * adv_norm)
+        if self.clip_weights_low is not None or self.clip_weights_high is not None:
+            weights = torch.clamp(
+                weights, min=self.clip_weights_low, max=self.clip_weights_high
+            )
+        return weights
 
 
 def make_placeholder_env(
@@ -120,6 +186,18 @@ def make_pokeagent_ladder_env(*args, **kwargs):
     return PSLadderAMAGOWrapper(menv)
 
 
+def make_challenge_env(*args, **kwargs):
+    """
+    Battle a specific opponent by username (head-to-head challenge mode).
+    """
+    _block_warnings()
+    menv = ChallengeByUsername(*args, **kwargs)
+    print(
+        f"Made Challenge Env ({menv._role}): {menv.player_username} vs {menv._opponent_username}"
+    )
+    return PSLadderAMAGOWrapper(menv)
+
+
 def make_baseline_env(*args, **kwargs):
     """
     Battle against a built-in baseline opponent
@@ -136,20 +214,24 @@ def make_placeholder_experiment(
     log: bool,
     observation_space: ObservationSpace,
     action_space: ActionSpace,
+    experiment_type: type = None,
 ):
     """
     Initialize an AMAGO experiment that will be used to load a pretrained checkpoint
     and manage agent/env interaction.
+
+    Args:
+        experiment_type: Experiment class to instantiate. Defaults to MetamonAMAGOExperiment.
     """
-    # the environment is only used to initialize the network
-    # before loading the correct checkpoint
+    if experiment_type is None:
+        experiment_type = MetamonAMAGOExperiment
     penv = make_placeholder_env(
         observation_space=observation_space,
         action_space=action_space,
     )
     dummy_dset = amago.loading.DoNothingDataset()
     dummy_env = lambda: penv
-    experiment = MetamonAMAGOExperiment(
+    experiment = experiment_type(
         # assumes that positional args
         # agent_type, tstep_encoder_type,
         # traj_encoder_type, and max_seq_len
@@ -425,8 +507,14 @@ class MetamonMaskedResidualActor(amago.nets.actor_critic.ResidualActor):
 
 
 class PSLadderAMAGOWrapper(MetamonAMAGOWrapper):
+    """AMAGO wrapper for envs with a fixed number of battles (ladder or challenge mode).
+
+    Blocks auto-resets after num_battles to avoid creating battles that won't be completed.
+    Works with both QueueOnLocalLadder and ChallengeByUsername.
+    """
+
     def __init__(self, env):
-        assert isinstance(env, QueueOnLocalLadder)
+        assert isinstance(env, (QueueOnLocalLadder, ChallengeByUsername))
         self.placeholder_obs = None
         self.battle_counter = 0
         super().__init__(env)
@@ -434,7 +522,7 @@ class PSLadderAMAGOWrapper(MetamonAMAGOWrapper):
     def inner_reset(self, *args, **kwargs):
         if self.battle_counter >= self.env.num_battles:
             # quirk of amago's parallel actor auto-resets that matters
-            # for online ladder.
+            # for online ladder and challenge mode.
             warnings.warn(
                 "Blocking auto-reset to avoid creating a battle that will not be completed!"
             )
@@ -519,15 +607,18 @@ class MetamonTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
     def emb_dim(self):
         return self.turn_embedding.output_dim
 
-    # @torch.compile  # Disabled: causes stride assertion errors when fine-tuning with different reward functions
+    @torch.compile
     def inner_forward(self, obs, rl2s, log_dict=None):
         if self.training and self.token_mask_aug:
             obs["text_tokens"] = unknown_token_mask(obs["text_tokens"])
         extras = F.leaky_relu(self.extra_emb(symlog(rl2s)))
+        add_activation_log("MetamonTstepEncoder/extra_emb", extras, log_dict)
         numerical = torch.cat((obs["numbers"], extras), dim=-1)
+        add_activation_log("MetamonTstepEncoder/numerical", numerical, log_dict)
         turn_emb = self.turn_embedding(
             token_inputs=obs["text_tokens"], numerical_inputs=numerical
         )
+        add_activation_log("MetamonTstepEncoder/turn_emb", turn_emb, log_dict)
         return turn_emb
 
 
@@ -577,247 +668,592 @@ class MetamonPerceiverTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
     def emb_dim(self):
         return self.turn_embedding.output_dim
 
-    # @torch.compile  # Disabled: causes stride assertion errors when fine-tuning with different reward functions
+    @torch.compile
     def inner_forward(self, obs, rl2s, log_dict=None):
         if self.training and self.token_mask_aug:
             obs["text_tokens"] = unknown_token_mask(obs["text_tokens"])
         extras = F.leaky_relu(self.extra_emb(symlog(rl2s)))
+        add_activation_log("MetamonPerceiverTstepEncoder/extra_emb", extras, log_dict)
         numerical = torch.cat((obs["numbers"], extras), dim=-1)
+        add_activation_log(
+            "MetamonPerceiverTstepEncoder/numerical", numerical, log_dict
+        )
         turn_emb = self.turn_embedding(
             token_inputs=obs["text_tokens"], numerical_inputs=numerical
         )
+        add_activation_log("MetamonPerceiverTstepEncoder/turn_emb", turn_emb, log_dict)
         return turn_emb
 
 
-class PokemonSlotTurnEmbedding(nn.Module):
-    """
-    Encode fixed Pokemon slots independently, then merge slot and global context
-    tokens with a second Perceiver block.
+class _PerceiverLayer(nn.Module):
+    """Cross-attention + self-attention with fused projections and F.scaled_dot_product_attention.
+
+    Drop-in replacement for the PerceiverEncoder's paired CrossAttentionBlock +
+    SelfAttentionBlock.  Same parameter count and semantics, but uses a single
+    fused KV projection (cross) or QKV projection (self) and calls
+    F.scaled_dot_product_attention directly instead of nn.MultiheadAttention.
+
+    Optional ``cross_mask`` / ``self_mask`` boolean tensors (``True`` = masked
+    out) enable block-diagonal attention for grouped independent processing.
     """
 
     def __init__(
         self,
-        tokenizer: PokemonTokenizer,
-        slot_count: int,
-        pokemon_text_features: int,
-        pokemon_numerical_features: int,
-        global_text_features: int,
-        global_numerical_features: int,
-        token_embedding_dim: int,
         d_model: int,
         n_heads: int,
-        slot_layers: int,
-        team_layers: int,
-        slot_latent_tokens: int,
-        team_latent_tokens: int,
-        pokemon_numerical_tokens: int,
-        global_numerical_tokens: int,
         dropout: float,
-        max_pokemon_tokens: int,
-        max_team_tokens: int,
+        normformer_norms: bool = False,
+        qk_norm: bool = False,
+        ff_mult: int = 4,
     ):
         super().__init__()
-        self.slot_count = slot_count
-        self.pokemon_text_features = pokemon_text_features
-        self.pokemon_numerical_features = pokemon_numerical_features
-        self.global_text_features = global_text_features
-        self.global_numerical_features = global_numerical_features
-        self.token_embedding = TokenEmbedding(tokenizer, emb_dim=token_embedding_dim)
+        assert d_model % n_heads == 0
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.d_model = d_model
+        self._dp = dropout
+        self._normformer = normformer_norms
+        self._qk_norm = qk_norm
 
-        self.pokemon_multimodal_fuse = MultiModalEmbedding(
-            token_emb_dim=self.token_embedding.output_dim,
-            numerical_d_inp=pokemon_numerical_features,
-            output_dim=d_model,
-            numerical_tokens=pokemon_numerical_tokens,
-            dropout=dropout,
-        )
-        self.pokemon_pos = LearnablePosEmb(
-            max_len=max_pokemon_tokens,
-            d_model=d_model,
-        )
-        self.pokemon_perceiver = PerceiverEncoder(
-            latent_tokens=slot_latent_tokens,
-            d_model=d_model,
-            n_heads=n_heads,
-            n_layers=slot_layers,
-            dropout=dropout,
-        )
-        self.slot_projection = nn.Sequential(
-            nn.Linear(self.pokemon_perceiver.output_dim, d_model),
-            nn.LayerNorm(d_model),
-        )
-        self.slot_role_embedding = nn.Embedding(slot_count, d_model)
+        d_ff = d_model * ff_mult
 
-        self.global_multimodal_fuse = MultiModalEmbedding(
-            token_emb_dim=self.token_embedding.output_dim,
-            numerical_d_inp=global_numerical_features,
-            output_dim=d_model,
-            numerical_tokens=global_numerical_tokens,
-            dropout=dropout,
-        )
-        self.team_pos = LearnablePosEmb(max_len=max_team_tokens, d_model=d_model)
-        self.team_perceiver = PerceiverEncoder(
-            latent_tokens=team_latent_tokens,
-            d_model=d_model,
-            n_heads=n_heads,
-            n_layers=team_layers,
-            dropout=dropout,
-        )
+        self.cross_norm_q = nn.LayerNorm(d_model)
+        self.cross_norm_kv = nn.LayerNorm(d_model)
+        self.cross_q = nn.Linear(d_model, d_model)
+        self.cross_kv = nn.Linear(d_model, 2 * d_model)
+        self.cross_out = nn.Linear(d_model, d_model)
+        self.cross_ff_norm = nn.LayerNorm(d_model)
+        self.cross_ff1 = nn.Linear(d_model, d_ff)
+        self.cross_ff2 = nn.Linear(d_ff, d_model)
+        self.cross_ff_drop = nn.Dropout(dropout)
 
-    @property
-    def output_dim(self):
-        return self.team_perceiver.output_dim
+        self.self_norm = nn.LayerNorm(d_model)
+        self.self_qkv = nn.Linear(d_model, 3 * d_model)
+        self.self_out = nn.Linear(d_model, d_model)
+        self.self_ff_norm = nn.LayerNorm(d_model)
+        self.self_ff1 = nn.Linear(d_model, d_ff)
+        self.self_ff2 = nn.Linear(d_ff, d_model)
+        self.self_ff_drop = nn.Dropout(dropout)
 
-    def _add_pos(self, seq: torch.Tensor, pos_emb: LearnablePosEmb) -> torch.Tensor:
-        pos = (
-            torch.arange(0, seq.shape[1], device=seq.device)
-            .long()
-            .unsqueeze(0)
-            .expand(seq.shape[0], -1)
-        )
-        return seq + pos_emb(pos)
+        if normformer_norms:
+            self.cross_post_attn_norm = nn.LayerNorm(d_model)
+            self.cross_mid_ff_norm = nn.LayerNorm(d_ff)
+            self.self_post_attn_norm = nn.LayerNorm(d_model)
+            self.self_mid_ff_norm = nn.LayerNorm(d_ff)
+
+        if qk_norm:
+            hd = self.head_dim
+            self.cross_q_norm = nn.LayerNorm(hd)
+            self.cross_k_norm = nn.LayerNorm(hd)
+            self.self_q_norm = nn.LayerNorm(hd)
+            self.self_k_norm = nn.LayerNorm(hd)
 
     def forward(
         self,
-        pokemon_token_inputs: torch.Tensor,
-        pokemon_numerical_inputs: torch.Tensor,
-        global_token_inputs: torch.Tensor,
-        global_numerical_inputs: torch.Tensor,
+        latents: torch.Tensor,
+        kv_input: torch.Tensor,
+        cross_mask: Optional[torch.Tensor] = None,
+        self_mask: Optional[torch.Tensor] = None,
+        cross_block_mask=None,
+        self_block_mask=None,
     ) -> torch.Tensor:
-        B, T, _ = pokemon_token_inputs.shape
-        pokemon_tokens = rearrange(
-            pokemon_token_inputs,
-            "b t (s p) -> (b t s) 1 p",
-            s=self.slot_count,
-            p=self.pokemon_text_features,
-        )
-        pokemon_numbers = rearrange(
-            pokemon_numerical_inputs,
-            "b t (s n) -> (b t s) 1 n",
-            s=self.slot_count,
-            n=self.pokemon_numerical_features,
-        )
-        pokemon_text_emb = self.token_embedding(pokemon_tokens)
-        pokemon_seq = self.pokemon_multimodal_fuse(
-            pokemon_text_emb,
-            numerical_features=pokemon_numbers,
-        )
-        pokemon_seq = rearrange(pokemon_seq, "b 1 l d -> b l d")
-        pokemon_seq = self._add_pos(pokemon_seq, self.pokemon_pos)
-        pokemon_slots = self.pokemon_perceiver(pokemon_seq)
-        pokemon_slots = rearrange(
-            pokemon_slots,
-            "(b t s) 1 d -> b t s d",
-            b=B,
-            t=T,
-            s=self.slot_count,
-        )
-        pokemon_slots = self.slot_projection(pokemon_slots)
-        role_idxs = torch.arange(
-            0,
-            self.slot_count,
-            device=pokemon_slots.device,
-        )
-        pokemon_slots = pokemon_slots + self.slot_role_embedding(role_idxs).view(
-            1, 1, self.slot_count, -1
-        )
+        H, HD, D = self.n_heads, self.head_dim, self.d_model
+        dp = self._dp if self.training else 0.0
+        B, Lq = latents.shape[:2]
 
-        global_text_emb = self.token_embedding(global_token_inputs)
-        global_seq = self.global_multimodal_fuse(
-            global_text_emb,
-            numerical_features=global_numerical_inputs,
-        )
+        q = self.cross_q(self.cross_norm_q(latents))
+        q = q.unflatten(-1, (H, HD)).transpose(1, 2)  # (B, H, Lq, HD)
+        kv = self.cross_kv(self.cross_norm_kv(kv_input))
+        kv = kv.unflatten(-1, (2, H, HD))
+        k = kv[:, :, 0].transpose(1, 2)  # (B, H, Lkv, HD)
+        v = kv[:, :, 1].transpose(1, 2)  # (B, H, Lkv, HD)
+        if self._qk_norm:
+            q = self.cross_q_norm(q)
+            k = self.cross_k_norm(k)
+        if cross_block_mask is not None:
+            attn = flex_attention(q, k, v, block_mask=cross_block_mask)
+        else:
+            attn = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=cross_mask, dropout_p=dp
+            )
+        cross_out = self.cross_out(attn.transpose(1, 2).reshape(B, Lq, D))
+        if self._normformer:
+            cross_out = self.cross_post_attn_norm(cross_out)
+        latents = latents + cross_out
+        h = F.silu(self.cross_ff1(self.cross_ff_norm(latents)))
+        if self._normformer:
+            h = self.cross_mid_ff_norm(h)
+        latents = latents + self.cross_ff_drop(self.cross_ff2(h))
 
-        team_seq = torch.cat((pokemon_slots, global_seq), dim=-2)
-        team_seq = rearrange(team_seq, "b t l d -> (b t) l d")
-        team_seq = self._add_pos(team_seq, self.team_pos)
-        team_emb = self.team_perceiver(team_seq)
-        team_emb = rearrange(team_emb, "(b t) 1 d -> b t d", b=B, t=T)
-        return team_emb
+        qkv = self.self_qkv(self.self_norm(latents))
+        qkv = qkv.unflatten(-1, (3, H, HD))
+        sq = qkv[:, :, 0].transpose(1, 2)  # (B, H, Lq, HD)
+        sk = qkv[:, :, 1].transpose(1, 2)  # (B, H, Lq, HD)
+        sv = qkv[:, :, 2].transpose(1, 2)  # (B, H, Lq, HD)
+        if self._qk_norm:
+            sq = self.self_q_norm(sq)
+            sk = self.self_k_norm(sk)
+        if self_block_mask is not None:
+            attn = flex_attention(sq, sk, sv, block_mask=self_block_mask)
+        else:
+            attn = F.scaled_dot_product_attention(
+                sq, sk, sv, attn_mask=self_mask, dropout_p=dp
+            )
+        self_out = self.self_out(attn.transpose(1, 2).reshape(B, Lq, D))
+        if self._normformer:
+            self_out = self.self_post_attn_norm(self_out)
+        latents = latents + self_out
+        h = F.silu(self.self_ff1(self.self_ff_norm(latents)))
+        if self._normformer:
+            h = self.self_mid_ff_norm(h)
+        latents = latents + self.self_ff_drop(self.self_ff2(h))
+
+        return latents
+
+
+class _FastPerceiverEncoder(nn.Module):
+    """Perceiver encoder with fused attention projections.
+
+    Functionally identical to :class:`PerceiverEncoder` from ``metamon.il.model``
+    but replaces ``nn.MultiheadAttention`` with fused QKV/KV linear projections
+    and direct ``F.scaled_dot_product_attention`` calls.
+    """
+
+    def __init__(
+        self,
+        latent_tokens: int,
+        d_model: int,
+        n_heads: int,
+        n_layers: int,
+        dropout: float,
+        normformer_norms: bool = False,
+        qk_norm: bool = False,
+        ff_mult: int = 4,
+    ):
+        super().__init__()
+        self.latents = nn.Parameter(torch.randn(latent_tokens, d_model) * 0.02)
+        self.layers = nn.ModuleList(
+            [
+                _PerceiverLayer(
+                    d_model, n_heads, dropout, normformer_norms, qk_norm, ff_mult
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.output_dim = latent_tokens * d_model
+
+    def forward(self, x: torch.Tensor, flatten: bool = True) -> torch.Tensor:
+        B = x.shape[0]
+        latents = self.latents.unsqueeze(0).expand(B, -1, -1)
+        for layer in self.layers:
+            latents = layer(latents, x)
+        if flatten:
+            return latents.reshape(B, 1, -1)
+        return latents
+
+
+class _BlockDiagPerceiverEncoder(nn.Module):
+    """Perceiver for *N* independent groups via block-diagonal attention masking.
+
+    Tiles the shared learnable latent queries *N* times and pre-computes
+    block-diagonal masks so each group's latents only attend to their own
+    input tokens (cross-attention) and to each other (self-attention).
+
+    This is **semantically identical** to running a perceiver *N* times with
+    shared weights on *N* separate inputs, but everything happens in a single
+    attention call (batch = B, seq = N * group_seq_len) so the GPU sees fewer,
+    larger kernels.
+
+    When *use_flex_attention* is True, uses ``flex_attention`` with compiled
+    block-sparse masks — this produces a Triton kernel whose backward pass is
+    significantly faster than the memory-efficient SDPA backward triggered by
+    boolean masks.
+    """
+
+    def __init__(
+        self,
+        latent_tokens: int,
+        d_model: int,
+        n_heads: int,
+        n_layers: int,
+        dropout: float,
+        n_groups: int,
+        group_seq_len: int,
+        use_flex_attention: bool = False,
+        normformer_norms: bool = False,
+        qk_norm: bool = False,
+        ff_mult: int = 4,
+    ):
+        super().__init__()
+        self.n_groups = n_groups
+        self.latent_tokens = latent_tokens
+        self.use_flex_attention = use_flex_attention
+        self.latents = nn.Parameter(torch.randn(latent_tokens, d_model) * 0.02)
+        self.layers = nn.ModuleList(
+            [
+                _PerceiverLayer(
+                    d_model, n_heads, dropout, normformer_norms, qk_norm, ff_mult
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.output_dim = latent_tokens * d_model
+
+        total_q = n_groups * latent_tokens
+        total_kv = n_groups * group_seq_len
+
+        if use_flex_attention:
+            lt = latent_tokens
+            gs = group_seq_len
+
+            def cross_mask_mod(b, h, q_idx, kv_idx):
+                return (q_idx // lt) == (kv_idx // gs)
+
+            def self_mask_mod(b, h, q_idx, kv_idx):
+                return (q_idx // lt) == (kv_idx // lt)
+
+            self._cross_block_mask = create_block_mask(
+                cross_mask_mod,
+                B=None,
+                H=None,
+                Q_LEN=total_q,
+                KV_LEN=total_kv,
+                device="cuda",
+            )
+            self._self_block_mask = create_block_mask(
+                self_mask_mod,
+                B=None,
+                H=None,
+                Q_LEN=total_q,
+                KV_LEN=total_q,
+                device="cuda",
+            )
+            self._cross_mask = None
+            self._self_mask = None
+        else:
+            # SDPA bool convention: True = allowed to attend, False = masked out
+            cross_mask = torch.zeros(total_q, total_kv, dtype=torch.bool)
+            self_mask = torch.zeros(total_q, total_q, dtype=torch.bool)
+            for i in range(n_groups):
+                qs, qe = i * latent_tokens, (i + 1) * latent_tokens
+                kvs, kve = i * group_seq_len, (i + 1) * group_seq_len
+                cross_mask[qs:qe, kvs:kve] = True
+                self_mask[qs:qe, qs:qe] = True
+
+            self.register_buffer("_cross_mask", cross_mask)
+            self.register_buffer("_self_mask", self_mask)
+            self._cross_block_mask = None
+            self._self_block_mask = None
+
+    def forward(self, x: torch.Tensor, flatten: bool = True) -> torch.Tensor:
+        """
+        Args:
+            x: ``(B, n_groups * group_seq_len, d_model)`` — all groups concatenated.
+        Returns:
+            If *flatten*: ``(B, n_groups, latent_tokens * d_model)``
+            Else: ``(B, n_groups, latent_tokens, d_model)``
+        """
+        B = x.shape[0]
+        latents = self.latents.repeat(self.n_groups, 1)
+        latents = latents.unsqueeze(0).expand(B, -1, -1)
+
+        for layer in self.layers:
+            latents = layer(
+                latents,
+                x,
+                cross_mask=self._cross_mask,
+                self_mask=self._self_mask,
+                cross_block_mask=self._cross_block_mask,
+                self_block_mask=self._self_block_mask,
+            )
+
+        latents = latents.unflatten(1, (self.n_groups, self.latent_tokens))
+        if flatten:
+            return latents.flatten(2)
+        return latents
 
 
 @gin.configurable
-class MetamonPokemonSlotTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
+class MetamonGroupedTstepEncoderV2(amago.nets.tstep_encoders.TstepEncoder):
+    """Timestep encoder for GroupedObservationSpace.
+
+    Three-stage architecture:
+        1. Pokemon perceiver (shared): encodes each of 7 Pokemon independently
+        2. Global perceiver: encodes misc features (format, conditions, etc.) + rl2
+        3. Fusion perceiver: combines 8 entity embeddings into final representation
+
+    Slightly optimized by some fancy attention masking tricks.
     """
-    AMAGO timestep encoder for Gen1PokemonSlotObservationSpace.
-    """
+
+    POKEMON_TEXT_LEN = 12
+    POKEMON_NUM_LEN = 31
+    MISC_TEXT_LEN = 20
+    MISC_NUM_LEN = 4
+    NUM_POKEMON = 7
 
     def __init__(
         self,
         obs_space,
         rl2_space,
         tokenizer: PokemonTokenizer,
-        extra_emb_dim: int = 18,
-        d_model: int = 168,
-        n_heads: int = 8,
-        slot_layers: int = 2,
-        team_layers: int = 8,
-        slot_latent_tokens: int = 2,
-        team_latent_tokens: int = 8,
-        pokemon_numerical_tokens: int = 4,
-        global_numerical_tokens: int = 2,
-        token_mask_aug: bool = False,
+        # Pokemon encoder
+        d_pokemon: int = 64,
+        n_heads_pokemon: int = 4,
+        n_layers_pokemon: int = 2,
+        latent_tokens_pokemon: int = 4,
+        numerical_tokens_pokemon: int = 4,
+        pokemon_out_norm: str = "layer",
+        # Global encoder
+        d_global: int = 64,
+        n_heads_global: int = 4,
+        n_layers_global: int = 2,
+        latent_tokens_global: int = 4,
+        numerical_tokens_global: int = 2,
+        global_out_norm: str = "layer",
+        # Fusion encoder
+        d_fusion: int = 128,
+        n_heads_fusion: int = 4,
+        n_layers_fusion: int = 2,
+        latent_tokens_fusion: int = 4,
+        fusion_out_norm: str = "layer",
+        # General
+        extra_emb_dim: int = 16,
         dropout: float = 0.05,
-        max_pokemon_tokens: int = 16,
-        max_team_tokens: int = 32,
+        use_flex_attention: bool = False,
+        normformer_norms: bool = False,
+        qk_norm: bool = False,
+        ff_mult: int = 4,
+        pokemon_role_emb: bool = False,
     ):
         super().__init__(obs_space=obs_space, rl2_space=rl2_space)
-        self.token_mask_aug = token_mask_aug
+
         self.extra_emb = nn.Linear(rl2_space.shape[-1], extra_emb_dim)
 
-        pokemon_text_features = obs_space["pokemon_text_tokens"].shape[0]
-        pokemon_numerical_features = obs_space["pokemon_numbers"].shape[0]
-        global_text_features = obs_space["global_text_tokens"].shape[0]
-        global_numerical_features = obs_space["global_numbers"].shape[0] + extra_emb_dim
-
-        slot_count = 13
-        if pokemon_text_features % slot_count != 0:
-            raise ValueError(
-                "pokemon_text_tokens length must be divisible by the Pokemon slot count"
-            )
-        if pokemon_numerical_features % slot_count != 0:
-            raise ValueError(
-                "pokemon_numbers length must be divisible by the Pokemon slot count"
-            )
-
-        self.turn_embedding = PokemonSlotTurnEmbedding(
-            tokenizer=tokenizer,
-            slot_count=slot_count,
-            pokemon_text_features=pokemon_text_features // slot_count,
-            pokemon_numerical_features=pokemon_numerical_features // slot_count,
-            global_text_features=global_text_features,
-            global_numerical_features=global_numerical_features,
-            token_embedding_dim=d_model,
-            d_model=d_model,
-            n_heads=n_heads,
-            slot_layers=slot_layers,
-            team_layers=team_layers,
-            slot_latent_tokens=slot_latent_tokens,
-            team_latent_tokens=team_latent_tokens,
-            pokemon_numerical_tokens=pokemon_numerical_tokens,
-            global_numerical_tokens=global_numerical_tokens,
+        # --- Pokemon encoder (shared for all 7, block-diagonal masking) ---
+        self.pokemon_token_emb = TokenEmbedding(tokenizer, d_pokemon)
+        self.pokemon_fuse = MultiModalEmbedding(
+            token_emb_dim=d_pokemon,
+            numerical_d_inp=self.POKEMON_NUM_LEN,
+            output_dim=d_pokemon,
+            numerical_tokens=numerical_tokens_pokemon,
             dropout=dropout,
-            max_pokemon_tokens=max_pokemon_tokens,
-            max_team_tokens=max_team_tokens,
         )
+        pokemon_seq_len = self.POKEMON_TEXT_LEN + numerical_tokens_pokemon
+        self.pokemon_pos = LearnablePosEmb(max_len=pokemon_seq_len, d_model=d_pokemon)
+        self.pokemon_perceiver = _BlockDiagPerceiverEncoder(
+            latent_tokens=latent_tokens_pokemon,
+            d_model=d_pokemon,
+            n_heads=n_heads_pokemon,
+            n_layers=n_layers_pokemon,
+            dropout=dropout,
+            n_groups=self.NUM_POKEMON,
+            group_seq_len=pokemon_seq_len,
+            use_flex_attention=use_flex_attention,
+            normformer_norms=normformer_norms,
+            qk_norm=qk_norm,
+            ff_mult=ff_mult,
+        )
+        self.pokemon_out_norm = Normalization(pokemon_out_norm, d_pokemon)
+        self.pokemon_proj = nn.Linear(latent_tokens_pokemon * d_pokemon, d_fusion)
+        self.register_buffer(
+            "_pokemon_pos_ids",
+            torch.arange(pokemon_seq_len, dtype=torch.long),
+        )
+        self._pokemon_role_emb = (
+            nn.Embedding(3, d_pokemon) if pokemon_role_emb else None
+        )
+        if pokemon_role_emb:
+            # 0 = player active, 1 = bench/switch, 2 = opponent active
+            self.register_buffer(
+                "_pokemon_role_ids",
+                torch.tensor([0, 1, 1, 1, 1, 1, 2], dtype=torch.long),
+            )
+
+        # --- Global encoder ---
+        self.global_token_emb = TokenEmbedding(tokenizer, d_global)
+        self.global_fuse = MultiModalEmbedding(
+            token_emb_dim=d_global,
+            numerical_d_inp=self.MISC_NUM_LEN + extra_emb_dim,
+            output_dim=d_global,
+            numerical_tokens=numerical_tokens_global,
+            dropout=dropout,
+        )
+        global_seq_len = self.MISC_TEXT_LEN + numerical_tokens_global
+        self.global_pos = LearnablePosEmb(max_len=global_seq_len, d_model=d_global)
+        self.global_perceiver = _FastPerceiverEncoder(
+            latent_tokens=latent_tokens_global,
+            d_model=d_global,
+            n_heads=n_heads_global,
+            n_layers=n_layers_global,
+            dropout=dropout,
+            normformer_norms=normformer_norms,
+            qk_norm=qk_norm,
+            ff_mult=ff_mult,
+        )
+        self.global_out_norm = Normalization(global_out_norm, d_global)
+        self.global_proj = nn.Linear(latent_tokens_global * d_global, d_fusion)
+        self.register_buffer(
+            "_global_pos_ids", torch.arange(global_seq_len, dtype=torch.long)
+        )
+
+        # --- Fusion encoder ---
+        self.entity_type_emb = nn.Embedding(self.NUM_POKEMON + 1, d_fusion)
+        self.fusion = _FastPerceiverEncoder(
+            latent_tokens=latent_tokens_fusion,
+            d_model=d_fusion,
+            n_heads=n_heads_fusion,
+            n_layers=n_layers_fusion,
+            dropout=dropout,
+            normformer_norms=normformer_norms,
+            qk_norm=qk_norm,
+            ff_mult=ff_mult,
+        )
+        self.fusion_out_norm = Normalization(fusion_out_norm, d_fusion)
+        self.register_buffer(
+            "_entity_type_ids", torch.arange(self.NUM_POKEMON + 1, dtype=torch.long)
+        )
+
+        self._emb_dim = self.fusion.output_dim
 
     @property
     def emb_dim(self):
-        return self.turn_embedding.output_dim
+        return self._emb_dim
 
     def inner_forward(self, obs, rl2s, log_dict=None):
-        if self.training and self.token_mask_aug:
-            obs["pokemon_text_tokens"] = unknown_token_mask(obs["pokemon_text_tokens"])
-            obs["global_text_tokens"] = unknown_token_mask(obs["global_text_tokens"])
-        extras = F.leaky_relu(self.extra_emb(symlog(rl2s)))
-        global_numbers = torch.cat((obs["global_numbers"], extras), dim=-1)
-        turn_emb = self.turn_embedding(
-            pokemon_token_inputs=obs["pokemon_text_tokens"],
-            pokemon_numerical_inputs=obs["pokemon_numbers"],
-            global_token_inputs=obs["global_text_tokens"],
-            global_numerical_inputs=global_numbers,
+        pokemon_text = torch.stack(
+            [
+                obs["text_active_pokemon_tokens"],
+                obs["text_switch_0_tokens"],
+                obs["text_switch_1_tokens"],
+                obs["text_switch_2_tokens"],
+                obs["text_switch_3_tokens"],
+                obs["text_switch_4_tokens"],
+                obs["text_opponent_active_pokemon_tokens"],
+            ],
+            dim=2,
         )
-        return turn_emb
+        pokemon_nums = torch.stack(
+            [
+                obs["numbers_active_pokemon"],
+                obs["numbers_switch_0"],
+                obs["numbers_switch_1"],
+                obs["numbers_switch_2"],
+                obs["numbers_switch_3"],
+                obs["numbers_switch_4"],
+                obs["numbers_opponent_active_pokemon"],
+            ],
+            dim=2,
+        )
+
+        B, L = pokemon_text.shape[:2]
+        pokemon_text = pokemon_text.flatten(0, 1)
+        pokemon_nums = pokemon_nums.flatten(0, 1)
+        rl2s_flat = rl2s.flatten(0, 1)
+        global_nums_flat = obs["numbers_misc"].flatten(0, 1)
+        global_text_flat = obs["text_misc_tokens"].flatten(0, 1)
+
+        emb = self._inner_forward_impl(
+            pokemon_text,
+            pokemon_nums,
+            rl2s_flat,
+            global_nums_flat,
+            global_text_flat,
+            log_dict,
+        )
+        return emb.unflatten(0, (B, L))
+
+    def _encode_pokemon(
+        self, text_tokens: torch.Tensor, numerical: torch.Tensor, log_dict=None
+    ) -> torch.Tensor:
+        B = text_tokens.size(0)
+
+        # Embed each pokemon independently (shared weights)
+        text_flat = text_tokens.flatten(0, 1)
+        nums_flat = numerical.flatten(0, 1)
+
+        tok_emb = self.pokemon_token_emb(text_flat)
+        tok_emb = tok_emb.unsqueeze(1)
+        nums_flat = nums_flat.unsqueeze(1)
+        seq = self.pokemon_fuse(tok_emb, nums_flat).squeeze(1)
+
+        seq = seq + self.pokemon_pos(self._pokemon_pos_ids)
+
+        # Concatenate all 7 pokemon into one sequence for block-diagonal attn
+        seq = seq.unflatten(0, (-1, self.NUM_POKEMON)).flatten(1, 2)
+
+        if self._pokemon_role_emb is not None:
+            role = self._pokemon_role_emb(self._pokemon_role_ids)  # (7, d_pokemon)
+            tokens_per_pokemon = seq.shape[1] // self.NUM_POKEMON
+            idx = torch.arange(self.NUM_POKEMON, device=seq.device) * tokens_per_pokemon
+            role_signal = torch.zeros(
+                seq.shape[1], seq.shape[2], device=seq.device, dtype=seq.dtype
+            )
+            role_signal[idx] = role
+            seq = seq + role_signal
+
+        # Block-diagonal perceiver → (B, 7, latent_tokens, d_pokemon)
+        emb = self.pokemon_perceiver(seq, flatten=False)
+        add_activation_log(
+            "MetamonGroupedTstepEncoderV2/pokemon_perceiver", emb, log_dict
+        )
+
+        emb = self.pokemon_out_norm(emb)
+        emb = emb.flatten(2)
+        emb = self.pokemon_proj(emb)
+        add_activation_log("MetamonGroupedTstepEncoderV2/pokemon_proj", emb, log_dict)
+
+        return emb
+
+    def _encode_global(
+        self, text_tokens: torch.Tensor, numerical: torch.Tensor, log_dict=None
+    ) -> torch.Tensor:
+        tok_emb = self.global_token_emb(text_tokens)
+        tok_emb = tok_emb.unsqueeze(1)
+        numerical = numerical.unsqueeze(1)
+        seq = self.global_fuse(tok_emb, numerical).squeeze(1)
+
+        seq = seq + self.global_pos(self._global_pos_ids)
+
+        emb = self.global_perceiver(seq, flatten=False)
+        add_activation_log(
+            "MetamonGroupedTstepEncoderV2/global_perceiver", emb, log_dict
+        )
+
+        emb = self.global_out_norm(emb)
+        emb = emb.flatten(1)
+        emb = self.global_proj(emb)
+        add_activation_log("MetamonGroupedTstepEncoderV2/global_proj", emb, log_dict)
+
+        return emb
+
+    @torch.compile
+    def _inner_forward_impl(
+        self,
+        pokemon_text,
+        pokemon_nums,
+        rl2s_flat,
+        global_nums_flat,
+        global_text_flat,
+        log_dict=None,
+    ):
+        pokemon_embs = self._encode_pokemon(pokemon_text, pokemon_nums, log_dict)
+
+        extras = F.leaky_relu(self.extra_emb(symlog(rl2s_flat)))
+        global_nums = torch.cat([global_nums_flat, extras], dim=-1)
+        global_emb = self._encode_global(global_text_flat, global_nums, log_dict)
+        all_embs = torch.cat([pokemon_embs, global_emb.unsqueeze(1)], dim=1)
+
+        all_embs = all_embs + self.entity_type_emb(self._entity_type_ids)
+
+        emb = self.fusion(all_embs, flatten=False)
+        add_activation_log("MetamonGroupedTstepEncoderV2/fusion", emb, log_dict)
+
+        emb = self.fusion_out_norm(emb)
+        add_activation_log(
+            "MetamonGroupedTstepEncoderV2/fusion_out_norm", emb, log_dict
+        )
+
+        return emb.flatten(1)
 
 
 class MetamonAMAGODataset(RLDataset):
@@ -907,1089 +1343,64 @@ class MetamonAMAGODataset(RLDataset):
 
 
 @gin.configurable
-class MetamonMultiTaskAgent(amago.agent.MultiTaskAgent):
-    """MultiTaskAgent with cached intermediate values for efficient KL regularization.
-
-    This agent caches trajectory embeddings and observation data during the forward pass,
-    allowing dynamic damping to reuse these values instead of recomputing them.
-    This provides ~1.6-1.9x speedup in training iteration time.
-
-    Also caches Q-ensemble standard deviation for epistemic uncertainty-aware actor updates.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.cached_kl_data = None
-        self.cached_epistemic = None
-
-    def forward(self, batch, log_step: bool):
-        """Forward pass with caching for dynamic damping and epistemic weighting.
-
-        Args:
-            batch: Batch of RL data from amago.loading.Batch
-            log_step: Whether this is a logging step
-
-        Computes and caches intermediate values (trajectory embeddings, observations,
-        Q-ensemble uncertainty) that can be reused by KL regularization and epistemic
-        weighting without expensive recomputation.
-        """
-        # Reset caches
-        self.cached_kl_data = None
-        self.cached_epistemic = None
-
-        # Compute encodings that will be cached
-        self.update_info = {}
-        active_log_dict = self.update_info if log_step else None
-
-        # Timestep embedding
-        o = self.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s, log_dict=active_log_dict)
-        straight_from_obs = {k: batch.obs[k] for k in self.pass_obs_keys_to_actor}
-
-        # Trajectory embedding (expensive transformer operation)
-        s_rep, hidden_state = self.traj_encoder(
-            seq=o,
-            time_idxs=batch.time_idxs,
-            hidden_state=None,
-            log_dict=active_log_dict
-        )
-
-        # Cache these values for KL computation (no .detach() - keep gradients for new policy)
-        self.cached_kl_data = {
-            's_rep': s_rep,  # [B, L, D_emb] - trajectory embeddings
-            'straight_from_obs': straight_from_obs,  # dict of observations for actor
-            'batch_shape': (s_rep.shape[0], s_rep.shape[1]),  # (B, L) for validation
-        }
-
-        # Call parent's forward to compute losses
-        # The parent will compute Q-values, but we need to intercept them for epistemic caching.
-        # Since we can't directly intercept inside parent's forward without full override,
-        # we'll need to recompute Q-values after the fact for epistemic caching.
-        critic_loss, actor_loss = super().forward(batch, log_step)
-
-        # Post-hoc Q-ensemble std caching for epistemic weighting
-        # We recompute Q(s,a) briefly to extract ensemble uncertainty
-        # This is a small overhead but necessary without full forward() override
-        if not self.fake_filter or self.online_coeff > 0:
-            try:
-                with torch.no_grad():
-                    # Get actions from batch and expand with gamma dimension (same as parent does)
-                    a = batch.actions  # [B, L, D_action]
-                    B, L = s_rep.shape[0], s_rep.shape[1]
-                    G = len(self.gammas)
-
-                    # Expand actions with gamma dimension
-                    a_buffer = einops.repeat(a, "B L act -> B L G act", G=G)  # [B, L-1, G, D_action]
-                    # Note: batch.actions already has length L-1 (one less than observations)
-                    # because the last observation doesn't have an action
-
-                    # Verify shapes match before calling critic
-                    s_slice = s_rep[:, :-1, ...].detach()  # [B, L-1, D_emb]
-                    a_slice = a_buffer.unsqueeze(0)  # [1, B, L-1, G, D_action] - NO SLICING!
-
-                    # Debug: check shapes
-                    if s_slice.shape[1] != a_slice.shape[2]:
-                        print(f"[WARNING] Shape mismatch in epistemic caching:")
-                        print(f"  s_rep[:, :-1] shape: {s_slice.shape} (expected [B, L-1, D_emb])")
-                        print(f"  a_buffer[:, :-1].unsqueeze(0) shape: {a_slice.shape} (expected [1, B, L-1, G, D_action])")
-                        print(f"  Skipping epistemic caching for this batch")
-                        self.cached_epistemic = None
-                    else:
-                        # Compute Q(s, a) ensemble (same as parent does at line 524-525 in agent.py)
-                        s_a_g = (s_slice, a_slice)
-                        q_s_a_g_ensemble = self.critics(*s_a_g)
-
-                        # Handle distributional critics (C51, etc.) vs standard critics
-                        if hasattr(q_s_a_g_ensemble, 'probs'):
-                            # Distributional critic: convert distribution to scalar values
-                            # q_s_a_g_ensemble is a distribution with shape [1, B, L-1, C, G, Bins]
-                            scalar_q = self.critics.bin_dist_to_raw_vals(q_s_a_g_ensemble)  # [1, B, L-1, C, G, 1]
-                        else:
-                            # Standard critic: already scalar values
-                            scalar_q = q_s_a_g_ensemble  # [1, B, L-1, C, G, 1]
-
-                        # Extract ensemble std across critic dimension (dim=3)
-                        # scalar_q has shape [1, B, L-1, C, G, 1]
-                        q_std = scalar_q.std(dim=3)  # [1, B, L-1, G, 1]
-
-                        self.cached_epistemic = {
-                            'q_std': q_std,  # Already detached via torch.no_grad() context
-                        }
-            except Exception as e:
-                print(f"[WARNING] Failed to cache epistemic uncertainty: {e}")
-                print(f"  Skipping epistemic weighting for this batch")
-                self.cached_epistemic = None
-
-        return critic_loss, actor_loss
-
-
-@gin.configurable
 class MetamonAMAGOExperiment(amago.Experiment):
     """
     Adds actions masking to the main AMAGO experiment, and leaves room for further tweaks.
-
-    Also supports dynamic damping for stable self-play training with:
-    - Reverse-KL regularization to a reference policy
-    - Power-law schedules for entropy and KL coefficients
-    - Adaptive learning rate and KL coefficient control
     """
 
-    def __init__(
-        self,
-        *args,
-        # Dynamic damping parameters (gin-configurable)
-        use_dynamic_damping: bool = False,
-        kl_coef_init: float = 0.05,
-        kl_coef_max: float = 0.5,
-        kl_power_alpha: float = 0.5,
-        kl_schedule_steps: int = 1_000_000,
-        ent_coef_init: float = 0.01,
-        ent_coef_min: float = 0.001,
-        ent_power_alpha: float = 0.7,
-        ent_schedule_steps: int = 1_000_000,
-        target_kl_per_step: float = 0.01,
-        kl_tolerance: float = 1.5,
-        lr_shrink_factor: float = 0.5,
-        lr_grow_factor: float = 1.1,
-        kl_coef_growth_factor: float = 1.5,
-        kl_coef_decay_factor: float = 0.9,
-        min_lr: float = 1e-6,
-        max_lr: float = 1e-3,
-        dd_adapt_interval: int = 100,  # KL window length for adaptation
-        # Epistemic weighting parameters (gin-configurable)
-        use_epistemic_weighting: bool = False,
-        epistemic_beta_init: float = 5.0,
-        epistemic_beta_final: float = 1.0,
-        epistemic_anneal_steps: int = 10000,
-        epistemic_anneal_power: float = 0.5,
-        epistemic_power: int = 2,
-        # EMA (policy averaging) parameters (gin-configurable)
-        use_ema: bool = False,
-        ema_decay: float = 0.999,
-        ema_update_interval: int = 1,
-        ema_warmup_steps: int = 0,
-        ema_eval_only: bool = True,
-        **kwargs,
-    ):
-        # Debug: Print dynamic damping parameter (commented out to reduce log spam)
-        # print(f"[DEBUG] MetamonAMAGOExperiment.__init__ called with use_dynamic_damping={use_dynamic_damping}", flush=True)
-
-        super().__init__(*args, **kwargs)
-        # print("[DEBUG] super().__init__() completed, policy exists:", hasattr(self, 'policy'), flush=True)
-
-        # Dynamic damping state
-        from collections import deque
-        self.dd_state = None
-        self.dd_config = None
-        self.dd_adapt_interval = dd_adapt_interval  # Adapt controller every N steps (gin-configurable)
-        self.kl_window = deque(maxlen=self.dd_adapt_interval)  # Sliding window of last N KL values
-        self.dd_step_counter = 0  # Track steps for periodic adaptation
-
-        if use_dynamic_damping:
-            from metamon.rl.dynamic_damping import DynamicDampingConfig
-            # print(f"[DEBUG] Creating DynamicDampingConfig...", flush=True)
-            self.dd_config = DynamicDampingConfig(
-                enabled=True,
-                kl_coef_init=kl_coef_init,
-                kl_coef_max=kl_coef_max,
-                kl_power_alpha=kl_power_alpha,
-                kl_schedule_steps=kl_schedule_steps,
-                ent_coef_init=ent_coef_init,
-                ent_coef_min=ent_coef_min,
-                ent_power_alpha=ent_power_alpha,
-                ent_schedule_steps=ent_schedule_steps,
-                target_kl_per_step=target_kl_per_step,
-                kl_tolerance=kl_tolerance,
-                lr_shrink_factor=lr_shrink_factor,
-                lr_grow_factor=lr_grow_factor,
-                kl_coef_growth_factor=kl_coef_growth_factor,
-                kl_coef_decay_factor=kl_coef_decay_factor,
-                min_lr=min_lr,
-                max_lr=max_lr,
-            )
-            # print(f"[DEBUG] dd_config created: {self.dd_config}", flush=True)
-            # Note: dd_state will be initialized in start() after policy is created
-        else:
-            pass
-            # print(f"[DEBUG] use_dynamic_damping=False, skipping dd_config creation", flush=True)
-
-        # Epistemic weighting configuration
-        self.use_epistemic_weighting = use_epistemic_weighting
-        self.epistemic_beta_init = epistemic_beta_init
-        self.epistemic_beta_final = epistemic_beta_final
-        self.epistemic_anneal_steps = epistemic_anneal_steps
-        self.epistemic_anneal_power = epistemic_anneal_power
-        self.epistemic_power = epistemic_power
-
-        # EMA (policy averaging) configuration
-        self.use_ema = use_ema
-        self.ema_decay = ema_decay
-        self.ema_update_interval = ema_update_interval
-        self.ema_warmup_steps = ema_warmup_steps
-        self.ema_eval_only = ema_eval_only
-        self.ema_model = None  # Will be initialized in start()
-        self.ema_step_counter = 0
-        self._training_state_dict = None  # Temporary storage for eval weight swapping
-        self.epistemic_step = 0  # Track steps for beta annealing
-        self.checkpoint_subprocess_eval_config = None
-
     def start(self):
-        """Override start to initialize dynamic damping after policy is created."""
-        # print("[DEBUG] start() called", flush=True)
         super().start()
-        # print("[DEBUG] super().start() completed", flush=True)
 
-        # Initialize dynamic damping state now that policy exists
-        if self.dd_config is not None and self.dd_config.enabled:
-            from metamon.rl.dynamic_damping import DynamicDampingState
-            # print("[DEBUG] Initializing DynamicDampingState...", flush=True)
-            self.dd_state = DynamicDampingState(
-                base_model=self.policy,
-                config=self.dd_config,
-            )
-            # print(f"[Dynamic Damping] Initialized with kl_coef={self.dd_state.kl_coef:.4f}, "
-            #       f"ent_coef={self.dd_state.ent_coef:.4f}", flush=True)
-
-        # Initialize EMA model now that policy exists
-        if self.use_ema:
-            import copy
-            self.ema_model = copy.deepcopy(self.policy)
-            self.ema_model.eval()
-            for param in self.ema_model.parameters():
-                param.requires_grad_(False)
-            print(f"[EMA] Initialized with decay={self.ema_decay}, warmup_steps={self.ema_warmup_steps}")
-
-    def init_policy(self):
-        """Initialize policy and optionally enable dynamic damping."""
-        # print("[DEBUG] init_policy() CALLED", flush=True)
-        out = super().init_policy()
-        # print("[DEBUG] super().init_policy() COMPLETED", flush=True)
-
-        # Debug: Check if dynamic damping is configured (commented out to reduce log spam)
-        # print(f"[DEBUG] dd_config is None: {self.dd_config is None}", flush=True)
-        # if self.dd_config is not None:
-        #     print(f"[DEBUG] dd_config.enabled: {self.dd_config.enabled}", flush=True)
-
-        # Initialize dynamic damping if configured
-        if self.dd_config is not None and self.dd_config.enabled:
-            self._init_dynamic_damping()
-        # else:
-        #     print("[WARNING] Dynamic damping NOT initialized - check gin config!", flush=True)
-
-        return out
-
-    def _init_dynamic_damping(self):
-        """Initialize dynamic damping with a frozen reference policy snapshot."""
-        from metamon.rl.dynamic_damping import DynamicDampingState
-
-        # Create frozen reference from current policy
-        self.dd_state = DynamicDampingState(
-            base_model=self.policy,  # The full agent
-            config=self.dd_config,
-        )
-        print(f"[Dynamic Damping] Initialized with kl_coef={self.dd_state.kl_coef:.4f}, "
-              f"ent_coef={self.dd_state.ent_coef:.4f}")
-
-    def update_reference_policy(self):
-        """Update the reference policy to match current policy weights.
-
-        Call this after loading a checkpoint to ensure the reference policy
-        is a snapshot of the loaded weights, not the random initialization.
-        """
-        if self.dd_state is not None:
-            import copy
-            print("[Dynamic Damping] Updating reference policy to match loaded checkpoint...")
-            self.dd_state.ref_model = copy.deepcopy(self.policy)
-            self.dd_state.ref_model.eval()
-            for param in self.dd_state.ref_model.parameters():
-                param.requires_grad_(False)
-            print("[Dynamic Damping] Reference policy updated successfully")
-
-        # Also update EMA model if enabled
-        if self.use_ema and self.ema_model is not None:
-            import copy
-            print("[EMA] Updating EMA model to match loaded checkpoint...")
-            self.ema_model = copy.deepcopy(self.policy)
-            self.ema_model.eval()
-            for param in self.ema_model.parameters():
-                param.requires_grad_(False)
-            print("[EMA] EMA model updated successfully")
-
-    def enable_dynamic_damping(self, config=None):
-        """Manually enable dynamic damping after initialization.
-
-        Useful for programmatically enabling damping outside of gin configs.
-
-        Args:
-            config: Optional DynamicDampingConfig. If None, uses default config.
-        """
-        from metamon.rl.dynamic_damping import DynamicDampingConfig, DynamicDampingState
-
-        if config is None:
-            config = DynamicDampingConfig()
-
-        self.dd_config = config
-        self.dd_state = DynamicDampingState(
-            base_model=self.policy,
-            config=config,
-        )
-        print(f"[Dynamic Damping] Enabled with kl_coef={self.dd_state.kl_coef:.4f}")
-
-    def compute_loss(self, batch: Batch, log_step: bool) -> dict:
-        """Compute RL loss with optional epistemic weighting and dynamic damping.
-
-        Overrides parent to apply per-timestep epistemic confidence weights BEFORE
-        masked averaging (critical for epistemic weighting to affect gradients).
-        """
-        # If epistemic weighting is disabled, use parent's implementation with KL damping
-        if not self.use_epistemic_weighting:
-            # Call parent to get standard actor/critic losses
-            loss_dict = super().compute_loss(batch, log_step)
-
-            # Add KL regularization if dynamic damping is enabled
-            if self.dd_state is not None and self.dd_config.enabled:
-                kl_loss, kl_metrics = self._compute_kl_loss(batch, log_step)
-                loss_dict["Actor Loss"] = loss_dict["Actor Loss"] + kl_loss
-                loss_dict.update(kl_metrics)
-
-                # Track KL for adaptive control (sliding window of last N steps)
-                if "KL Divergence" in kl_metrics:
-                    self.kl_window.append(kl_metrics["KL Divergence"])
-                    self.dd_step_counter += 1
-
-                    # Adapt controller every N steps based on LOCAL KL window (not entire epoch)
-                    if self.dd_step_counter >= self.dd_adapt_interval and len(self.kl_window) >= 10:
-                        mean_kl = float(np.mean(self.kl_window))
-                        self.dd_state.adapt_from_observed_kl(self.optimizer, mean_kl)
-                        self.dd_step_counter = 0
-
-            return loss_dict
-
-        # Epistemic weighting path: manually compute losses with per-timestep weighting
-        # Call Agent.forward() to get per-timestep losses
-        critic_loss, actor_loss = self.policy_aclr(batch, log_step=log_step)
-        update_info = self.policy.update_info
-        B, L_1, G, _ = actor_loss.shape
-        C = len(self.policy.critics)
-
-        # Apply epistemic weighting to actor_loss BEFORE masked_avg
-        actor_loss = self._apply_epistemic_weighting(actor_loss, batch, log_step)
-
-        # Apply masking (copied from parent Experiment.compute_loss)
-        state_mask = (~((batch.rl2s == self.policy.pad_val).all(-1, keepdim=True))).bool()
-        critic_state_mask = einops.repeat(state_mask[:, 1:, ...], f"B L 1 -> B L {C} {G} 1")
-        actor_state_mask = einops.repeat(state_mask[:, 1:, ...], f"B L 1 -> B L {G} 1")
-
-        # Hook to allow custom masks (e.g., missing_action_mask in metamon)
-        actor_state_mask = self.edit_actor_mask(batch, actor_loss, actor_state_mask)
-        critic_state_mask = self.edit_critic_mask(batch, critic_loss, critic_state_mask)
-
-        # Compute scalar losses via masked averaging
-        batch_size = B * L_1
-        unmasked_batch_size = actor_state_mask[..., 0, 0].sum()
-        masked_actor_loss = amago.utils.masked_avg(actor_loss, actor_state_mask)
-        if isinstance(critic_loss, torch.Tensor):
-            masked_critic_loss = amago.utils.masked_avg(critic_loss, critic_state_mask)
-        else:
-            assert critic_loss is None
-            masked_critic_loss = 0.0
-
-        loss_dict = {
-            "Critic Loss": masked_critic_loss,
-            "Actor Loss": masked_actor_loss,
-            "Sequence Length": L_1 + 1,
-            "Batch Size (in Timesteps)": batch_size,
-            "Unmasked Batch Size (in Timesteps)": unmasked_batch_size,
-        }
-        loss_dict.update(update_info)
-
-        # Add KL regularization if dynamic damping enabled (independent mechanism)
-        if self.dd_state is not None and self.dd_config.enabled:
-            kl_loss, kl_metrics = self._compute_kl_loss(batch, log_step)
-            loss_dict["Actor Loss"] = loss_dict["Actor Loss"] + kl_loss
-            loss_dict.update(kl_metrics)
-
-            # Track KL for adaptive control
-            if "KL Divergence" in kl_metrics:
-                self.kl_window.append(kl_metrics["KL Divergence"])
-                self.dd_step_counter += 1
-
-                if self.dd_step_counter >= self.dd_adapt_interval and len(self.kl_window) >= 10:
-                    mean_kl = float(np.mean(self.kl_window))
-                    self.dd_state.adapt_from_observed_kl(self.optimizer, mean_kl)
-                    self.dd_step_counter = 0
-
-        # Clean up cache to prevent stale data
-        if hasattr(self.policy, 'cached_epistemic') and self.policy.cached_epistemic is not None:
-            self.policy.cached_epistemic = None
-
-        return loss_dict
-
-    def _compute_kl_loss(self, batch: Batch, log_step: bool) -> tuple[torch.Tensor, dict]:
-        """Compute reverse-KL regularization loss: KL(π_new || π_ref).
-
-        Returns:
-            kl_loss: Scalar KL loss weighted by kl_coef
-            metrics: Dict of metrics for logging
-        """
-        from metamon.rl.dynamic_damping import compute_masked_reverse_kl, compute_policy_entropy
-        from einops import repeat
-
-        # Try to use cached values from agent's forward pass (MetamonMultiTaskAgent)
-        # This eliminates expensive recomputation of encodings
-        cached = getattr(self.policy, 'cached_kl_data', None)
-
-        # Validation mode: check if cached values match recomputed values
-        # Set METAMON_VALIDATE_CACHE=1 environment variable to enable
-        validate_cache = os.environ.get('METAMON_VALIDATE_CACHE', '0') == '1'
-
-        if cached is not None:
-            # FAST PATH: Use cached values from forward pass (~1.6-1.9x speedup)
-            state = cached['s_rep']
-            straight_from_obs = cached['straight_from_obs'].copy()  # Shallow copy to avoid mutation
-            straight_from_obs["illegal_actions"] = batch.obs.get("illegal_actions")
-
-            # Validation: verify cached values match recomputed values
-            if validate_cache and log_step:
-                with torch.no_grad():
-                    tstep_emb_check = self.policy.tstep_encoder(
-                        obs=batch.obs, rl2s=batch.rl2s, log_dict=None
-                    )
-                    traj_emb_check, _ = self.policy.traj_encoder(
-                        seq=tstep_emb_check, time_idxs=batch.time_idxs, log_dict=None
-                    )
-
-                    # Check if cached values match recomputed values
-                    max_diff = (state - traj_emb_check).abs().max().item()
-                    if max_diff > 1e-5:
-                        print(f"[CACHE VALIDATION WARNING] Max difference: {max_diff:.2e}")
-                    else:
-                        print(f"[CACHE VALIDATION OK] Max difference: {max_diff:.2e}")
-        else:
-            # FALLBACK: Recompute encodings (backwards compatibility or if caching disabled)
-            # This path is used if not using MetamonMultiTaskAgent
-            tstep_emb = self.policy.tstep_encoder(
-                obs=batch.obs,
-                rl2s=batch.rl2s,
-                log_dict=None,
-            )
-
-            # Get trajectory embeddings from NEW policy's traj encoder
-            traj_emb, _ = self.policy.traj_encoder(
-                seq=tstep_emb,
-                time_idxs=batch.time_idxs,
-                log_dict=None,
-            )
-
-            # Get state representation
-            state = traj_emb
-
-            # Get observations to pass directly to actor (for illegal action masking)
-            straight_from_obs = {
-                k: batch.obs[k] for k in self.policy.pass_obs_keys_to_actor
-            }
-            straight_from_obs["illegal_actions"] = batch.obs.get("illegal_actions")
-
-        # Get NEW policy logits (with gradients)
-        new_dist_params = self.policy.actor.actor_network_forward(
-            state=state,
-            log_dict=None,
-            straight_from_obs=straight_from_obs,
-        )  # [B, L, G, A] - includes initial timestep at index 0
-
-        # Get REFERENCE policy logits (no gradients)
-        with torch.no_grad():
-            ref_dist_params = self.dd_state.ref_model.actor.actor_network_forward(
-                state=state,  # Reuse same state encoding
-                log_dict=None,
-                straight_from_obs=straight_from_obs,
-            )  # [B, L, G, A] - includes initial timestep at index 0
-
-        # Slice to exclude first timestep (no action at initial state)
-        # This aligns with how AMAGO handles actor loss (actions start at timestep 1)
-        new_dist_params = new_dist_params[:, 1:, :, :]  # [B, L-1, G, A]
-        ref_dist_params = ref_dist_params[:, 1:, :, :]  # [B, L-1, G, A]
-
-        B, L, G, A = new_dist_params.shape  # Note: L is now L-1 (action-aligned length)
-
-        # Get legal action mask (inverse of illegal_actions), also sliced to match
-        legal_mask = ~straight_from_obs["illegal_actions"][:, 1:, :]  # [B, L, A]
-        legal_mask = repeat(legal_mask, "b l a -> b l g a", g=G)  # [B, L, G, A]
-
-        # Compute KL divergence per timestep
-        kl_per_timestep = compute_masked_reverse_kl(
-            new_logits=new_dist_params.reshape(B * L * G, A),
-            ref_logits=ref_dist_params.reshape(B * L * G, A),
-            legal_mask=legal_mask.reshape(B * L * G, A),
-        )  # [B*L*G]
-        kl_per_timestep = kl_per_timestep.reshape(B, L, G, 1)  # [B, L, G, 1]
-
-        # Compute policy entropy (for logging)
-        entropy_per_timestep = compute_policy_entropy(
-            logits=new_dist_params.reshape(B * L * G, A),
-            legal_mask=legal_mask.reshape(B * L * G, A),
-        ).reshape(B, L, G, 1)
-
-        # Apply the same masking as actor loss (reuse edit_actor_mask)
-        state_mask = (~((batch.rl2s == self.policy.pad_val).all(-1, keepdim=True))).bool()
-        # Slice to match action-aligned length (same as base AMAGO)
-        actor_state_mask = repeat(state_mask[:, 1:, ...], f"b l 1 -> b l {G} 1")
-        actor_state_mask = self.edit_actor_mask(batch, kl_per_timestep, actor_state_mask)
-
-        # Compute masked averages
-        masked_kl = amago.utils.masked_avg(kl_per_timestep, actor_state_mask)
-        masked_entropy = amago.utils.masked_avg(entropy_per_timestep, actor_state_mask)
-
-        # Weighted KL loss
-        kl_loss = self.dd_state.kl_coef * masked_kl
-
-        # Metrics for logging (always log all damping metrics)
-        metrics = {
-            "KL Divergence": masked_kl.item(),
-            "Policy Entropy": masked_entropy.item(),
-            "Damping/KL Coefficient": self.dd_state.kl_coef,
-            "Damping/Entropy Coefficient": self.dd_state.ent_coef,
-            "Damping/Step": self.dd_state.step,
-            "Damping/Learning Rate": self.dd_state.current_lr if self.dd_state.current_lr is not None else self.optimizer.param_groups[0]["lr"],
-        }
-
-        return kl_loss, metrics
-
-    def _update_ema_weights(self):
-        """Update EMA model weights using exponential moving average.
-
-        EMA update formula: ema_param = decay * ema_param + (1 - decay) * current_param
-
-        Respects warmup period and update interval for gradual/efficient updates.
-        """
-        import torch
-
-        self.ema_step_counter += 1
-
-        # Warmup: skip EMA updates until warmup period completes
-        if self.ema_step_counter < self.ema_warmup_steps:
-            return
-
-        # Update interval: only update every N steps (for efficiency)
-        if self.ema_step_counter % self.ema_update_interval != 0:
-            return
-
-        # EMA update: ema_param = decay * ema_param + (1 - decay) * current_param
-        with torch.no_grad():
-            for ema_param, current_param in zip(
-                self.ema_model.parameters(),
-                self.policy.parameters()
-            ):
-                ema_param.data.mul_(self.ema_decay).add_(
-                    current_param.data, alpha=1 - self.ema_decay
-                )
-
-    def train_step(self, batch: Batch, log_step: bool):
-        """Training step with dynamic damping schedule updates and adaptive control."""
-        # Update damping schedules before training step
-        if self.dd_state is not None and self.dd_config.enabled:
-            self.dd_state.update_schedules()
-
-        # Perform standard training step
-        metrics = super().train_step(batch, log_step)
-
-        # Update EMA weights after gradient step
-        if self.use_ema:
-            self._update_ema_weights()
-
-        return metrics
-
-    def save_ema_checkpoint(self, epoch: int):
-        """Save EMA model weights separately from training checkpoint.
-
-        Saves to: {ckpt_dir}/ema_weights/policy_epoch_{epoch}.pt
-
-        This allows loading EMA checkpoints independently of training checkpoints
-        for evaluation or deployment.
-        """
-        import os
-        import torch
-
-        if not self.use_ema:
-            return
-
-        # Create EMA checkpoint directory
-        ema_ckpt_dir = os.path.join(self.ckpt_dir, "ema_weights")
-        os.makedirs(ema_ckpt_dir, exist_ok=True)
-
-        # Save EMA weights
-        ema_path = os.path.join(ema_ckpt_dir, f"policy_epoch_{epoch}.pt")
-        torch.save(self.ema_model.state_dict(), ema_path)
-        print(f"[EMA] Saved checkpoint to {ema_path}")
-
-    def save_checkpoint(self) -> None:
-        """Override AMAGO's save_checkpoint to also save EMA weights.
-
-        AMAGO calls this method from learn() loop when epoch % ckpt_interval == 0.
-        We must override this (not train_epoch) to ensure EMA checkpoints are saved.
-        """
-        # Call parent's checkpoint saving (saves training state + policy weights)
-        super().save_checkpoint()
-
-        # Save EMA checkpoint if enabled
-        if self.use_ema:
-            self.save_ema_checkpoint(self.epoch)
-
-        self._run_checkpoint_subprocess_eval()
-
-    def configure_checkpoint_subprocess_eval(
-        self,
-        total_battles: int,
-        wandb_key: str = "kakuna-ladder",
-        interval: int = 1,
-        agent: str = "Bulba",
-        opponent_agent: str = "Kakuna",
-        opponent_username: str = "Kakuna0001",
-        eval_username: Optional[str] = None,
-        avatar: str = "red-gen1main",
-        gen: int = 1,
-        battle_format: str = "ou",
-        team_set: str = "competitive",
-    ) -> None:
-        """Run a checkpoint eval in subprocesses after saved checkpoints.
-
-        Training state is temporarily moved to CPU so the saved checkpoint can
-        be loaded for eval while the opponent runs CPU-only.
-        """
-        self.checkpoint_subprocess_eval_config = {
-            "total_battles": total_battles,
-            "wandb_key": wandb_key,
-            "interval": interval,
-            "agent": agent,
-            "opponent_agent": opponent_agent,
-            "opponent_username": opponent_username,
-            "eval_username": eval_username or f"{self.run_name}KakunaEval",
-            "avatar": avatar,
-            "gen": gen,
-            "battle_format": battle_format,
-            "team_set": team_set,
-        }
-
-    def _move_optimizer_state_to(self, device: str | torch.device) -> None:
-        optimizer = getattr(self.optimizer, "optimizer", self.optimizer)
-        for state in optimizer.state.values():
-            for key, val in state.items():
-                if isinstance(val, torch.Tensor):
-                    state[key] = val.to(device)
-
-    @staticmethod
-    def _extract_last_json_object(text: str) -> dict:
-        decoder = json.JSONDecoder()
-        last_obj = None
-        for idx, char in enumerate(text):
-            if char != "{":
-                continue
-            try:
-                obj, _ = decoder.raw_decode(text[idx:])
-            except json.JSONDecodeError:
-                continue
-            last_obj = obj
-        if not isinstance(last_obj, dict):
-            raise ValueError("Could not parse JSON results from checkpoint eval output")
-        return last_obj
-
-    @staticmethod
-    def _numeric_metrics(metrics: dict[str, Any]) -> dict[str, int | float]:
-        out = {}
-        for key, val in metrics.items():
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, (int, float)):
-                out[key] = val
-        return out
-
-    def _run_checkpoint_subprocess_eval(self) -> None:
-        config = self.checkpoint_subprocess_eval_config
-        if config is None:
-            return
-        if not self.accelerator.is_main_process:
-            return
-        interval = config["interval"]
-        if interval and self.epoch % interval != 0:
-            return
-
-        total_battles = config["total_battles"]
-        wandb_key = config["wandb_key"]
-        checkpoint_path = os.path.join(
-            self.ckpt_dir, "policy_weights", f"policy_epoch_{self.epoch}.pt"
-        )
-        print(
-            f"[Checkpoint Eval] Epoch {self.epoch}: evaluating {checkpoint_path} "
-            f"against {config['opponent_agent']} for {total_battles} battle(s)"
-        )
-
-        eval_base_cmd = [
-            sys.executable,
-            "-m",
-            "metamon.rl.evaluate",
-            "--eval_type",
-            "ladder",
-            "--gens",
-            str(config["gen"]),
-            "--formats",
-            config["battle_format"],
-            "--team_set",
-            config["team_set"],
-            "--avatar",
-            config["avatar"],
-            "--total_battles",
-            str(total_battles),
-        ]
-        opponent_cmd = eval_base_cmd + [
-            "--agent",
-            config["opponent_agent"],
-            "--username",
-            config["opponent_username"],
-        ]
-        eval_cmd = eval_base_cmd + [
-            "--agent",
-            config["agent"],
-            "--custom_checkpoint_path",
-            checkpoint_path,
-            "--username",
-            config["eval_username"],
-        ]
-
-        env = os.environ.copy()
-        opponent_env = env.copy()
-        opponent_env["CUDA_VISIBLE_DEVICES"] = ""
-        opponent_proc = None
-        try:
-            self.policy_aclr.to("cpu")
-            self._move_optimizer_state_to("cpu")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            opponent_proc = subprocess.Popen(
-                opponent_cmd,
-                env=opponent_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
-            )
-            time.sleep(8)
-            completed = subprocess.run(
-                eval_cmd,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    "Checkpoint eval failed with exit code "
-                    f"{completed.returncode}:\n{completed.stdout}"
-                )
-            results = self._extract_last_json_object(completed.stdout)
-        finally:
-            if opponent_proc is not None and opponent_proc.poll() is None:
-                opponent_proc.terminate()
-                try:
-                    opponent_proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    opponent_proc.kill()
-                    opponent_proc.wait(timeout=30)
-            self.policy_aclr.to(self.DEVICE)
-            self._move_optimizer_state_to(self.DEVICE)
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        logs = self._numeric_metrics(results)
-        logs["Total Battles"] = total_battles
-        logs["Checkpoint Epoch"] = self.epoch
-        self.log(logs, key=wandb_key)
-        print(f"[Checkpoint Ladder Eval] Logged metrics to W&B key '{wandb_key}'")
-
-    def train_epoch(self, epoch: int):
-        """Training epoch with adaptive LR/KL control during training (every N steps)."""
-        # Reset step counter at start of epoch (window keeps rolling)
-        self.dd_step_counter = 0
-
-        # Run standard training epoch (adaptive control happens every N steps during training)
-        out = super().train_epoch(epoch)
-
-        # End-of-epoch: adapt if we have accumulated steps since last adaptation
-        # (ensures we don't miss the last partial interval)
-        if self.dd_state is not None and self.dd_config.enabled and \
-           self.dd_step_counter > 0 and len(self.kl_window) >= 10:
-            mean_kl = float(np.mean(self.kl_window))
-            self.dd_state.adapt_from_observed_kl(self.optimizer, mean_kl)
-
-            print(f"[Dynamic Damping] End-of-epoch {epoch} adaptation: mean_kl={mean_kl:.4f} "
-                  f"(over last {len(self.kl_window)} steps), "
-                  f"kl_coef={self.dd_state.kl_coef:.4f}, "
-                  f"lr={self.optimizer.param_groups[0]['lr']:.6f}")
-
-            # Reset for next epoch
-            self.dd_step_counter = 0
-
-        return out
-
-    def _apply_epistemic_weighting(
-        self,
-        actor_loss: torch.Tensor,  # [B, L-1, G, 1]
-        batch: Batch,
-        log_step: bool
-    ) -> torch.Tensor:
-        """Apply per-timestep confidence weighting based on critic uncertainty.
-
-        Weights actor gradients by inverse uncertainty: w = 1/(1 + β·σ̃)^p
-        where σ̃ is normalized critic ensemble std dev.
-
-        Args:
-            actor_loss: Per-timestep actor loss [B, L-1, G, 1]
-            batch: Batch of RL data
-            log_step: Whether this is a logging step
-
-        Returns:
-            Weighted actor loss with same shape [B, L-1, G, 1]
-        """
-        # Extract Q-ensemble std from cache
-        if self.policy.cached_epistemic is None or 'q_std' not in self.policy.cached_epistemic:
-            # Fallback: no epistemic data cached (shouldn't happen if agent forward ran)
-            print("[WARNING] Epistemic cache not found, skipping weighting")
-            return actor_loss
-
-        q_std = self.policy.cached_epistemic['q_std']  # [1, B, L-1, G, 1]
-
-        # Shape alignment: remove batch dimension and match actor_loss
-        q_std = q_std.squeeze(0)  # [B, L-1, G, 1]
-
-        # Defensive shape check
-        assert q_std.shape == actor_loss.shape, \
-            f"Shape mismatch: q_std {q_std.shape} vs actor_loss {actor_loss.shape}"
-
-        # Get mask for valid (non-padding) timesteps
-        state_mask = (~((batch.rl2s == self.policy.pad_val).all(-1, keepdim=True))).bool()
-        state_mask = state_mask[:, 1:]  # [B, L-1, 1]
-        state_mask = state_mask.unsqueeze(-1)  # [B, L-1, 1, 1] - only ONE unsqueeze!
-
-        # Normalize uncertainty (using only valid timesteps)
-        sigma_norm = self._normalize_uncertainty(q_std, state_mask)  # [B, L-1, G, 1]
-
-        # Compute confidence weights: w = 1 / (1 + β·σ̃)^p
-        beta = self._get_current_beta()
-        confidence = 1.0 / (1.0 + beta * sigma_norm).pow(self.epistemic_power)
-
-        # Ensure stop-gradient (no backprop through uncertainty)
-        confidence = confidence.detach()
-
-        # Apply per-timestep weighting
-        weighted_actor_loss = actor_loss * confidence
-
-        # Log metrics
-        if log_step:
-            self._log_epistemic_metrics(sigma_norm, confidence, state_mask)
-
-            # Debug prints for first few steps (validation)
-            if self.epistemic_step <= 5:
-                print(f"\n=== Epistemic Weighting Debug (step {self.epistemic_step - 1}) ===")
-                print(f"actor_loss shape: {actor_loss.shape}")
-                print(f"q_std shape: {q_std.shape}")
-                print(f"confidence range: [{confidence.min():.3f}, {confidence.max():.3f}]")
-                print(f"confidence mean: {confidence.mean():.3f}")
-
-                # Check high vs low uncertainty separation
-                valid = state_mask.squeeze(-1).squeeze(-1) > 0
-                sigma_valid = sigma_norm[valid]
-                conf_valid = confidence[valid]
-
-                if sigma_valid.numel() > 0:
-                    high_mask = sigma_valid > sigma_valid.median()
-                    if high_mask.any() and (~high_mask).any():
-                        print(f"High-σ confidence: {conf_valid[high_mask].mean():.3f}")
-                        print(f"Low-σ confidence: {conf_valid[~high_mask].mean():.3f}")
-
-                print(f"Beta: {beta:.3f}")
-                print("=" * 50)
-
-        return weighted_actor_loss
-
-    def _normalize_uncertainty(
-        self,
-        q_std: torch.Tensor,      # [B, L-1, G, 1]
-        mask: torch.Tensor        # [B, L-1, 1, 1]
-    ) -> torch.Tensor:
-        """Normalize uncertainty to prevent scale drift across training loops.
-
-        Uses per-batch median normalization for stability.
-
-        Args:
-            q_std: Q-ensemble standard deviation [B, L-1, G, 1]
-            mask: Valid timestep mask [B, L-1, 1, 1]
-
-        Returns:
-            Normalized uncertainty [B, L-1, G, 1]
-        """
-        # Apply mask to exclude padding
-        masked_std = q_std * mask  # Zero out padding
-
-        # Get valid stds (flatten all dimensions except batch/time)
-        valid_mask = mask.squeeze(-1).squeeze(-1) > 0  # [B, L-1]
-        valid_stds = q_std[valid_mask]  # Flatten valid entries
-
-        if valid_stds.numel() == 0:
-            # Fallback: all padding (shouldn't happen)
-            return torch.ones_like(q_std)
-
-        # Compute median for normalization
-        median = valid_stds.median()
-
-        # Ratio normalization: σ̃ = σ / median(σ)
-        sigma_norm = q_std / (median + 1e-8)
-
-        # Clamp to prevent extreme outliers
-        sigma_norm = sigma_norm.clamp(0, 10)
-
-        return sigma_norm
-
-    def _get_current_beta(self) -> float:
-        """Anneal beta from high (conservative) to low (permissive) over training.
-
-        Schedule: β(t) = β_final + (β_init - β_final) * (1 - progress)^α
-
-        This yields:
-        - step 0: β = β_init (high penalty, ~5-10)
-        - end: β = β_final (low penalty, ~0.5-1.0)
-
-        Returns:
-            Current beta value
-        """
-        # Compute training progress [0, 1]
-        progress = min(1.0, self.epistemic_step / self.epistemic_anneal_steps)
-
-        # Power-law decay: high → low
-        # CRITICAL: This is the CORRECT formula (high → low)
-        beta = self.epistemic_beta_final + \
-               (self.epistemic_beta_init - self.epistemic_beta_final) * \
-               (1.0 - progress) ** self.epistemic_anneal_power
-
-        self.epistemic_step += 1
-        return beta
-
-    def _log_epistemic_metrics(
-        self,
-        sigma_norm: torch.Tensor,   # [B, L-1, G, 1]
-        confidence: torch.Tensor,   # [B, L-1, G, 1]
-        mask: torch.Tensor          # [B, L-1, 1, 1]
-    ) -> None:
-        """Log epistemic weighting diagnostics to wandb."""
-        with torch.no_grad():
-            # Only consider valid (non-padding) timesteps
-            valid_mask = mask.squeeze(-1).squeeze(-1) > 0  # [B, L-1]
-            sigma_valid = sigma_norm[valid_mask]
-            conf_valid = confidence[valid_mask]
-
-            if sigma_valid.numel() == 0:
-                return  # No valid timesteps
-
-            # Get current beta
-            # Note: _get_current_beta() increments step, so we compute it differently here
-            progress = min(1.0, (self.epistemic_step - 1) / self.epistemic_anneal_steps)
-            current_beta = self.epistemic_beta_final + \
-                          (self.epistemic_beta_init - self.epistemic_beta_final) * \
-                          (1.0 - progress) ** self.epistemic_anneal_power
-
-            # Basic stats - add to update_info which gets logged
-            metrics = {
-                "Epistemic/Mean Uncertainty": sigma_valid.mean().item(),
-                "Epistemic/Mean Confidence": conf_valid.mean().item(),
-                "Epistemic/Beta": current_beta,
-            }
-
-            # High vs low uncertainty impact
-            median_sigma = sigma_valid.median()
-            high_unc_mask = sigma_valid > median_sigma
-            low_unc_mask = ~high_unc_mask
-
-            if high_unc_mask.any():
-                metrics["Epistemic/Confidence (High σ)"] = conf_valid[high_unc_mask].mean().item()
-            if low_unc_mask.any():
-                metrics["Epistemic/Confidence (Low σ)"] = conf_valid[low_unc_mask].mean().item()
-
-            # Effective learning mass (what fraction of gradients we're allowing)
-            effective_mass = conf_valid.mean().item()
-            metrics["Epistemic/Effective Mass"] = effective_mass
-
-            # Add to policy's update_info for logging
-            if hasattr(self.policy, 'update_info'):
-                self.policy.update_info.update(metrics)
+    def init_logger(self):
+        if self.log_to_wandb:
+            super().init_logger()
 
     def init_envs(self):
         out = super().init_envs()
         amago.utils.call_async_env(self.val_envs, "take_long_break")
         return out
 
-    def _swap_to_ema_for_eval(self):
-        """Temporarily swap policy weights with EMA weights for evaluation.
-
-        Stores current training weights in self._training_state_dict for later restoration.
-        """
-        import torch
-
-        # Store current training weights (on CPU to save GPU memory)
-        self._training_state_dict = {
-            k: v.cpu().clone()
-            for k, v in self.policy.state_dict().items()
-        }
-
-        # Load EMA weights into policy
-        self.policy.load_state_dict(self.ema_model.state_dict())
-        print("[EMA] Swapped to EMA weights for evaluation")
-
-    def _restore_training_weights(self):
-        """Restore training weights after evaluation.
-
-        Moves stored weights back to device and loads them into policy.
-        """
-        if self._training_state_dict is None:
-            raise RuntimeError("Cannot restore training weights: no backup found")
-
-        # Move weights back to policy device and load
-        device = next(self.policy.parameters()).device
-        self.policy.load_state_dict(
-            {k: v.to(device) for k, v in self._training_state_dict.items()}
-        )
-        self._training_state_dict = None
-        print("[EMA] Restored training weights after evaluation")
-
     def evaluate_val(self):
         amago.utils.call_async_env(self.val_envs, "resume_from_break")
-
-        # Swap to EMA weights for evaluation if enabled
-        if self.use_ema and self.ema_eval_only:
-            self._swap_to_ema_for_eval()
-
         out = super().evaluate_val()
-
-        # Restore training weights after evaluation
-        if self.use_ema and self.ema_eval_only:
-            self._restore_training_weights()
-
         amago.utils.call_async_env(self.val_envs, "take_long_break")
         return out
 
-    def edit_actor_mask(
-        self, batch: Batch, actor_loss: torch.FloatTensor, pad_mask: torch.BoolTensor
-    ) -> torch.BoolTensor:
-        B, L, G, _ = actor_loss.shape
-        # missing_action_mask is one timestep too long to match the size of observations
-        # True where the action is missing, False where it's provided.
-        # pad_mask is True where the timestep should count towards loss, False where it shouldn't.
-        missing_action_mask = einops.repeat(
-            ~batch.obs["missing_action_mask"][:, :-1], "b l 1 -> b l g 1", g=G
-        )
-        return pad_mask & missing_action_mask
+    def init_model(self):
+        super().init_model()
+        policy = self.policy
 
-    def edit_critic_mask(
-        self, batch: Batch, critic_loss: torch.FloatTensor, pad_mask: torch.BoolTensor
-    ) -> torch.BoolTensor:
-        B, L, C, G, _ = pad_mask.shape
-        missing_action_mask = einops.repeat(
-            ~batch.obs["missing_action_mask"][:, :-1], "b l 1 -> b l c g 1", g=G, c=C
-        )
-        return pad_mask & missing_action_mask
+        def _edit_actor_mask(batch, actor_loss, pad_mask):
+            B, L, G, _ = actor_loss.shape
+            missing_action_mask = einops.repeat(
+                ~batch.obs["missing_action_mask"][:, :-1], "b l 1 -> b l g 1", g=G
+            )
+            return pad_mask & missing_action_mask
+
+        def _edit_critic_mask(batch, critic_loss, pad_mask):
+            if pad_mask is None:
+                return pad_mask
+            B, L, C, G, _ = pad_mask.shape
+            missing_action_mask = einops.repeat(
+                ~batch.obs["missing_action_mask"][:, :-1],
+                "b l 1 -> b l c g 1",
+                g=G,
+                c=C,
+            )
+            return pad_mask & missing_action_mask
+
+        policy.edit_actor_mask = _edit_actor_mask
+        policy.edit_critic_mask = _edit_critic_mask
+
+    def train_step(self, batch: Batch, log_step: bool):
+        fbc_filter = self.policy.fbc_filter_func
+        if hasattr(fbc_filter, "set_mask"):
+            state_mask = ~(batch.rl2s == MAGIC_PAD_VAL).all(-1, keepdim=True)
+            action_mask = ~batch.obs["missing_action_mask"]
+            fbc_filter.set_mask(state_mask & action_mask)
+        if hasattr(fbc_filter, "set_seq_mask") and getattr(
+            fbc_filter, "seq_enabled", False
+        ):
+            seq_mask = (~(batch.rl2s == MAGIC_PAD_VAL).all(-1, keepdim=True)).bool()
+            fbc_filter.set_seq_mask(seq_mask)
+        return super().train_step(batch, log_step=log_step)

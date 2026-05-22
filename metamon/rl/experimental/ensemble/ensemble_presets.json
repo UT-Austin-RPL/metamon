@@ -1,0 +1,1171 @@
+{
+  "best_large_sample_dualtemp4": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.01,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.4,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.64,
+      "proposer_bias": 1.45,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "sparse_superhi": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 1.0,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 0.85,
+      "judge_bias": 1.8,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.95
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.2,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.66,
+      "proposer_bias": 1.45,
+      "judge_bias": 0.05,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "switchmix_superhi": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 1.0,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 0.85,
+      "judge_bias": 1.8,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.95
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.2,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.66,
+      "proposer_bias": 1.45,
+      "judge_bias": 0.05,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "hybrid_k28_superhi": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 0.85,
+      "judge_bias": 1.8,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.95
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.2,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.66,
+      "proposer_bias": 1.45,
+      "judge_bias": 0.05,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "k34_superjudge": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 1.05,
+      "judge_bias": 1.45,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 0.8,
+      "judge_bias": 1.85,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.95
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.35,
+      "judge_bias": 0.05,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.64,
+      "proposer_bias": 1.25,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "k28_superjudge": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 0.8,
+      "judge_bias": 1.85,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.95
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.35,
+      "judge_bias": 0.05,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.64,
+      "proposer_bias": 1.25,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "dt4_k34_midjudge": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 0.1,
+      "judge_bias": 0.8,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.01,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.4,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.64,
+      "proposer_bias": 1.45,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "dt4_k34_midjudge_superprop": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 0.1,
+      "judge_bias": 0.8,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.01,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.4,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 1.2,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.0
+    }
+  ],
+  "dt4_k34_midjudge_superprop_switchk28": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 0.1,
+      "judge_bias": 0.8,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.01,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.4,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 1.2,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.0
+    }
+  ],
+  "dt4_k34_midjudge_dualprop6": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 0.15,
+      "judge_bias": 0.85,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.5,
+      "judge_bias": 0.01,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.25
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.3,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    },
+    {
+      "model_name": "Superkazam",
+      "checkpoint": 50,
+      "gxe": 0.7,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.12,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.0
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.64,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.05
+    }
+  ],
+  "dt4_k34_midjudge_switchk28": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 0.1,
+      "judge_bias": 0.8,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.01,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.4,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.64,
+      "proposer_bias": 1.45,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "dt4_k34_midjudge_switchspec": [
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.1,
+      "judge_bias": 1.55,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.85
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 34,
+      "gxe": 0.75,
+      "proposer_bias": 0.1,
+      "judge_bias": 0.8,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 28,
+      "gxe": 0.78,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.01,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.3
+    },
+    {
+      "model_name": "Kakuna",
+      "checkpoint": 30,
+      "gxe": 0.72,
+      "proposer_bias": 1.4,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.15
+    },
+    {
+      "model_name": "Alakazam",
+      "checkpoint": 8,
+      "gxe": 0.64,
+      "proposer_bias": 1.45,
+      "judge_bias": 0.01,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.1
+    }
+  ],
+  "tauros62_dualtemp5": [
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.05,
+      "judge_bias": 1.65,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.82
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.65,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.22
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 66,
+      "gxe": 0.83,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.55,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 0.98
+    },
+    {
+      "model_name": "V2AGroupedV2DataAblation",
+      "checkpoint": 90,
+      "gxe": 0.79,
+      "proposer_bias": 1.35,
+      "judge_bias": 0.2,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.08
+    },
+    {
+      "model_name": "V2AGroupedV2ISFilter",
+      "checkpoint": 88,
+      "gxe": 0.77,
+      "proposer_bias": 1.1,
+      "judge_bias": 0.6,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.02
+    }
+  ],
+  "tauros62_datajudge5": [
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.0,
+      "judge_bias": 1.7,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.82
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.55,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.18
+    },
+    {
+      "model_name": "V2AGroupedV2DataAblation",
+      "checkpoint": 90,
+      "gxe": 0.79,
+      "proposer_bias": 0.75,
+      "judge_bias": 1.1,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.95
+    },
+    {
+      "model_name": "V2AGroupedV2DataAblation",
+      "checkpoint": 90,
+      "gxe": 0.79,
+      "proposer_bias": 1.3,
+      "judge_bias": 0.05,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.08
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 64,
+      "gxe": 0.84,
+      "proposer_bias": 1.1,
+      "judge_bias": 0.15,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.0
+    }
+  ],
+  "tauros62_dualtemp6": [
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.05,
+      "judge_bias": 1.6,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.82
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.6,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.22
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 66,
+      "gxe": 0.83,
+      "proposer_bias": 1.1,
+      "judge_bias": 0.55,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.0
+    },
+    {
+      "model_name": "V2AGroupedV2DataAblation",
+      "checkpoint": 90,
+      "gxe": 0.79,
+      "proposer_bias": 1.25,
+      "judge_bias": 0.2,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.08
+    },
+    {
+      "model_name": "V2AGroupedV2ISFilter",
+      "checkpoint": 88,
+      "gxe": 0.77,
+      "proposer_bias": 0.95,
+      "judge_bias": 0.65,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.98
+    },
+    {
+      "model_name": "V2AGroupedV2Patched",
+      "checkpoint": 98,
+      "gxe": 0.74,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.1,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.08
+    }
+  ],
+  "tauros62_taurosonly5": [
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.0,
+      "judge_bias": 1.7,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.82
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.65,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.22
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 64,
+      "gxe": 0.84,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.65,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.92
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 64,
+      "gxe": 0.84,
+      "proposer_bias": 1.25,
+      "judge_bias": 0.05,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.05
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 66,
+      "gxe": 0.82,
+      "proposer_bias": 1.1,
+      "judge_bias": 0.15,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.02
+    }
+  ],
+  "tauros62_dataanchor5": [
+    {
+      "model_name": "V2AGroupedV2DataAblation",
+      "checkpoint": 90,
+      "gxe": 0.88,
+      "proposer_bias": 0.85,
+      "judge_bias": 1.7,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.84
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.0,
+      "judge_bias": 1.05,
+      "shortlist_k": 4,
+      "proposal_roles": [],
+      "action_temperature": 0.88
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.6,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.2
+    },
+    {
+      "model_name": "V2AGroupedV2DataAblation",
+      "checkpoint": 90,
+      "gxe": 0.88,
+      "proposer_bias": 1.35,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.08
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 64,
+      "gxe": 0.84,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.25,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.0
+    }
+  ],
+  "tauros62_temporal5": [
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.0,
+      "judge_bias": 1.7,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.82
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.65,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.22
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 60,
+      "gxe": 0.82,
+      "proposer_bias": 1.05,
+      "judge_bias": 0.65,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 64,
+      "gxe": 0.84,
+      "proposer_bias": 1.2,
+      "judge_bias": 0.1,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.02
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 68,
+      "gxe": 0.8,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.1,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.06
+    }
+  ],
+  "tauros62_wide6": [
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.0,
+      "judge_bias": 1.7,
+      "shortlist_k": 5,
+      "proposal_roles": [],
+      "action_temperature": 0.82
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 62,
+      "gxe": 0.86,
+      "proposer_bias": 1.6,
+      "judge_bias": 0.05,
+      "shortlist_k": 4,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.2
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 60,
+      "gxe": 0.82,
+      "proposer_bias": 1.0,
+      "judge_bias": 0.6,
+      "shortlist_k": 3,
+      "proposal_roles": [],
+      "action_temperature": 0.9
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 64,
+      "gxe": 0.84,
+      "proposer_bias": 1.15,
+      "judge_bias": 0.1,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.02
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 68,
+      "gxe": 0.8,
+      "proposer_bias": 1.1,
+      "judge_bias": 0.1,
+      "shortlist_k": 3,
+      "proposal_roles": [
+        "move",
+        "switch",
+        "counter_anchor"
+      ],
+      "action_temperature": 1.06
+    },
+    {
+      "model_name": "TaurosV5",
+      "checkpoint": 70,
+      "gxe": 0.78,
+      "proposer_bias": 1.0,
+      "judge_bias": 0.05,
+      "shortlist_k": 2,
+      "proposal_roles": [
+        "counter_anchor"
+      ],
+      "action_temperature": 1.08
+    }
+  ]
+}

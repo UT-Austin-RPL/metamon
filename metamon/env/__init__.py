@@ -4,6 +4,7 @@ from metamon.env.wrappers import (
     PokeEnvWrapper,
     BattleAgainstBaseline,
     QueueOnLocalLadder,
+    ChallengeByUsername,
     METAMON_TEAM_SETS,
     PokeAgentServerConfiguration,
     PokeAgentLadder,

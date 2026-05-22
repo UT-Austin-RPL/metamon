@@ -1,0 +1,8 @@
+agents:
+  PastaMittens:
+    family: kakuna
+    preset: dt4_k34_midjudge_switchk28
+
+  Exeggcute:
+    family: tauros
+    preset: tauros62_datajudge5
