@@ -1,5 +1,9 @@
 from typing import Optional, Any, Type
+import json
 import os
+import subprocess
+import sys
+import time
 import warnings
 
 import gin
@@ -1126,6 +1130,7 @@ class MetamonAMAGOExperiment(amago.Experiment):
         self.ema_step_counter = 0
         self._training_state_dict = None  # Temporary storage for eval weight swapping
         self.epistemic_step = 0  # Track steps for beta annealing
+        self.checkpoint_subprocess_eval_config = None
 
     def start(self):
         """Override start to initialize dynamic damping after policy is created."""
@@ -1528,6 +1533,176 @@ class MetamonAMAGOExperiment(amago.Experiment):
         # Save EMA checkpoint if enabled
         if self.use_ema:
             self.save_ema_checkpoint(self.epoch)
+
+        self._run_checkpoint_subprocess_eval()
+
+    def configure_checkpoint_subprocess_eval(
+        self,
+        total_battles: int,
+        wandb_key: str = "kakuna-ladder",
+        interval: int = 1,
+        agent: str = "Bulba",
+        opponent_agent: str = "Kakuna",
+        opponent_username: str = "Kakuna0001",
+        eval_username: Optional[str] = None,
+        avatar: str = "red-gen1main",
+        gen: int = 1,
+        battle_format: str = "ou",
+        team_set: str = "competitive",
+    ) -> None:
+        """Run a checkpoint eval in subprocesses after saved checkpoints.
+
+        Training state is temporarily moved to CPU so the saved checkpoint can
+        be loaded for eval while the opponent runs CPU-only.
+        """
+        self.checkpoint_subprocess_eval_config = {
+            "total_battles": total_battles,
+            "wandb_key": wandb_key,
+            "interval": interval,
+            "agent": agent,
+            "opponent_agent": opponent_agent,
+            "opponent_username": opponent_username,
+            "eval_username": eval_username or f"{self.run_name}KakunaEval",
+            "avatar": avatar,
+            "gen": gen,
+            "battle_format": battle_format,
+            "team_set": team_set,
+        }
+
+    def _move_optimizer_state_to(self, device: str | torch.device) -> None:
+        optimizer = getattr(self.optimizer, "optimizer", self.optimizer)
+        for state in optimizer.state.values():
+            for key, val in state.items():
+                if isinstance(val, torch.Tensor):
+                    state[key] = val.to(device)
+
+    @staticmethod
+    def _extract_last_json_object(text: str) -> dict:
+        decoder = json.JSONDecoder()
+        last_obj = None
+        for idx, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                obj, _ = decoder.raw_decode(text[idx:])
+            except json.JSONDecodeError:
+                continue
+            last_obj = obj
+        if not isinstance(last_obj, dict):
+            raise ValueError("Could not parse JSON results from checkpoint eval output")
+        return last_obj
+
+    @staticmethod
+    def _numeric_metrics(metrics: dict[str, Any]) -> dict[str, int | float]:
+        out = {}
+        for key, val in metrics.items():
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, (int, float)):
+                out[key] = val
+        return out
+
+    def _run_checkpoint_subprocess_eval(self) -> None:
+        config = self.checkpoint_subprocess_eval_config
+        if config is None:
+            return
+        if not self.accelerator.is_main_process:
+            return
+        interval = config["interval"]
+        if interval and self.epoch % interval != 0:
+            return
+
+        total_battles = config["total_battles"]
+        wandb_key = config["wandb_key"]
+        checkpoint_path = os.path.join(
+            self.ckpt_dir, "policy_weights", f"policy_epoch_{self.epoch}.pt"
+        )
+        print(
+            f"[Checkpoint Eval] Epoch {self.epoch}: evaluating {checkpoint_path} "
+            f"against {config['opponent_agent']} for {total_battles} battle(s)"
+        )
+
+        eval_base_cmd = [
+            sys.executable,
+            "-m",
+            "metamon.rl.evaluate",
+            "--eval_type",
+            "ladder",
+            "--gens",
+            str(config["gen"]),
+            "--formats",
+            config["battle_format"],
+            "--team_set",
+            config["team_set"],
+            "--avatar",
+            config["avatar"],
+            "--total_battles",
+            str(total_battles),
+        ]
+        opponent_cmd = eval_base_cmd + [
+            "--agent",
+            config["opponent_agent"],
+            "--username",
+            config["opponent_username"],
+        ]
+        eval_cmd = eval_base_cmd + [
+            "--agent",
+            config["agent"],
+            "--custom_checkpoint_path",
+            checkpoint_path,
+            "--username",
+            config["eval_username"],
+        ]
+
+        env = os.environ.copy()
+        opponent_env = env.copy()
+        opponent_env["CUDA_VISIBLE_DEVICES"] = ""
+        opponent_proc = None
+        try:
+            self.policy_aclr.to("cpu")
+            self._move_optimizer_state_to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            opponent_proc = subprocess.Popen(
+                opponent_cmd,
+                env=opponent_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+            )
+            time.sleep(8)
+            completed = subprocess.run(
+                eval_cmd,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "Checkpoint eval failed with exit code "
+                    f"{completed.returncode}:\n{completed.stdout}"
+                )
+            results = self._extract_last_json_object(completed.stdout)
+        finally:
+            if opponent_proc is not None and opponent_proc.poll() is None:
+                opponent_proc.terminate()
+                try:
+                    opponent_proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    opponent_proc.kill()
+                    opponent_proc.wait(timeout=30)
+            self.policy_aclr.to(self.DEVICE)
+            self._move_optimizer_state_to(self.DEVICE)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        logs = self._numeric_metrics(results)
+        logs["Total Battles"] = total_battles
+        logs["Checkpoint Epoch"] = self.epoch
+        self.log(logs, key=wandb_key)
+        print(f"[Checkpoint Ladder Eval] Logged metrics to W&B key '{wandb_key}'")
 
     def train_epoch(self, epoch: int):
         """Training epoch with adaptive LR/KL control during training (every N steps)."""

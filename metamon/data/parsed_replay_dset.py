@@ -256,13 +256,11 @@ class MetamonDataset(Dataset):
         name_without_ext = (
             filename[:-9] if filename.endswith(".json.lz4") else filename[:-5]
         )
-        parts = name_without_ext.split("_")
-
-        if len(parts) == 7:
-            battle_id, rating_str, p1, _, p2, date_str, result = parts
-        elif len(parts) == 8:
-            battle_id, rating_str, p1a, p1b, _, p2, date_str, result = parts
-        else:
+        try:
+            prefix, date_str, result = name_without_ext.rsplit("_", 2)
+            left, _p2 = prefix.rsplit("_vs_", 1)
+            battle_id, rating_str, _p1 = left.split("_", 2)
+        except ValueError:
             return False
 
         # Validate format in battle_id

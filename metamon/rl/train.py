@@ -2,6 +2,8 @@ import os
 from functools import partial
 from typing import List, Optional
 
+import gin
+import torch
 import wandb
 
 import amago
@@ -35,6 +37,26 @@ EVAL_OPPONENTS = [
     baselines.heuristic.basic.GymLeader,
     baselines.heuristic.kaizo.EmeraldKaizo,
 ]
+
+
+def _training_attention_type():
+    has_gpu = torch.cuda.is_available()
+    try:
+        import flash_attn  # noqa: F401
+
+        has_flash_attn = True
+    except ImportError:
+        has_flash_attn = False
+
+    if has_gpu and has_flash_attn:
+        return amago.nets.transformer.FlashAttention
+
+    print(
+        "Warning: FlashAttention is unavailable; using AMAGO VanillaAttention. "
+        "This avoids the startup crash, but superkazam-sized training will be slower "
+        "and may use more memory."
+    )
+    return amago.nets.transformer.VanillaAttention
 
 
 def add_cli(parser):
@@ -184,6 +206,69 @@ def add_cli(parser):
         help="Showdown battle formats to include in the dataset. Defaults to all supported formats.",
     )
     parser.add_argument("--log", action="store_true", help="Log to wandb.")
+    parser.add_argument(
+        "--kakuna_ladder_eval",
+        action="store_true",
+        help=(
+            "After each saved checkpoint, move training state off GPU, run a "
+            "CPU-only Kakuna local ladder opponent plus a checkpoint eval "
+            "subprocess, then log the result to the same W&B run."
+        ),
+    )
+    parser.add_argument(
+        "--kakuna_ladder_total_battles",
+        type=int,
+        default=100,
+        help="Number of local ladder battles to run for each Kakuna comparison eval.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_interval",
+        type=int,
+        default=1,
+        help="Run the Kakuna comparison every N saved checkpoints.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_username",
+        default=None,
+        help="Local Showdown username for the training policy during Kakuna comparison evals.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_opponent_username",
+        default="Kakuna0001",
+        help="Local Showdown username for the CPU-only Kakuna opponent subprocess.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_agent",
+        default="Bulba",
+        help="Registered pretrained-model wrapper to use for the saved checkpoint eval.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_avatar",
+        default="red-gen1main",
+        help="Avatar for the training policy during Kakuna comparison evals.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_gen",
+        type=int,
+        default=1,
+        help="Generation for the Kakuna comparison ladder eval.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_format",
+        default="ou",
+        choices=["ubers", "ou", "uu", "nu"],
+        help="Format tier for the Kakuna comparison ladder eval.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_team_set",
+        default="competitive",
+        help="Team set for the training policy during Kakuna comparison evals.",
+    )
+    parser.add_argument(
+        "--kakuna_ladder_wandb_key",
+        default="kakuna-ladder",
+        help="W&B metric namespace for Kakuna comparison evals.",
+    )
     return parser
 
 
@@ -347,6 +432,17 @@ def create_offline_rl_trainer(
     wandb_project: str = WANDB_PROJECT,
     wandb_entity: str = WANDB_ENTITY,
     manual_gin_overrides: Optional[dict] = None,
+    kakuna_ladder_eval: bool = False,
+    kakuna_ladder_total_battles: int = 100,
+    kakuna_ladder_interval: int = 1,
+    kakuna_ladder_username: Optional[str] = None,
+    kakuna_ladder_opponent_username: str = "Kakuna0001",
+    kakuna_ladder_agent: str = "Bulba",
+    kakuna_ladder_avatar: str = "red-gen1main",
+    kakuna_ladder_gen: int = 1,
+    kakuna_ladder_format: str = "ou",
+    kakuna_ladder_team_set: str = "competitive",
+    kakuna_ladder_wandb_key: str = "kakuna-ladder",
 ):
     """
     Convenience function that creates an AMAGO experiment with default arguments
@@ -364,7 +460,16 @@ def create_offline_rl_trainer(
     training_config_path = os.path.join(
         metamon.rl.TRAINING_CONFIG_DIR, train_gin_config
     )
-    amago.cli_utils.use_config(config, [model_config_path, training_config_path])
+    amago.cli_utils.use_config(
+        config, [model_config_path, training_config_path], finalize=False
+    )
+    # Model gin files can force FlashAttention after Python overrides are bound.
+    # Re-bind after parsing so training works in environments without flash_attn.
+    gin.bind_parameter(
+        "amago.nets.traj_encoders.TformerTrajEncoder.attention_type",
+        _training_attention_type(),
+    )
+    gin.finalize()
 
     # validation environments (evaluated throughout training)
     if eval_gens:
@@ -429,6 +534,21 @@ def create_offline_rl_trainer(
         batches_per_update=grad_accum,
         mixed_precision="no",
     )
+    if kakuna_ladder_eval:
+        username = kakuna_ladder_username or f"{run_name}KakunaEval"
+        experiment.configure_checkpoint_subprocess_eval(
+            total_battles=kakuna_ladder_total_battles,
+            wandb_key=kakuna_ladder_wandb_key,
+            interval=kakuna_ladder_interval,
+            agent=kakuna_ladder_agent,
+            opponent_agent="Kakuna",
+            opponent_username=kakuna_ladder_opponent_username,
+            eval_username=username,
+            avatar=kakuna_ladder_avatar,
+            gen=kakuna_ladder_gen,
+            battle_format=kakuna_ladder_format,
+            team_set=kakuna_ladder_team_set,
+        )
     return experiment
 
 
@@ -495,8 +615,39 @@ if __name__ == "__main__":
         log=args.log,
         wandb_project=WANDB_PROJECT,
         wandb_entity=WANDB_ENTITY,
+        kakuna_ladder_eval=args.kakuna_ladder_eval,
+        kakuna_ladder_total_battles=args.kakuna_ladder_total_battles,
+        kakuna_ladder_interval=args.kakuna_ladder_interval,
+        kakuna_ladder_username=args.kakuna_ladder_username,
+        kakuna_ladder_opponent_username=args.kakuna_ladder_opponent_username,
+        kakuna_ladder_agent=args.kakuna_ladder_agent,
+        kakuna_ladder_avatar=args.kakuna_ladder_avatar,
+        kakuna_ladder_gen=args.kakuna_ladder_gen,
+        kakuna_ladder_format=args.kakuna_ladder_format,
+        kakuna_ladder_team_set=args.kakuna_ladder_team_set,
+        kakuna_ladder_wandb_key=args.kakuna_ladder_wandb_key,
     )
     experiment.start()
+    if args.log and args.kakuna_ladder_eval and wandb.run is not None:
+        wandb.config.update(
+            {
+                "kakuna_ladder_eval": True,
+                "kakuna_ladder_expected_opponent": "Kakuna",
+                "kakuna_ladder_total_battles": args.kakuna_ladder_total_battles,
+                "kakuna_ladder_interval": args.kakuna_ladder_interval,
+                "kakuna_ladder_username": args.kakuna_ladder_username
+                or f"{args.run_name}KakunaEval",
+                "kakuna_ladder_opponent_username": args.kakuna_ladder_opponent_username,
+                "kakuna_ladder_agent": args.kakuna_ladder_agent,
+                "kakuna_ladder_avatar": args.kakuna_ladder_avatar,
+                "kakuna_ladder_battle_format": (
+                    f"gen{args.kakuna_ladder_gen}{args.kakuna_ladder_format.lower()}"
+                ),
+                "kakuna_ladder_team_set": args.kakuna_ladder_team_set,
+                "kakuna_ladder_wandb_key": args.kakuna_ladder_wandb_key,
+            },
+            allow_val_change=True,
+        )
 
     # Load pretrained checkpoint if specified
     if args.init_from_checkpoint is not None and args.init_from_checkpoint.strip():

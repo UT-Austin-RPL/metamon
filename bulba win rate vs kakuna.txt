@@ -1,0 +1,14 @@
+ bulba win rate vs kakuna
+ e2: 4%
+ e4: 11%
+ e6: 9%
+ e8: 21%
+ e9: 17%
+ e10:
+ e12:
+ e14:
+ e16:
+ e18:
+ e20:
+ e30:
+ e40:

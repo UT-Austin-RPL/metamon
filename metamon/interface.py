@@ -1364,6 +1364,179 @@ class OpponentMoveObservationSpace(TeamPreviewObservationSpace):
 
 
 @register_observation_space()
+class Gen1OpponentMoveObservationSpace(DefaultObservationSpace):
+    """
+    Gen 1 specialist observation space.
+
+    Removes mechanics that do not exist in Gen 1 (items, abilities, tera, weather)
+    while keeping PP warnings, sleep/freeze memory, revealed opponent species, and
+    opponent revealed moves.
+    """
+
+    def reset(self):
+        self.any_opponent_asleep = False
+        self.any_opponent_frozen = False
+        self.revealed_opponents = set()
+
+    @property
+    def gym_space(self):
+        return gym.spaces.Dict(
+            {
+                "numbers": gym.spaces.Box(
+                    low=-10.0,
+                    high=10.0,
+                    # Default 48 + 4 PP warning features + sleep/freeze flags.
+                    shape=(54,),
+                    dtype=np.float32,
+                ),
+                "text": gym.spaces.Text(
+                    max_length=800,
+                    min_length=600,
+                    charset=set(string.ascii_lowercase)
+                    | set(str(n) for n in range(0, 10))
+                    | {"<", ">"},
+                ),
+            }
+        )
+
+    @property
+    def tokenizable(self) -> dict[str, int]:
+        return {"text": 78}
+
+    def _get_move_string_features(self, move: UniversalMove, active: bool) -> list[str]:
+        out = [clean_name(move.name)]
+        if active:
+            out += [clean_name(move.move_type)]
+        return out
+
+    def _get_move_pad_string(self, active: bool) -> list[str]:
+        out = ["<blank>"]
+        if active:
+            out.append("<blank>")
+        return out
+
+    def _get_move_numerical_features(
+        self, move: UniversalMove, active: bool
+    ) -> list[float]:
+        out = super()._get_move_numerical_features(move, active)
+        if active:
+            pp_ratio = move.current_pp / move.max_pp if move.max_pp > 0 else 0.0
+            pp_warning = (pp_ratio >= 0.5) + (pp_ratio >= 0.25) + (pp_ratio > 0)
+            out.append(float(pp_warning))
+        return out
+
+    def _get_move_pad_numerical(self, active: bool) -> list[float]:
+        if not active:
+            return []
+        return [-2.0] * 4
+
+    def _get_pokemon_string_features(
+        self, pokemon: UniversalPokemon, active: bool
+    ) -> list[str]:
+        out = [pokemon.name]
+        if active:
+            out += [pokemon.types, pokemon.effect, pokemon.status]
+        else:
+            out += ["<moveset>"]
+            move_num = -1
+            for move_num, move in enumerate(consistent_move_order(pokemon.moves)):
+                out += self._get_move_string_features(move, active=False)
+            while move_num < 3:
+                out += self._get_move_pad_string(active=False)
+                move_num += 1
+        return out
+
+    def _get_pokemon_pad_string(self, active: bool) -> list[str]:
+        blanks = 4 if active else 6
+        return ["<blank>"] * blanks
+
+    def _get_opponent_pokemon_string_features(
+        self, pokemon: UniversalPokemon, active: bool
+    ) -> list[str]:
+        base = self._get_pokemon_string_features(pokemon, active)
+        moves = ["<blank>"] * 4
+        for i, move in enumerate(consistent_move_order(pokemon.moves)[:4]):
+            moves[i] = clean_name(move.name)
+        return base + moves
+
+    def state_to_obs(self, state: UniversalState) -> dict[str, np.ndarray]:
+        player_str = ["<player>"] + self._get_pokemon_string_features(
+            state.player_active_pokemon, active=True
+        )
+        numerical = [
+            state.opponents_remaining / 6.0
+        ] + self._get_pokemon_numerical_features(
+            state.player_active_pokemon, active=True
+        )
+
+        move_str, move_num = [], -1
+        for move_num, move in enumerate(
+            consistent_move_order(state.player_active_pokemon.moves)
+        ):
+            move_str += ["<move>"] + self._get_move_string_features(move, active=True)
+            numerical += self._get_move_numerical_features(move, active=True)
+        while move_num < 3:
+            move_str += ["<move>"] + self._get_move_pad_string(active=True)
+            numerical += self._get_move_pad_numerical(active=True)
+            move_num += 1
+
+        switch_str, switch_num = [], -1
+        for switch_num, switch in enumerate(
+            consistent_pokemon_order(state.available_switches)
+        ):
+            switch_str += ["<switch>"] + self._get_pokemon_string_features(
+                switch, active=False
+            )
+            numerical += self._get_pokemon_numerical_features(switch, active=False)
+        while switch_num < 4:
+            switch_str += ["<switch>"] + self._get_pokemon_pad_string(active=False)
+            numerical += self._get_pokemon_pad_numerical(active=False)
+            switch_num += 1
+
+        force_switch = "<forcedswitch>" if state.forced_switch else "<anychoice>"
+        opponent_str = ["<opponent>"] + self._get_opponent_pokemon_string_features(
+            state.opponent_active_pokemon, active=True
+        )
+        numerical += self._get_pokemon_numerical_features(
+            state.opponent_active_pokemon, active=True
+        )
+        global_str = [
+            "<conditions>",
+            state.player_conditions,
+            state.opponent_conditions,
+        ]
+        prev_move_str = (
+            ["<player_prev>"]
+            + self._get_move_string_features(state.player_prev_move, active=False)
+            + ["<opp_prev>"]
+            + self._get_move_string_features(state.opponent_prev_move, active=False)
+        )
+
+        opponent = state.opponent_active_pokemon
+        self.any_opponent_asleep |= opponent.status == "slp"
+        self.any_opponent_frozen |= opponent.status == "frz"
+        numerical += [self.any_opponent_asleep, self.any_opponent_frozen]
+
+        self.revealed_opponents.add(opponent.base_species)
+        revealed = [opp_name for opp_name in sorted(self.revealed_opponents)]
+        while len(revealed) < 6:
+            revealed.append("<blank>")
+        full_text_list = (
+            [f"<{state.format}>", force_switch]
+            + player_str
+            + move_str
+            + switch_str
+            + opponent_str
+            + global_str
+            + prev_move_str
+            + revealed[:6]
+        )
+        text = np.array(" ".join(full_text_list), dtype=np.str_)
+        numbers = np.array(numerical, dtype=np.float32)
+        return {"text": text, "numbers": numbers}
+
+
+@register_observation_space()
 class Gen1PokemonSlotObservationSpace(DefaultObservationSpace):
     """
     Gen 1 specialist observation space that keeps each Pokemon slot separate.

@@ -23,7 +23,8 @@ classifiers = [
 keywords = ["pokemon", "reinforcement-learning", "machine-learning"]
 dependencies = [ 
   "gymnasium>=0.26,<=0.29.1",
-  "torch>=2.6",
+  "torch==2.12.0",
+  "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
   "numpy",
   "gin-config",
   "wandb",

@@ -18,8 +18,15 @@ from metamon.tokenizer import get_tokenizer
 GEN1_CHECKPOINT_ROOT = os.environ.get(
     "METAMON_LOCAL_CHECKPOINT_DIR", os.path.expanduser("~/metamon/models")
 )
+GEN1OU_SPECIALIST_CHECKPOINT_ROOT = os.environ.get(
+    "METAMON_GEN1OU_CHECKPOINT_DIR",
+    os.path.expanduser("~/metamon/models/gen1ou-specialist"),
+)
 
 GEN1_OBSERVATION_SPACE = get_observation_space("DefaultObservationSpace")
+GEN1OU_SPECIALIST_OBSERVATION_SPACE = get_observation_space(
+    "Gen1OpponentMoveObservationSpace"
+)
 GEN1_ACTION_SPACE = get_action_space("MinimalActionSpace")
 GEN1_TOKENIZER = get_tokenizer("DefaultObservationSpace-v1")
 
@@ -47,6 +54,32 @@ class KakunaGen1(LocalPretrainedModel):
             train_gin_config="kakuna_gen1.gin",
             default_checkpoint=34,
             observation_space=GEN1_OBSERVATION_SPACE,
+            action_space=GEN1_ACTION_SPACE,
+            tokenizer=GEN1_TOKENIZER,
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            battle_backend="metamon",
+            gin_overrides=_gen1_gin_overrides(),
+        )
+
+
+@pretrained_model("Bulba")
+class Bulba(LocalPretrainedModel):
+    """
+    Gen1OU-only Kakuna-style model wrapper.
+
+    This points at a separate local checkpoint root and uses the Gen 1
+    specialist observation/action spaces, so it does not affect the public
+    multi-generation Kakuna wrapper or earlier local Gen 1 experiments.
+    """
+
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir=GEN1OU_SPECIALIST_CHECKPOINT_ROOT,
+            model_name="bulba",
+            model_gin_config="superkazam.gin",
+            train_gin_config="kakuna_gen1.gin",
+            default_checkpoint=34,
+            observation_space=GEN1OU_SPECIALIST_OBSERVATION_SPACE,
             action_space=GEN1_ACTION_SPACE,
             tokenizer=GEN1_TOKENIZER,
             reward_function=get_reward_function("AggressiveShapedReward"),

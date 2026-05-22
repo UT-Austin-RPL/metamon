@@ -26,6 +26,16 @@ ACTION_COLUMNS = [
 ]
 
 
+def showdown_preview_url(server_name: str, server_port: int) -> str:
+    """Return the browser URL for the local Showdown AI preview UI."""
+    host = server_name
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    elif ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{server_port}"
+
+
 @dataclass
 class PreviewSnapshot:
     status: str = "Waiting for the first policy decision..."
@@ -38,6 +48,7 @@ class PreviewSnapshot:
     selected_action_label: str = ""
     action_rows: list[list[Any]] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
+    agent_observation: dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
 
 
@@ -91,7 +102,14 @@ def launch_gradio_preview(
         if snapshot.error:
             summary.append(f"**Preview error:** `{snapshot.error}`")
 
-        state_json = json.dumps(snapshot.state, indent=2, sort_keys=True)
+        state_json = json.dumps(
+            {
+                "universal_state": snapshot.state,
+                "agent_observation": snapshot.agent_observation,
+            },
+            indent=2,
+            sort_keys=True,
+        )
         value_json = {
             "policy_gamma_value": snapshot.value_estimate,
             "all_gamma_values": snapshot.value_by_gamma,
@@ -112,7 +130,9 @@ def launch_gradio_preview(
             interactive=False,
             label="Policy Distribution",
         )
-        state = gr.Code(label="Current State", language="json", lines=24)
+        state = gr.Code(
+            label="Current State / Agent Observation", language="json", lines=24
+        )
         refresh = gr.Button("Refresh")
         refresh.click(read_snapshot, outputs=[summary, actions, value, state])
         if hasattr(gr, "Timer"):
@@ -151,6 +171,33 @@ def _current_battle_tag(env: Any) -> str:
 def _current_turn(env: Any) -> Optional[int]:
     battle = _unwrap_attr(env, "current_battle")
     return getattr(battle, "turn", None) if battle is not None else None
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        if value.shape == ():
+            return _json_safe(value.item())
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(val) for val in value]
+    return value
+
+
+def _agent_observation_preview(
+    observation_space: Any, state: UniversalState
+) -> dict[str, Any]:
+    if observation_space is None:
+        return {}
+    base_obs_space = getattr(observation_space, "base_obs_space", observation_space)
+    try:
+        preview_space = copy.deepcopy(base_obs_space)
+        return _json_safe(preview_space.state_to_obs(copy.deepcopy(state)))
+    except Exception as exc:
+        return {"error": repr(exc)}
 
 
 def _describe_action(action_space: ActionSpace, state: UniversalState, idx: int) -> str:
@@ -261,6 +308,7 @@ def _as_policy_tensors(current_timestep, device):
 
 def _build_snapshot(
     env: Any,
+    observation_space: Any,
     action_space: ActionSpace,
     probs: Optional[np.ndarray],
     legal_actions: list[int],
@@ -304,6 +352,7 @@ def _build_snapshot(
         selected_action_label=selected_label,
         action_rows=action_rows,
         state=state.to_dict(),
+        agent_observation=_agent_observation_preview(observation_space, state),
         error=error,
     )
 
@@ -311,6 +360,7 @@ def _build_snapshot(
 def run_showdown_with_preview(
     experiment,
     make_env,
+    observation_space: Any,
     action_space: ActionSpace,
     timesteps: int,
     episodes: Optional[int],
@@ -327,7 +377,7 @@ def run_showdown_with_preview(
         server_port=server_port,
         share=share,
     )
-    print(f"AI preview UI: http://{server_name}:{server_port}")
+    print(f"AI preview UI: {showdown_preview_url(server_name, server_port)}", flush=True)
 
     policy = experiment.policy
     policy.eval()
@@ -383,6 +433,7 @@ def run_showdown_with_preview(
             store.update(
                 _build_snapshot(
                     env=env,
+                    observation_space=observation_space,
                     action_space=action_space,
                     probs=probs,
                     legal_actions=legal_actions,

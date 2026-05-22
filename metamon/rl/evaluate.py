@@ -16,7 +16,7 @@ from metamon.rl.metamon_to_amago import (
     make_local_ladder_env,
     make_pokeagent_ladder_env,
 )
-from metamon.rl.showdown_preview import run_showdown_with_preview
+from metamon.rl.showdown_preview import run_showdown_with_preview, showdown_preview_url
 
 
 HEURISTIC_COMPOSITE_BASELINES = [
@@ -121,6 +121,7 @@ def _pretrained_on_ladder(
         return run_showdown_with_preview(
             experiment=agent,
             make_env=make_env,
+            observation_space=pretrained_model.observation_space,
             action_space=pretrained_model.action_space,
             timesteps=total_battles * 1000,
             episodes=total_battles,
@@ -323,6 +324,12 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
         print(f"  |  Team Preview: ✓")
     else:
         print()
+    if args.step:
+        print(
+            f"  Step preview UI: {showdown_preview_url(args.step_ui_host, args.step_ui_port)}"
+        )
+        if args.step_ui_share:
+            print("  Step preview share link: enabled")
     print()
 
     for gen in args.gens:

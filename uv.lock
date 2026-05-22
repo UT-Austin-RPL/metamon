@@ -10,7 +10,8 @@ resolution-markers = [
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'linux')",
     "python_full_version < '3.11'",
 ]
 
@@ -626,6 +627,24 @@ wheels = [
 ]
 
 [[package]]
+name = "flash-attn"
+version = "2.8.3+cu130torch2.12"
+source = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp312-cp312-linux_x86_64.whl" }
+dependencies = [
+    { name = "einops", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "torch", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+wheels = [
+    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp312-cp312-linux_x86_64.whl", hash = "sha256:1c0a88bbccf34378a24b580dc55b2e6b852ced1486510ba03bd309ef36a018e5" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops" },
+    { name = "torch" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1167,6 +1186,7 @@ source = { editable = "." }
 dependencies = [
     { name = "datasets" },
     { name = "einops" },
+    { name = "flash-attn", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "gin-config" },
     { name = "gradio" },
     { name = "gymnasium" },
@@ -1187,6 +1207,7 @@ dependencies = [
 requires-dist = [
     { name = "datasets" },
     { name = "einops" },
+    { name = "flash-attn", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp312-cp312-linux_x86_64.whl" },
     { name = "gin-config" },
     { name = "gradio" },
     { name = "gymnasium", specifier = ">=0.26,<=0.29.1" },
@@ -1196,7 +1217,7 @@ requires-dist = [
     { name = "poke-env", git = "https://github.com/UT-Austin-RPL/poke-env.git?rev=cde9ac99cea5783e3ac289602e3d3f60dd06fa4d" },
     { name = "ratarmountcore" },
     { name = "termcolor" },
-    { name = "torch", specifier = ">=2.6" },
+    { name = "torch", specifier = "==2.12.0" },
     { name = "tqdm" },
     { name = "typer", specifier = "==0.12.5" },
     { name = "wandb" },
@@ -1397,7 +1418,8 @@ resolution-markers = [
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'linux')",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
 wheels = [
@@ -1482,7 +1504,8 @@ resolution-markers = [
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'linux')",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/ad/fed0499ce6a338d2a03ebae59cd15093910c8875328855781952abf6c2fe/numpy-2.4.6.tar.gz", hash = "sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda", size = 20735807, upload-time = "2026-05-18T23:37:14.07Z" }
 wheels = [
@@ -1878,7 +1901,8 @@ resolution-markers = [
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'linux')",
 ]
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
