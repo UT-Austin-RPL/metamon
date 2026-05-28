@@ -299,16 +299,51 @@ class UniversalPokemon:
     accuracy_boost: int
     evasion_boost: int
 
+    # base stats (from pokedex)
     base_atk: int
     base_spa: int
     base_def: int
     base_spd: int
     base_spe: int
     base_hp: int
+    # active battle stats (base + ev + iv + nature)
+
+    hp_stat: int
+    atk_stat: int
+    def_stat: int
+    spa_stat: int
+    spd_stat: int
+    spe_stat: int
+
+    # NOTE: in practice these are often missing during training.
+    # They cannot be identified from standard replays,
+    # and we will probably not attempt to add inaccurate estimates.
+    # These features are populated by newly generated self-play battles,
+    # but did not exist when all public self-play data was collected.
+    MISSING_STAT = -1
+    MISSING_STATS = {
+        "hp": MISSING_STAT,
+        "atk": MISSING_STAT,
+        "def": MISSING_STAT,
+        "spa": MISSING_STAT,
+        "spd": MISSING_STAT,
+        "spe": MISSING_STAT,
+    }
 
     # version-specific
     tera_type: str
     base_species: str
+
+    @staticmethod
+    def _stat_fields(stats: dict) -> dict:
+        return {
+            "hp_stat": stats.get("hp", -1) or -1,
+            "atk_stat": stats.get("atk", -1) or -1,
+            "def_stat": stats.get("def", -1) or -1,
+            "spa_stat": stats.get("spa", -1) or -1,
+            "spd_stat": stats.get("spd", -1) or -1,
+            "spe_stat": stats.get("spe", -1) or -1,
+        }
 
     @staticmethod
     def universal_items(item_rep: Optional[str | ReplayNothing]) -> str:
@@ -400,7 +435,7 @@ class UniversalPokemon:
             status=cls.universal_status(pokemon.status),
             effect=cls.universal_effects(most_recent_effect),
             moves=moves,
-            **(boosts | stats),
+            **(boosts | stats | cls._stat_fields(pokemon.computed_stats)),
         )
 
     @classmethod
@@ -426,7 +461,7 @@ class UniversalPokemon:
             status=cls.universal_status(pokemon.status),
             effect=cls.universal_effects(most_recent_effect),
             moves=moves,
-            **(boosts | stats),
+            **(boosts | stats | cls._stat_fields(pokemon.stats)),
         )
 
     @classmethod
@@ -439,6 +474,10 @@ class UniversalPokemon:
         if "base_species" not in data:
             # if missing --> old version of the dataset --> gen 1-4 --> we can get away with this
             data["base_species"] = data["name"].split("-")[0].strip()
+        for stat in ["hp", "atk", "def", "spa", "spd", "spe"]:
+            key = f"{stat}_stat"
+            if key not in data:
+                data[key] = cls.MISSING_STAT
         return cls(**data)
 
     @staticmethod
@@ -476,6 +515,8 @@ class UniversalPokemon:
         p._terastallized_type = (
             PokemonType.from_name(pokemon.tera_type) if pokemon.tera_type else None
         )
+        if pokemon.computed_stats:
+            p._stats = dict(pokemon.computed_stats)
         return p
 
 
@@ -486,8 +527,8 @@ class UniversalState:
     Rarely constructed directly. Instead, use one of the following factory methods:
         - UniversalState.from_ReplayState(state) - when coming from a ReplayState
             object in the replay parser
-        - UniversalState.from_Battle(battle) - when coming from a Battle object in the
-            online poke-env
+        - UniversalState.from_Battle(battle) - when coming from a Battle
+            object in the online poke-env environment
         - UniversalState.from_dict(data) - when state is a dict from the parsed replay
             dataset on disk
     """

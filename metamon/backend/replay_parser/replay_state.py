@@ -193,6 +193,14 @@ class Pokemon:
         self.effects: Dict[PEEffect, int] = {}
         self.current_hp: int = None
         self.max_hp: int = None
+        self.computed_stats: dict = {
+            "hp": -1,
+            "atk": -1,
+            "def": -1,
+            "spa": -1,
+            "spd": -1,
+            "spe": -1,
+        }
 
         self.transformed_this_turn: bool = False
         self.transformed_into: Optional[Pokemon] = None

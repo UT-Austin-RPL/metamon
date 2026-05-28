@@ -173,6 +173,7 @@ class MetamonBackendBattle(pe.AbstractBattle):
             metamon_p.current_hp = current_hp
         if max_hp is not None:
             metamon_p.max_hp = max_hp
+            metamon_p.computed_stats["hp"] = max_hp
 
         # update ability from request
         if poke["baseAbility"] == "noability":
@@ -203,6 +204,9 @@ class MetamonBackendBattle(pe.AbstractBattle):
         if not metamon_p.had_moves:
             for move in poke["moves"]:
                 metamon_p.reveal_move(Move(move, gen=self._gen))
+
+        if "stats" in poke:
+            metamon_p.computed_stats.update(poke["stats"])
 
     def _update_turn_from_side_request(
         self, side_request: Dict[str, Any]
@@ -729,6 +733,7 @@ class PokeAgentBackendBattle(MetamonBackendBattle):
             metamon_p.current_hp = current_hp
         if max_hp is not None:
             metamon_p.max_hp = max_hp
+            metamon_p.computed_stats["hp"] = max_hp
 
         # update ability from request
         if poke["baseAbility"] == "noability":
@@ -754,3 +759,6 @@ class PokeAgentBackendBattle(MetamonBackendBattle):
         if not metamon_p.had_moves:
             for move in poke["moves"]:
                 metamon_p.reveal_move(Move(move, gen=self._gen))
+
+        if "stats" in poke:
+            metamon_p.computed_stats.update(poke["stats"])

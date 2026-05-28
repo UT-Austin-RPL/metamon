@@ -102,7 +102,8 @@ class TeamSet(Teambuilder):
             with open(file, "r") as f:
                 team_data = f.read()
             # check team
-            candidate_team = self.join_team(self.parse_showdown_team(team_data))
+            parsed = self.parse_showdown_team(team_data)
+            candidate_team = self.join_team(parsed)
             if not self.block_team(candidate_team):
                 return candidate_team
             if attempt % 10 == 0:
@@ -242,7 +243,8 @@ class PokeEnvWrapper(OpenAIGymEnv):
         battle_backend: str = "metamon",
         team_preview_model=None,
     ):
-        opponent_team_set = opponent_team_set or copy.deepcopy(player_team_set)
+        if opponent_team_set is None or opponent_team_set is player_team_set:
+            opponent_team_set = copy.deepcopy(player_team_set)
         random_username = (
             lambda: f"MM-{''.join(str(random.randint(0, 9)) for _ in range(10))}"
         )
@@ -343,6 +345,9 @@ class PokeEnvWrapper(OpenAIGymEnv):
     def on_invalid_order(self, battle: Battle):
         return self.choose_random_move(battle)
 
+    def _battle_state(self, battle: Battle) -> UniversalState:
+        return UniversalState.from_Battle(battle)
+
     def reset(self, *args, **kwargs):
         self.metamon_obs_space.reset()
         self.invalid_action_counter = 0
@@ -350,14 +355,14 @@ class PokeEnvWrapper(OpenAIGymEnv):
         self.turn_counter = 0
         self.battle_reference = self.agent.n_won_battles
         obs, info = super().reset(*args, **kwargs)
-        self._most_recent_state = UniversalState.from_Battle(self.current_battle)
+        self._most_recent_state = self._battle_state(self.current_battle)
         self._update_legal_actions(self._most_recent_state, self.current_battle)
         info["legal_actions"] = self._most_recent_legal_actions
         self.trajectory = {"states": [self._most_recent_state], "actions": []}
         return obs, info
 
     def action_to_move(self, action: Any, battle: Battle):
-        universal_state = UniversalState.from_Battle(battle)
+        universal_state = self._battle_state(battle)
         universal_action = self.metamon_action_space.agent_output_to_action(
             state=universal_state, agent_output=action
         )
@@ -373,8 +378,8 @@ class PokeEnvWrapper(OpenAIGymEnv):
         return self.metamon_obs_space.gym_space
 
     def calc_reward(self, last_battle: Battle, current_battle: Battle) -> float:
-        last_state = UniversalState.from_Battle(last_battle)
-        state = UniversalState.from_Battle(current_battle)
+        last_state = self._battle_state(last_battle)
+        state = self._battle_state(current_battle)
         reward = self.reward_function(last_state, state)
         return reward
 
@@ -389,7 +394,7 @@ class PokeEnvWrapper(OpenAIGymEnv):
         return self._most_recent_legal_actions
 
     def embed_battle(self, battle: Battle):
-        universal_state = UniversalState.from_Battle(battle)
+        universal_state = self._battle_state(battle)
         self._most_recent_state = universal_state
         self._update_legal_actions(universal_state, battle)
         return self.metamon_obs_space.state_to_obs(universal_state)
