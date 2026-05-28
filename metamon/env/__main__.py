@@ -8,6 +8,7 @@ from metamon.interface import (
     TokenizedObservationSpace,
     DefaultActionSpace,
     DefaultShapedReward,
+    UniversalPokemon,
 )
 from metamon.tokenizer import get_tokenizer
 from metamon.env.wrappers import get_metamon_teams, BattleAgainstBaseline
@@ -27,7 +28,19 @@ if __name__ == "__main__":
         default="poke-env",
         choices=["poke-env", "metamon", "pokeagent"],
     )
+    parser.add_argument(
+        "--print_stats",
+        action="store_true",
+        help="After each episode reset, print computed stat fields from UniversalState "
+        "(player active, player switches, opponent active).",
+    )
     args = parser.parse_args()
+
+    def _format_stats(mon: UniversalPokemon) -> str:
+        return (
+            f"hp={mon.hp_stat} atk={mon.atk_stat} def={mon.def_stat} "
+            f"spa={mon.spa_stat} spd={mon.spd_stat} spe={mon.spe_stat}"
+        )
 
     env = BattleAgainstBaseline(
         battle_format=args.battle_format,
@@ -45,6 +58,20 @@ if __name__ == "__main__":
         print(f"Episode {ep}")
         inner_start = time.time()
         state, info = env.reset()
+        if args.print_stats:
+            team_file = env.metamon_team_set.most_recent_team_file
+            print(f"  team file: {team_file}")
+            us = env._most_recent_state
+            print(
+                f"  player active ({us.player_active_pokemon.name}): "
+                f"{_format_stats(us.player_active_pokemon)}"
+            )
+            for sw in us.available_switches:
+                print(f"  player switch ({sw.name}): {_format_stats(sw)}")
+            print(
+                f"  opponent active ({us.opponent_active_pokemon.name}): "
+                f"{_format_stats(us.opponent_active_pokemon)}"
+            )
         done = False
         return_ = 0.0
         timesteps = 0
