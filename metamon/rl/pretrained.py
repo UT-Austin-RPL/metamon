@@ -191,6 +191,9 @@ class PretrainedModel:
         """
         config = {
             "MetamonTstepEncoder.tokenizer": self.tokenizer,
+            "MetamonPerceiverTstepEncoder.tokenizer": self.tokenizer,
+            "MetamonPokemonSlotTstepEncoder.tokenizer": self.tokenizer,
+            "MetamonGroupedTstepEncoderV2.tokenizer": self.tokenizer,
             # skip cpu-intensive init, because we're going to be replacing the weights
             # with a checkpoint anyway....
             "amago.nets.transformer.SigmaReparam.fast_init": True,
@@ -233,13 +236,43 @@ class PretrainedModel:
         )
         # starting the experiment will build the initial model
         experiment.start()
-        if checkpoint > 0:
+        if checkpoint is not None:
             ckpt_state = torch.load(ckpt_path, map_location="cpu")
+            ckpt_state = self._normalize_checkpoint_keys(ckpt_state)
             model_state = experiment.policy.state_dict()
             self._validate_checkpoint(ckpt_state, model_state)
             experiment.policy.load_state_dict(ckpt_state, strict=True)
             experiment.policy.on_checkpoint_loaded(is_resume=False)
         return experiment
+
+    @staticmethod
+    def _normalize_checkpoint_keys(ckpt_state: dict) -> dict:
+        """
+        Map older module names to their current equivalents.
+
+        Some GroupedObservationSpace checkpoints were saved when Perceiver FF
+        blocks were stored as Sequential modules named ``cross_ff``/``self_ff``.
+        The current implementation stores the same Linear layers as explicit
+        ``cross_ff1``/``cross_ff2`` and ``self_ff1``/``self_ff2`` modules.
+        """
+        replacements = (
+            (".cross_ff.0.", ".cross_ff1."),
+            (".cross_ff.2.", ".cross_ff2."),
+            (".self_ff.0.", ".self_ff1."),
+            (".self_ff.2.", ".self_ff2."),
+        )
+        normalized = {}
+        changed = False
+        for key, value in ckpt_state.items():
+            new_key = key
+            for old, new in replacements:
+                new_key = new_key.replace(old, new)
+            if new_key != key:
+                changed = True
+            normalized[new_key] = value
+        if changed:
+            return normalized
+        return ckpt_state
 
     @staticmethod
     def _validate_checkpoint(ckpt_state: dict, model_state: dict) -> None:

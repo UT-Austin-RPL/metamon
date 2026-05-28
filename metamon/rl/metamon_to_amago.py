@@ -249,6 +249,7 @@ def make_placeholder_experiment(
         start_learning_at_epoch=float("inf"),
         start_collecting_at_epoch=float("inf"),
         train_timesteps_per_epoch=0,
+        traj_save_len=10_000_000_000,
         stagger_traj_file_lengths=False,
         train_batches_per_epoch=0,
         val_interval=None,
@@ -682,6 +683,244 @@ class MetamonPerceiverTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             token_inputs=obs["text_tokens"], numerical_inputs=numerical
         )
         add_activation_log("MetamonPerceiverTstepEncoder/turn_emb", turn_emb, log_dict)
+        return turn_emb
+
+
+class PokemonSlotTurnEmbedding(nn.Module):
+    """
+    Encode fixed Pokemon slots independently, then merge slot and global context
+    tokens with a second Perceiver block.
+    """
+
+    def __init__(
+        self,
+        tokenizer: PokemonTokenizer,
+        slot_count: int,
+        pokemon_text_features: int,
+        pokemon_numerical_features: int,
+        global_text_features: int,
+        global_numerical_features: int,
+        token_embedding_dim: int,
+        d_model: int,
+        n_heads: int,
+        slot_layers: int,
+        team_layers: int,
+        slot_latent_tokens: int,
+        team_latent_tokens: int,
+        pokemon_numerical_tokens: int,
+        global_numerical_tokens: int,
+        dropout: float,
+        max_pokemon_tokens: int,
+        max_team_tokens: int,
+    ):
+        super().__init__()
+        self.slot_count = slot_count
+        self.pokemon_text_features = pokemon_text_features
+        self.pokemon_numerical_features = pokemon_numerical_features
+        self.global_text_features = global_text_features
+        self.global_numerical_features = global_numerical_features
+        self.token_embedding = TokenEmbedding(tokenizer, emb_dim=token_embedding_dim)
+
+        self.pokemon_multimodal_fuse = MultiModalEmbedding(
+            token_emb_dim=self.token_embedding.output_dim,
+            numerical_d_inp=pokemon_numerical_features,
+            output_dim=d_model,
+            numerical_tokens=pokemon_numerical_tokens,
+            dropout=dropout,
+        )
+        self.pokemon_pos = LearnablePosEmb(
+            max_len=max_pokemon_tokens,
+            d_model=d_model,
+        )
+        self.pokemon_perceiver = PerceiverEncoder(
+            latent_tokens=slot_latent_tokens,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=slot_layers,
+            dropout=dropout,
+        )
+        self.slot_projection = nn.Sequential(
+            nn.Linear(self.pokemon_perceiver.output_dim, d_model),
+            nn.LayerNorm(d_model),
+        )
+        self.slot_role_embedding = nn.Embedding(slot_count, d_model)
+
+        self.global_multimodal_fuse = MultiModalEmbedding(
+            token_emb_dim=self.token_embedding.output_dim,
+            numerical_d_inp=global_numerical_features,
+            output_dim=d_model,
+            numerical_tokens=global_numerical_tokens,
+            dropout=dropout,
+        )
+        self.team_pos = LearnablePosEmb(max_len=max_team_tokens, d_model=d_model)
+        self.team_perceiver = PerceiverEncoder(
+            latent_tokens=team_latent_tokens,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=team_layers,
+            dropout=dropout,
+        )
+
+    @property
+    def output_dim(self):
+        return self.team_perceiver.output_dim
+
+    def _add_pos(self, seq: torch.Tensor, pos_emb: LearnablePosEmb) -> torch.Tensor:
+        pos = (
+            torch.arange(0, seq.shape[1], device=seq.device)
+            .long()
+            .unsqueeze(0)
+            .expand(seq.shape[0], -1)
+        )
+        return seq + pos_emb(pos)
+
+    def forward(
+        self,
+        pokemon_token_inputs: torch.Tensor,
+        pokemon_numerical_inputs: torch.Tensor,
+        global_token_inputs: torch.Tensor,
+        global_numerical_inputs: torch.Tensor,
+    ) -> torch.Tensor:
+        B, T, _ = pokemon_token_inputs.shape
+        pokemon_tokens = einops.rearrange(
+            pokemon_token_inputs,
+            "b t (s p) -> (b t s) 1 p",
+            s=self.slot_count,
+            p=self.pokemon_text_features,
+        )
+        pokemon_numbers = einops.rearrange(
+            pokemon_numerical_inputs,
+            "b t (s n) -> (b t s) 1 n",
+            s=self.slot_count,
+            n=self.pokemon_numerical_features,
+        )
+        pokemon_text_emb = self.token_embedding(pokemon_tokens)
+        pokemon_seq = self.pokemon_multimodal_fuse(
+            pokemon_text_emb,
+            numerical_features=pokemon_numbers,
+        )
+        pokemon_seq = einops.rearrange(pokemon_seq, "b 1 l d -> b l d")
+        pokemon_seq = self._add_pos(pokemon_seq, self.pokemon_pos)
+        pokemon_slots = self.pokemon_perceiver(pokemon_seq)
+        pokemon_slots = einops.rearrange(
+            pokemon_slots,
+            "(b t s) 1 d -> b t s d",
+            b=B,
+            t=T,
+            s=self.slot_count,
+        )
+        pokemon_slots = self.slot_projection(pokemon_slots)
+        role_idxs = torch.arange(
+            0,
+            self.slot_count,
+            device=pokemon_slots.device,
+        )
+        pokemon_slots = pokemon_slots + self.slot_role_embedding(role_idxs).view(
+            1, 1, self.slot_count, -1
+        )
+
+        global_text_emb = self.token_embedding(global_token_inputs)
+        global_seq = self.global_multimodal_fuse(
+            global_text_emb,
+            numerical_features=global_numerical_inputs,
+        )
+
+        team_seq = torch.cat((pokemon_slots, global_seq), dim=-2)
+        team_seq = einops.rearrange(team_seq, "b t l d -> (b t) l d")
+        team_seq = self._add_pos(team_seq, self.team_pos)
+        team_emb = self.team_perceiver(team_seq)
+        team_emb = einops.rearrange(team_emb, "(b t) 1 d -> b t d", b=B, t=T)
+        return team_emb
+
+
+@gin.configurable
+class MetamonPokemonSlotTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
+    """
+    AMAGO timestep encoder for Gen1PokemonSlotObservationSpace.
+    """
+
+    def __init__(
+        self,
+        obs_space,
+        rl2_space,
+        tokenizer: PokemonTokenizer,
+        extra_emb_dim: int = 18,
+        d_model: int = 168,
+        n_heads: int = 8,
+        slot_layers: int = 2,
+        team_layers: int = 8,
+        slot_latent_tokens: int = 2,
+        team_latent_tokens: int = 8,
+        pokemon_numerical_tokens: int = 4,
+        global_numerical_tokens: int = 2,
+        token_mask_aug: bool = False,
+        dropout: float = 0.05,
+        max_pokemon_tokens: int = 16,
+        max_team_tokens: int = 32,
+    ):
+        super().__init__(obs_space=obs_space, rl2_space=rl2_space)
+        self.token_mask_aug = token_mask_aug
+        self.extra_emb = nn.Linear(rl2_space.shape[-1], extra_emb_dim)
+
+        pokemon_text_features = obs_space["pokemon_text_tokens"].shape[0]
+        pokemon_numerical_features = obs_space["pokemon_numbers"].shape[0]
+        global_text_features = obs_space["global_text_tokens"].shape[0]
+        global_numerical_features = obs_space["global_numbers"].shape[0] + extra_emb_dim
+
+        slot_count = 13
+        if pokemon_text_features % slot_count != 0:
+            raise ValueError(
+                "pokemon_text_tokens length must be divisible by the Pokemon slot count"
+            )
+        if pokemon_numerical_features % slot_count != 0:
+            raise ValueError(
+                "pokemon_numbers length must be divisible by the Pokemon slot count"
+            )
+
+        self.turn_embedding = PokemonSlotTurnEmbedding(
+            tokenizer=tokenizer,
+            slot_count=slot_count,
+            pokemon_text_features=pokemon_text_features // slot_count,
+            pokemon_numerical_features=pokemon_numerical_features // slot_count,
+            global_text_features=global_text_features,
+            global_numerical_features=global_numerical_features,
+            token_embedding_dim=d_model,
+            d_model=d_model,
+            n_heads=n_heads,
+            slot_layers=slot_layers,
+            team_layers=team_layers,
+            slot_latent_tokens=slot_latent_tokens,
+            team_latent_tokens=team_latent_tokens,
+            pokemon_numerical_tokens=pokemon_numerical_tokens,
+            global_numerical_tokens=global_numerical_tokens,
+            dropout=dropout,
+            max_pokemon_tokens=max_pokemon_tokens,
+            max_team_tokens=max_team_tokens,
+        )
+
+    @property
+    def emb_dim(self):
+        return self.turn_embedding.output_dim
+
+    def inner_forward(self, obs, rl2s, log_dict=None):
+        if self.training and self.token_mask_aug:
+            obs["pokemon_text_tokens"] = unknown_token_mask(obs["pokemon_text_tokens"])
+            obs["global_text_tokens"] = unknown_token_mask(obs["global_text_tokens"])
+        extras = F.leaky_relu(self.extra_emb(symlog(rl2s)))
+        add_activation_log("MetamonPokemonSlotTstepEncoder/extra_emb", extras, log_dict)
+        global_numbers = torch.cat((obs["global_numbers"], extras), dim=-1)
+        add_activation_log(
+            "MetamonPokemonSlotTstepEncoder/global_numbers",
+            global_numbers,
+            log_dict,
+        )
+        turn_emb = self.turn_embedding(
+            pokemon_token_inputs=obs["pokemon_text_tokens"],
+            pokemon_numerical_inputs=obs["pokemon_numbers"],
+            global_token_inputs=obs["global_text_tokens"],
+            global_numerical_inputs=global_numbers,
+        )
+        add_activation_log("MetamonPokemonSlotTstepEncoder/turn_emb", turn_emb, log_dict)
         return turn_emb
 
 

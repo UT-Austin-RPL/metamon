@@ -246,6 +246,9 @@ class MetamonFinetuneAgent(MultiTaskAgent):
 
     Args:
         bc_coeff: Weight for the auxiliary BC loss on ``_bc_actor``.
+        kl_anchor_coeff: Weight for the KL-to-base policy anchor.  When
+            positive, adds ``KL(pi_current || pi_base)`` on valid actor
+            timesteps.
         tortoise_tau: EMA rate for the tortoise update (smaller = slower).
         use_tortoise_for_inference: If True, ``get_actions`` runs the
             tortoise encoder + actor instead of the hare.
@@ -258,6 +261,7 @@ class MetamonFinetuneAgent(MultiTaskAgent):
         self,
         *args,
         bc_coeff: float = 1.0,
+        kl_anchor_coeff: float = 0.0,
         tortoise_tau: float = 0.001,
         use_tortoise_for_inference: bool = False,
         use_is_correction: bool = True,
@@ -265,6 +269,7 @@ class MetamonFinetuneAgent(MultiTaskAgent):
     ):
         super().__init__(*args, **kwargs)
         self.bc_coeff = bc_coeff
+        self.kl_anchor_coeff = kl_anchor_coeff
         self.tortoise_tau = tortoise_tau
         self.use_tortoise_for_inference = use_tortoise_for_inference
         self.use_is_correction = use_is_correction
@@ -432,6 +437,63 @@ class MetamonFinetuneAgent(MultiTaskAgent):
             logp = a_dist.log_prob(a_buffer).sum(-1, keepdim=True)
         return logp
 
+    def _compute_discrete_kl_and_entropy(
+        self, current_dist, base_dist
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return KL(pi_current || pi_base) and entropy for discrete policies."""
+        if not self.discrete:
+            raise NotImplementedError(
+                "KL anchoring is currently implemented for discrete policies"
+            )
+
+        current_probs = current_dist.probs
+        base_probs = base_dist.probs
+        eps = torch.finfo(current_probs.dtype).tiny
+
+        current_log_probs = torch.log(current_probs.clamp_min(eps))
+        base_log_probs = torch.log(base_probs.clamp_min(eps))
+        support = current_probs > 0
+        kl = torch.where(
+            support,
+            current_probs * (current_log_probs - base_log_probs),
+            torch.zeros_like(current_probs),
+        ).sum(dim=-1, keepdim=True)
+        entropy = torch.where(
+            support,
+            -current_probs * current_log_probs,
+            torch.zeros_like(current_probs),
+        ).sum(dim=-1, keepdim=True)
+        return kl, entropy
+
+    def _compute_kl_anchor(
+        self, batch: Batch, s_rep_base: torch.Tensor, kl_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        straight_from_obs = {k: batch.obs[k] for k in self.pass_obs_keys_to_actor}
+
+        o_current = self.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
+        s_rep_current, _ = self.traj_encoder(
+            seq=o_current, time_idxs=batch.time_idxs, hidden_state=None
+        )
+        current_dist = self.actor(
+            s_rep_current,
+            straight_from_obs=straight_from_obs,
+        )
+        with torch.no_grad():
+            base_dist = self._base_actor(
+                s_rep_base,
+                straight_from_obs=straight_from_obs,
+            )
+
+        kl_elems, entropy_elems = self._compute_discrete_kl_and_entropy(
+            current_dist, base_dist
+        )
+        kl_elems = kl_elems[:, :-1, ...]
+        entropy_elems = entropy_elems[:, :-1, ...]
+        kl_mean = amago.utils.masked_avg(kl_elems, kl_mask)
+        entropy_mean = amago.utils.masked_avg(entropy_elems, kl_mask)
+        kl_loss = self.kl_anchor_coeff * kl_mean
+        return kl_loss, kl_mean, entropy_mean
+
     def forward(self, batch: Batch, log_step: bool) -> torch.Tensor:
         if not self._checkpoint_loaded:
             return super().forward(batch, log_step)
@@ -462,10 +524,11 @@ class MetamonFinetuneAgent(MultiTaskAgent):
         delta_log = None
         if self.use_is_correction:
             delta_log = logp_base - logp_data.detach()
-            self.fbc_filter_func.set_delta_log(delta_log)
+            if hasattr(self.fbc_filter_func, "set_delta_log"):
+                self.fbc_filter_func.set_delta_log(delta_log)
 
         # --- Sequence-level filter mask ---
-        if self.fbc_filter_func.seq_enabled:
+        if getattr(self.fbc_filter_func, "seq_enabled", False):
             seq_mask = (~(batch.rl2s == self.pad_val).all(-1, keepdim=True)).bool()
             self.fbc_filter_func.set_seq_mask(seq_mask)
 
@@ -482,13 +545,28 @@ class MetamonFinetuneAgent(MultiTaskAgent):
         bc_loss = amago.utils.masked_avg(bc_loss_elems, bc_mask)
 
         total_loss = total_loss + self.bc_coeff * bc_loss
+        kl_anchor_loss = None
+        kl_anchor_mean = None
+        policy_entropy = None
+        if self.kl_anchor_coeff > 0.0:
+            kl_anchor_loss, kl_anchor_mean, policy_entropy = self._compute_kl_anchor(
+                batch, s_rep_base, bc_mask
+            )
+            total_loss = total_loss + kl_anchor_loss
 
         if log_step:
             self.update_info["BC Loss"] = bc_loss.detach()
             self.update_info["Log Pi Base (mean)"] = logp_base.mean().detach()
             self.update_info["Log Pi Data (mean)"] = logp_data.mean().detach()
+            if kl_anchor_loss is not None:
+                self.update_info["KL Anchor Loss"] = kl_anchor_loss.detach()
+                self.update_info["KL Anchor Mean"] = kl_anchor_mean.detach()
+                self.update_info["Policy Entropy"] = policy_entropy.detach()
             f = self.fbc_filter_func
-            if f.seq_enabled and f._seq_last_weights is not None:
+            if (
+                getattr(f, "seq_enabled", False)
+                and getattr(f, "_seq_last_weights", None) is not None
+            ):
                 sw = f._seq_last_weights
                 sp = f._seq_last_percentiles
                 self.update_info["Seq Filter Weight (mean)"] = sw.mean()

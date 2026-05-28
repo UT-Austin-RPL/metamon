@@ -178,6 +178,7 @@ def create_offline_rl_trainer(
     config = {
         "MetamonTstepEncoder.tokenizer": obs_space.tokenizer,
         "MetamonPerceiverTstepEncoder.tokenizer": obs_space.tokenizer,
+        "MetamonPokemonSlotTstepEncoder.tokenizer": obs_space.tokenizer,
         "MetamonGroupedTstepEncoderV2.tokenizer": obs_space.tokenizer,
     }
     if manual_gin_overrides is not None:
@@ -239,6 +240,7 @@ def create_offline_rl_trainer(
         start_collecting_at_epoch=float("inf"),
         train_timesteps_per_epoch=0,
         train_batches_per_epoch=steps_per_epoch * grad_accum,
+        traj_save_len=10_000_000_000,
         val_interval=1,
         ckpt_interval=ckpt_interval,
         ## optimization ##

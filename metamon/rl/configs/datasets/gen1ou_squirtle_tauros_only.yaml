@@ -1,0 +1,5 @@
+formats:
+  - gen1ou
+replay_weight: 0.0
+self_play:
+  pac-tauros: 1.0

@@ -1,0 +1,10 @@
+formats:
+  - gen1ou
+replay_weight: 0.05
+self_play:
+  pac-base: 0.20
+  pac-exploratory: 0.20
+  pac-tauros: 0.40
+custom_replays:
+  - dir: /home/eddie/metamon_cache/training/gen1ou/local-generated
+    weight: 0.15

@@ -1,0 +1,8 @@
+formats:
+  - gen1ou
+replay_weight: 0.0
+self_play:
+  pac-tauros: 0.20
+custom_replays:
+  - dir: /home/eddie/metamon/trajectories/lapras/splits/v1/train/lapras
+    weight: 0.80

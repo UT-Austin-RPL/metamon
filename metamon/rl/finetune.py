@@ -55,6 +55,7 @@ on the next iteration.
 """
 
 import os
+from fnmatch import fnmatchcase
 
 import wandb
 
@@ -125,6 +126,26 @@ def add_cli(parser):
     parser.add_argument("--batch_size_per_gpu", type=int, default=12)
     parser.add_argument("--grad_accum", type=int, default=1)
     parser.add_argument("--ckpt_interval", type=int, default=10)
+    parser.add_argument(
+        "--freeze_patterns",
+        nargs="*",
+        default=None,
+        help=(
+            "Parameter-name patterns to freeze. Bare module names match that "
+            "module prefix; glob patterns such as 'traj_encoder.*' are also "
+            "supported."
+        ),
+    )
+    parser.add_argument(
+        "--trainable_patterns",
+        nargs="*",
+        default=None,
+        help=(
+            "If set, freeze everything except parameters matching these "
+            "patterns. Frozen base/tortoise finetune snapshots always stay "
+            "frozen."
+        ),
+    )
 
     # Data
     parser.add_argument(
@@ -174,6 +195,84 @@ def _resolve_checkpoint_path(args, pretrained):
         )
     ckpt = args.base_checkpoint or pretrained.default_checkpoint
     return pretrained.get_path_to_checkpoint(ckpt)
+
+
+def _matches_parameter_pattern(name: str, pattern: str) -> bool:
+    """Match either a bare module prefix or an explicit shell-style glob."""
+    pattern = pattern.strip()
+    if not pattern:
+        return False
+    if any(char in pattern for char in "*?[]"):
+        return fnmatchcase(name, pattern)
+    return name == pattern or name.startswith(f"{pattern}.")
+
+
+def _matches_any_parameter_pattern(name: str, patterns: list[str] | None) -> bool:
+    if not patterns:
+        return False
+    return any(_matches_parameter_pattern(name, pattern) for pattern in patterns)
+
+
+def _apply_trainability_policy(policy, freeze_patterns, trainable_patterns):
+    """Set requires_grad from CLI patterns and print a compact summary."""
+    if not freeze_patterns and not trainable_patterns:
+        return
+
+    always_frozen_prefixes = ("_base_", "_tortoise_")
+    default_trainable = trainable_patterns is None
+    total_params = 0
+    trainable_params = 0
+    trainable_names = []
+    requested_patterns = list(trainable_patterns or []) + list(freeze_patterns or [])
+    matched_patterns = {pattern: False for pattern in requested_patterns}
+
+    for name, param in policy.named_parameters():
+        total_params += param.numel()
+        for pattern in requested_patterns:
+            if _matches_parameter_pattern(name, pattern):
+                matched_patterns[pattern] = True
+        trainable = default_trainable
+        if trainable_patterns is not None:
+            trainable = _matches_any_parameter_pattern(name, trainable_patterns)
+        if freeze_patterns is not None and _matches_any_parameter_pattern(
+            name, freeze_patterns
+        ):
+            trainable = False
+        if name.startswith(always_frozen_prefixes):
+            trainable = False
+        param.requires_grad_(trainable)
+        if trainable:
+            trainable_params += param.numel()
+            trainable_names.append(name)
+
+    unmatched_patterns = [
+        pattern for pattern, matched in matched_patterns.items() if not matched
+    ]
+    if unmatched_patterns:
+        raise ValueError(
+            "Trainability patterns matched no parameters: "
+            + ", ".join(unmatched_patterns)
+        )
+
+    print("\n  Trainability policy")
+    print(f"    trainable_patterns: {trainable_patterns or 'default all'}")
+    print(f"    freeze_patterns:    {freeze_patterns or 'none'}")
+    print(
+        f"    trainable params:   {trainable_params:,} / {total_params:,} "
+        f"({trainable_params / max(total_params, 1):.1%})"
+    )
+    preview = trainable_names[:30]
+    if preview:
+        print("    trainable names:")
+        for name in preview:
+            print(f"      - {name}")
+        if len(trainable_names) > len(preview):
+            print(f"      ... {len(trainable_names) - len(preview):,} more")
+    else:
+        raise ValueError(
+            "No trainable parameters matched the requested freeze/trainable patterns."
+        )
+    print()
 
 
 if __name__ == "__main__":
@@ -261,6 +360,11 @@ if __name__ == "__main__":
     ckpt_path = _resolve_checkpoint_path(args, pretrained)
     print(f"  Loading weights from: {ckpt_path}")
     experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
+    _apply_trainability_policy(
+        experiment.policy,
+        freeze_patterns=args.freeze_patterns,
+        trainable_patterns=args.trainable_patterns,
+    )
 
     experiment.learn()
     wandb.finish()

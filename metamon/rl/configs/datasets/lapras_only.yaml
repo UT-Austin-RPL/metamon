@@ -1,0 +1,6 @@
+formats:
+  - gen1ou
+replay_weight: 0.0
+custom_replays:
+  - dir: /home/eddie/metamon/trajectories/lapras/splits/v1/train/lapras
+    weight: 1.0

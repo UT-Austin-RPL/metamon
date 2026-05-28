@@ -1,0 +1,60 @@
+import amago.nets.actor_critic
+import amago.nets.traj_encoders
+import amago.nets.transformer
+import amago.agent
+import amago.experiment
+
+agent.Multigammas.discrete = [.97]
+
+MetamonAMAGOExperiment.agent_type = @agent.MultiTaskAgent
+MetamonAMAGOExperiment.tstep_encoder_type = @MetamonPokemonSlotTstepEncoder
+MetamonAMAGOExperiment.traj_encoder_type = @traj_encoders.TformerTrajEncoder
+MetamonAMAGOExperiment.max_seq_len = 128
+
+# actor: same as grouped_v2_50m.gin
+MultiTaskAgent.actor_type = @MetamonMaskedActor
+MultiTaskAgent.pass_obs_keys_to_actor = ["illegal_actions"]
+MetamonMaskedActor.activation = "leaky_relu"
+MetamonMaskedActor.d_hidden = 768
+MetamonMaskedActor.n_layers = 2
+
+# critic: same as grouped_v2_50m.gin
+MultiTaskAgent.critic_type = @actor_critic.NCriticsTwoHot
+actor_critic.NCriticsTwoHot.activation = "leaky_relu"
+actor_critic.NCriticsTwoHot.n_layers = 2
+actor_critic.NCriticsTwoHot.d_hidden = 768
+MultiTaskAgent.popart = True
+MultiTaskAgent.num_critics = 3
+actor_critic.NCriticsTwoHot.output_bins = 128
+actor_critic.NCriticsTwoHot.min_return = -100
+actor_critic.NCriticsTwoHot.max_return = 2100
+actor_critic.NCriticsTwoHot.use_symlog = False
+
+# Gen1 Pokemon-slot timestep encoder for the Persian local comparison.
+# team_latent_tokens * d_model = 1344, matching grouped_v2_50m's timestep output.
+MetamonPokemonSlotTstepEncoder.extra_emb_dim = 24
+MetamonPokemonSlotTstepEncoder.d_model = 168
+MetamonPokemonSlotTstepEncoder.n_heads = 8
+MetamonPokemonSlotTstepEncoder.slot_layers = 2
+MetamonPokemonSlotTstepEncoder.team_layers = 8
+MetamonPokemonSlotTstepEncoder.slot_latent_tokens = 2
+MetamonPokemonSlotTstepEncoder.team_latent_tokens = 8
+MetamonPokemonSlotTstepEncoder.pokemon_numerical_tokens = 6
+MetamonPokemonSlotTstepEncoder.global_numerical_tokens = 4
+MetamonPokemonSlotTstepEncoder.token_mask_aug = True
+MetamonPokemonSlotTstepEncoder.dropout = 0.05
+MetamonPokemonSlotTstepEncoder.max_pokemon_tokens = 16
+MetamonPokemonSlotTstepEncoder.max_team_tokens = 32
+
+# temporal transformer: same as grouped_v2_50m.gin
+traj_encoders.TformerTrajEncoder.n_layers = 4
+traj_encoders.TformerTrajEncoder.n_heads = 8
+traj_encoders.TformerTrajEncoder.d_ff = 2816
+traj_encoders.TformerTrajEncoder.d_model = 704
+traj_encoders.TformerTrajEncoder.normformer_norms = True
+traj_encoders.TformerTrajEncoder.sigma_reparam = True
+traj_encoders.TformerTrajEncoder.norm = "layer"
+traj_encoders.TformerTrajEncoder.head_scaling = True
+traj_encoders.TformerTrajEncoder.activation = "leaky_relu"
+traj_encoders.TformerTrajEncoder.attention_type = @transformer.FlashAttention
+transformer.FlashAttention.window_size = (32, 0)

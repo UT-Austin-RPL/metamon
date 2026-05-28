@@ -1,0 +1,35 @@
+import amago.agent
+import metamon.rl.custom_agent
+
+MetamonAMAGOExperiment.agent_type = @custom_agent.MetamonFinetuneAgent
+
+agent.Agent.reward_multiplier = 10.
+agent.MultiTaskAgent.reward_multiplier = 10.
+
+agent.Agent.tau = .004
+agent.MultiTaskAgent.tau = .004
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 4
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 4
+
+agent.Agent.online_coeff = 0.0
+agent.MultiTaskAgent.online_coeff = 0.0
+agent.Agent.offline_coeff = 1.0
+agent.MultiTaskAgent.offline_coeff = 1.0
+agent.Agent.fbc_filter_func = @agent.binary_filter
+agent.MultiTaskAgent.fbc_filter_func = @agent.binary_filter
+
+custom_agent.MetamonFinetuneAgent.bc_coeff = 0.0
+custom_agent.MetamonFinetuneAgent.tortoise_tau = 0.005
+custom_agent.MetamonFinetuneAgent.use_tortoise_for_inference = False
+custom_agent.MetamonFinetuneAgent.use_is_correction = False
+
+MetamonAMAGOExperiment.l2_coeff = 1e-4
+MetamonAMAGOExperiment.learning_rate = 3e-5
+MetamonAMAGOExperiment.grad_clip = 1.5
+agent.Agent.critic_loss_weight = 5.0
+agent.MultiTaskAgent.critic_loss_weight = 5.0
+MetamonAMAGOExperiment.lr_warmup_steps = 2000

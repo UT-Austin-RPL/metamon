@@ -89,6 +89,7 @@ class ResolvedDatasetConfig:
 def _resolve_config_path(path: str) -> str:
     """Resolve a config path: absolute paths pass through, relative paths
     are looked up in the ``configs/datasets/`` directory."""
+    path = os.path.expanduser(path)
     if os.path.isabs(path):
         return path
     candidate = os.path.join(DATASET_CONFIG_DIR, path)
@@ -107,7 +108,10 @@ def load_dataset_config(path: str) -> DatasetConfig:
 
     custom_replays = None
     if "custom_replays" in raw and raw["custom_replays"]:
-        custom_replays = [CustomReplaySource(**cr) for cr in raw["custom_replays"]]
+        custom_replays = [
+            CustomReplaySource(dir=os.path.expanduser(cr["dir"]), weight=cr["weight"])
+            for cr in raw["custom_replays"]
+        ]
 
     return DatasetConfig(
         replay_weight=raw.get("replay_weight", 0.05),
@@ -346,7 +350,10 @@ def config_from_args(
     custom_replays = None
     if custom_replay_dir is not None and custom_replay_weight > 0:
         custom_replays = [
-            CustomReplaySource(dir=custom_replay_dir, weight=custom_replay_weight)
+            CustomReplaySource(
+                dir=os.path.expanduser(custom_replay_dir),
+                weight=custom_replay_weight,
+            )
         ]
 
     return DatasetConfig(
@@ -445,8 +452,9 @@ def build_dataset(
             dataset_info.append((name, len(sp_dset), entry.weight))
 
         elif entry.dataset_type == "custom_replay":
-            cr_dset = MetamonDataset(dset_root=entry.identifier, **dset_kwargs)
-            label = os.path.basename(entry.identifier.rstrip("/"))
+            replay_dir = os.path.expanduser(entry.identifier)
+            cr_dset = MetamonDataset(dset_root=replay_dir, **dset_kwargs)
+            label = os.path.basename(replay_dir.rstrip("/"))
             name = f"Custom Replays ({label})"
             datasets.append(
                 MetamonAMAGODataset(dset_name=name, parsed_replay_dset=cr_dset)

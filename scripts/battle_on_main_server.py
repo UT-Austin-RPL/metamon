@@ -57,7 +57,7 @@ def battle_on_main_server(
     checkpoint: int = None,
     accept_only: bool = False,
     save_trajectories_to: str = None,
-    save_team_results_to: str = None,
+    save_results_to: str = None,
 ):
     """
     Battle on the main Pokémon Showdown server.
@@ -72,7 +72,7 @@ def battle_on_main_server(
         checkpoint: Model checkpoint to load (None = default)
         accept_only: If True, sit online and accept challenges instead of actively laddering
         save_trajectories_to: Directory to save battle trajectories (in parsed replay format)
-        save_team_results_to: Directory to save team selection and battle outcome stats
+        save_results_to: Directory to save team selection and battle outcome stats
     """
     # Get the pretrained model
     pretrained_model = get_pretrained_model(agent_name)
@@ -101,7 +101,7 @@ def battle_on_main_server(
                 start_challenging=False,  # Don't actively challenge
                 battle_backend="poke-env",
                 save_trajectories_to=save_trajectories_to,
-                save_team_results_to=save_team_results_to,
+                save_results_to=save_results_to,
             )
             from metamon.rl.metamon_to_amago import MetamonAMAGOWrapper
             return MetamonAMAGOWrapper(env)
@@ -118,7 +118,7 @@ def battle_on_main_server(
                 player_password=password,
                 battle_backend="poke-env",
                 save_trajectories_to=save_trajectories_to,
-                save_team_results_to=save_team_results_to,
+                save_results_to=save_results_to,
             )
             return PSLadderAMAGOWrapper(env)
 
@@ -133,8 +133,8 @@ def battle_on_main_server(
         print("Mode: ACTIVE LADDERING - Queuing for battles...")
     if save_trajectories_to:
         print(f"Saving trajectories to: {save_trajectories_to}/{battle_format}/")
-    if save_team_results_to:
-        print(f"Saving team results to: {save_team_results_to}/")
+    if save_results_to:
+        print(f"Saving battle results to: {save_results_to}/")
     print("WARNING: Make sure you have permission to run bots on the main server!")
 
     results = agent.evaluate_test(
@@ -172,9 +172,13 @@ if __name__ == "__main__":
         help="Directory to save battle trajectories (in parsed replay format)",
     )
     parser.add_argument(
+        "--save_results_to",
         "--save_team_results_to",
         default=None,
-        help="Directory to save team selection and battle outcome stats",
+        help=(
+            "Directory to save team selection and battle outcome stats. "
+            "--save_team_results_to is kept as a deprecated alias."
+        ),
     )
 
     args = parser.parse_args()
@@ -189,5 +193,5 @@ if __name__ == "__main__":
         checkpoint=args.checkpoint,
         accept_only=args.accept_only,
         save_trajectories_to=args.save_trajectories_to,
-        save_team_results_to=args.save_team_results_to,
+        save_results_to=args.save_results_to,
     )
