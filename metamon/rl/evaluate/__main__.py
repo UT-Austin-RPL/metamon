@@ -16,7 +16,7 @@ from metamon.rl.metamon_to_amago import (
     make_local_ladder_env,
     make_pokeagent_ladder_env,
     make_challenge_env,
-    make_metamon_env,
+    make_pokepy_env,
 )
 
 HEURISTIC_COMPOSITE_BASELINES = [
@@ -85,7 +85,7 @@ def pretrained_vs_baselines(
     return results
 
 
-def pretrained_vs_metamon(
+def pretrained_pokepy(
     pretrained_model: PretrainedModel,
     opponent_model: PretrainedModel,
     battle_format: str,
@@ -94,6 +94,8 @@ def pretrained_vs_metamon(
     opponent_checkpoint: Optional[int] = None,
     total_battles: int = 250,
     num_parallel: int = 8,
+    num_workers: int = 1,
+    opponent_gpu_idx: Optional[int] = None,
     action_temperature: float = 1.0,
     opponent_sample: bool = True,
     eval_player_side: int = 0,
@@ -102,9 +104,12 @@ def pretrained_vs_metamon(
     save_results_to: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate a pretrained model against another metamon model via vectorized pokepy."""
-    if not battle_format.startswith("gen9"):
+    from pokepy.core.gen_profile import is_format_supported, registered_gens
+
+    if not is_format_supported(battle_format):
         raise ValueError(
-            f"--eval_type pokepy requires a gen9 battle format; got {battle_format!r}"
+            f"--eval_type pokepy requires a registered format; got {battle_format!r} "
+            f"(registered gens: {sorted(registered_gens())})"
         )
     opponent_agent = opponent_model.initialize_agent(
         checkpoint=opponent_checkpoint, log=False
@@ -112,13 +117,7 @@ def pretrained_vs_metamon(
     agent = pretrained_model.initialize_agent(
         checkpoint=checkpoint, log=log_to_wandb, action_temperature=action_temperature
     )
-    agent.env_mode = "already_vectorized"
-    # In already_vectorized mode AMAGO's inference loop initializes the policy's
-    # KV-cache hidden state with `parallel_actors` and reasons about per-lane
-    # `done` flags using the same value, so it must equal the env's batch size.
-    agent.parallel_actors = num_parallel
-    make_env = functools.partial(
-        make_metamon_env,
+    env_kwargs = dict(
         battle_format=battle_format,
         observation_space=pretrained_model.observation_space,
         action_space=pretrained_model.action_space,
@@ -126,22 +125,43 @@ def pretrained_vs_metamon(
         team_set=team_set,
         opponent_model=opponent_model,
         opponent_checkpoint=opponent_checkpoint,
-        opponent_policy=opponent_agent.policy,
-        opponent_obs_space=opponent_model.observation_space,
-        opponent_action_space=opponent_model.action_space,
         batched_envs=num_parallel,
         opponent_sample=opponent_sample,
         eval_player_side=eval_player_side,
         save_trajectories_to=save_trajectories_to,
         save_results_to=save_results_to,
+        num_workers=num_workers,
+        opponent_gpu_idx=opponent_gpu_idx,
     )
-    # `already_vectorized` mode expects a single env-factory callable (the env
-    # itself owns the batch dimension), not a per-actor list.
-    results = agent.evaluate_test(
-        make_env,
-        timesteps=max(total_battles * 250 // num_parallel, 250),
-        episodes=total_battles,
-    )
+    if int(num_workers) <= 1:
+        env_kwargs.update(
+            opponent_policy=opponent_agent.policy,
+            opponent_obs_space=opponent_model.observation_space,
+            opponent_action_space=opponent_model.action_space,
+        )
+    make_env = functools.partial(make_pokepy_env, **env_kwargs)
+    if num_parallel == 1:
+        # Single battle -> PokepyEnv + MetamonAMAGOWrapper (sync, not already_vectorized).
+        agent.env_mode = "sync"
+        agent.parallel_actors = 1
+        results = agent.evaluate_test(
+            [make_env],
+            timesteps=max(total_battles * 250, 250),
+            episodes=total_battles,
+        )
+    else:
+        agent.env_mode = "already_vectorized"
+        # In already_vectorized mode AMAGO's inference loop initializes the policy's
+        # KV-cache hidden state with `parallel_actors` and reasons about per-lane
+        # `done` flags using the same value, so it must equal the env's batch size.
+        agent.parallel_actors = num_parallel
+        # `already_vectorized` mode expects a single env-factory callable (the env
+        # itself owns the batch dimension), not a per-actor list.
+        results = agent.evaluate_test(
+            make_env,
+            timesteps=max(total_battles * 250 // num_parallel, 250),
+            episodes=total_battles,
+        )
     return results
 
 
@@ -376,7 +396,7 @@ def _get_default_eval(args, base_eval_kwargs):
     elif args.eval_type == "pokepy":
         if not args.opponent_agent:
             raise ValueError("--eval_type pokepy requires --opponent_agent")
-        # pretrained_vs_metamon uses the vectorized pokepy backend and does not
+        # pretrained_pokepy uses the pokepy backend and does not
         # accept the poke-env-only kwargs that the shared base dict carries.
         base_eval_kwargs.pop("battle_backend", None)
         base_eval_kwargs.pop("team_preview_model", None)
@@ -389,7 +409,7 @@ def _get_default_eval(args, base_eval_kwargs):
                 "eval_player_side": args.eval_player_side,
             }
         )
-        return pretrained_vs_metamon
+        return pretrained_pokepy
     else:
         raise ValueError(f"Invalid evaluation type: {args.eval_type}")
 
@@ -399,9 +419,8 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
     all_results = collections.defaultdict(list)
     backend = args.battle_backend or pretrained_model.battle_backend
     if args.eval_type == "pokepy":
-        if not args.formats == ["ou"] or args.gens != [9]:
-            print("Warning: --eval_type pokepy forces gen9 formats")
         backend = "pokepy"
+        from pokepy.core.gen_profile import is_format_supported, registered_gens
 
     # Load team preview model if checkpoint provided
     team_preview_model = None
@@ -431,8 +450,11 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
     for gen in args.gens:
         for format_name in args.formats:
             battle_format = f"gen{gen}{format_name.lower()}"
-            if args.eval_type == "pokepy" and not battle_format.startswith("gen9"):
-                print(f"Skipping {battle_format}: pokepy backend is gen9-only")
+            if args.eval_type == "pokepy" and not is_format_supported(battle_format):
+                print(
+                    f"Skipping {battle_format}: pokepy backend supports "
+                    f"gens {sorted(registered_gens())} only"
+                )
                 continue
             team_set_type = (
                 metamon.env.PokeAgentTeamSet

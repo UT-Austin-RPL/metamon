@@ -211,7 +211,21 @@ def _build_active_pokemon_from_battle(
     side: int,
     game_data: GameData,
     mappings: IDMappings,
+    *,
+    fog_of_war: bool = False,
 ) -> UniversalPokemon:
+    """Build the active Pokemon's UniversalState view.
+
+    When ``fog_of_war`` is True the Pokemon is being observed by the *opposing*
+    player, so hidden information is masked to match the Showdown/poke-env
+    training distribution (see ``UniversalPokemon.from_Pokemon``): the item and
+    ability read as ``unknownitem`` / ``unknownability`` until revealed, only
+    moves the engine has flagged as revealed are exposed, and the exact computed
+    stats are dropped (``MISSING_STAT``). Visible-on-field attributes — species,
+    types, HP%, level, status, stat boosts, and (once terastallized) tera type —
+    are always shown. The player's own active Pokemon is built with
+    ``fog_of_war=False`` so it retains full information.
+    """
     battle = state.battle_state
     side_base = OFF_SIDE0 if side == 0 else OFF_SIDE1
     active_idx = int(battle[OFF_META + (M_ACTIVE0 if side == 0 else M_ACTIVE1)])
@@ -263,9 +277,17 @@ def _build_active_pokemon_from_battle(
 
     moves_arr = state.team_moves if side == 0 else state.opp_moves
     pp_arr = state.team_pp if side == 0 else state.opp_pp
+    # team_*_revealed track side 0's reveals; opp_*_revealed track side 1's.
+    moves_revealed_arr = (
+        state.team_moves_revealed if side == 0 else state.opp_moves_revealed
+    )
     mon_moves: List[UniversalMove] = []
     for j in range(4):
         mid = int(moves_arr[active_idx, j])
+        if fog_of_war and not bool(moves_revealed_arr[active_idx, j]):
+            # Opponent move not yet revealed: hide it entirely (matches
+            # poke-env, where unrevealed moves are simply absent).
+            continue
         mon_moves.append(
             _build_move(
                 mid,
@@ -277,16 +299,42 @@ def _build_active_pokemon_from_battle(
         )
 
     bs = game_data.species_base_stats[species_id]
-    stat_fields = UniversalPokemon._stat_fields(
-        _live_stats_from_battle_offset(battle, poff)
-    )
+    if fog_of_war:
+        # Showdown reveals an opponent's item/ability only once it has actually
+        # activated (an `-item`/`-ability` protocol message). The engine sets
+        # the per-slot reveal arrays at those activation sites; until then the
+        # field reads as unknown. Exact computed stats are never public, so
+        # they stay MISSING. team_* track side-0's mons, opp_* track side-1's.
+        item_revealed_arr = (
+            state.team_items_revealed if side == 0 else state.opp_items_revealed
+        )
+        ability_revealed_arr = (
+            state.team_abilities_revealed if side == 0 else state.opp_abilities_revealed
+        )
+        item_name = (
+            _item_name(item_id, mappings)
+            if bool(item_revealed_arr[active_idx])
+            else "unknownitem"
+        )
+        ability_name = (
+            _ability_name(ability_id, mappings)
+            if bool(ability_revealed_arr[active_idx])
+            else "unknownability"
+        )
+        stat_fields = UniversalPokemon._stat_fields(UniversalPokemon.MISSING_STATS)
+    else:
+        item_name = _item_name(item_id, mappings)
+        ability_name = _ability_name(ability_id, mappings)
+        stat_fields = UniversalPokemon._stat_fields(
+            _live_stats_from_battle_offset(battle, poff)
+        )
     return UniversalPokemon(
         name=_species_name(species_id, mappings),
         base_species=_species_name(species_id, mappings),
         hp_pct=(cur_hp / max_hp) if max_hp > 0 else 0.0,
         types=_types_string(type1, type2),
-        item=_item_name(item_id, mappings),
-        ability=_ability_name(ability_id, mappings),
+        item=item_name,
+        ability=ability_name,
         lvl=level,
         status=_status_name(status_id),
         effect="noeffect",
@@ -338,7 +386,11 @@ def pokepy_state_to_universal(
     opp_side = 1 - player_side
 
     player = _build_active_pokemon_from_battle(state, player_side, game_data, mappings)
-    opponent = _build_active_pokemon_from_battle(state, opp_side, game_data, mappings)
+    # Opponent's active Pokemon is partially observed: mask hidden information
+    # (item/ability/unrevealed moves/exact stats) to preserve fog of war.
+    opponent = _build_active_pokemon_from_battle(
+        state, opp_side, game_data, mappings, fog_of_war=True
+    )
 
     side_base = OFF_SIDE0 if player_side == 0 else OFF_SIDE1
     active_idx = int(battle[OFF_META + (M_ACTIVE0 if player_side == 0 else M_ACTIVE1)])
@@ -424,28 +476,30 @@ def pokepy_state_to_universal(
         else UniversalMove.blank_move()
     )
 
-    # pokepy only enters FORCED_SWITCH for physical side 0 (side 1 faints are
-    # resolved inline via auto_switch). Side 1 never receives a switch request.
-    forced_switch = int(state.phase) == PHASE_FORCED_SWITCH and player_side == 0
+    # Symmetric forced-switch requests: ``forced_switch_side`` is 0, 1, or 2
+    # (both). Match pokepy ``state_to_universal`` so side-1 eval agents get
+    # switch-only ``maybe_valid_actions`` and correct illegal-action masks.
+    _fs_side = int(getattr(state, "forced_switch_side", -1))
+    forced_switch = bool(getattr(state, "forced_switch_slot", -1) >= 0) or (
+        int(state.phase) == PHASE_FORCED_SWITCH and _fs_side in (player_side, 2)
+    )
 
-    can_tera = True
-    for slot in range(6):
-        poff = side_base + slot * POKEMON_SIZE
-        flags = int(battle[poff + 15])
-        if (flags & 0x8) != 0:
-            can_tera = False
-            break
+    from pokepy.core.gen_profile import profile_for_format
 
-    # Opponent teampreview must be keyed on player_side, like every other field
-    # here. The engine keeps symmetric reveal masks: `opp_*` are side-1's mons
-    # (as seen by side 0) and `team_*`/`team_revealed` are side-0's mons (as seen
-    # by side 1). Hardcoding `opp_*` would show a side-1 agent a filtered view of
-    # its OWN team as the "opponent" preview.
-    opp_revealed_arr = state.opp_revealed if player_side == 0 else state.team_revealed
+    profile = profile_for_format(format_str)
+    can_tera = profile.has_tera
+    if can_tera:
+        for slot in range(6):
+            poff = side_base + slot * POKEMON_SIZE
+            flags = int(battle[poff + 15])
+            if (flags & 0x8) != 0:
+                can_tera = False
+                break
+
     opp_species_arr = state.opp_species if player_side == 0 else state.team_species
     teampreview: List[str] = []
-    for slot in range(6):
-        if bool(opp_revealed_arr[slot]):
+    if profile.has_teampreview:
+        for slot in range(6):
             sid = int(opp_species_arr[slot])
             if sid >= 0:
                 teampreview.append(_species_name(sid, mappings))

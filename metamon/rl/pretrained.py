@@ -276,6 +276,15 @@ class PretrainedModel:
         )
 
 
+def get_pretrained_registry_name(model: PretrainedModel) -> str:
+    """Return the registry key for a :class:`PretrainedModel` instance."""
+    model_cls = type(model)
+    for name, cls in ALL_PRETRAINED_MODELS.items():
+        if cls is model_cls:
+            return name
+    raise ValueError(f"No registry entry for pretrained model class {model_cls!r}")
+
+
 class LocalPretrainedModel(PretrainedModel):
     """
     Evaluate a model from a custom training run.
