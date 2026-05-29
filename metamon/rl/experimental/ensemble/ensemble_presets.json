@@ -702,7 +702,7 @@
   ],
   "tauros62_dualtemp5": [
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.05,
@@ -712,7 +712,7 @@
       "action_temperature": 0.82
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.65,
@@ -726,7 +726,7 @@
       "action_temperature": 1.22
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 66,
       "gxe": 0.83,
       "proposer_bias": 1.15,
@@ -768,7 +768,7 @@
   ],
   "tauros62_datajudge5": [
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.0,
@@ -778,7 +778,7 @@
       "action_temperature": 0.82
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.55,
@@ -816,7 +816,7 @@
       "action_temperature": 1.08
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 64,
       "gxe": 0.84,
       "proposer_bias": 1.1,
@@ -831,7 +831,7 @@
   ],
   "tauros62_dualtemp6": [
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.05,
@@ -841,7 +841,7 @@
       "action_temperature": 0.82
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.6,
@@ -855,7 +855,7 @@
       "action_temperature": 1.22
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 66,
       "gxe": 0.83,
       "proposer_bias": 1.1,
@@ -907,7 +907,7 @@
   ],
   "tauros62_taurosonly5": [
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.0,
@@ -917,7 +917,7 @@
       "action_temperature": 0.82
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.65,
@@ -931,7 +931,7 @@
       "action_temperature": 1.22
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 64,
       "gxe": 0.84,
       "proposer_bias": 1.15,
@@ -941,7 +941,7 @@
       "action_temperature": 0.92
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 64,
       "gxe": 0.84,
       "proposer_bias": 1.25,
@@ -954,7 +954,7 @@
       "action_temperature": 1.05
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 66,
       "gxe": 0.82,
       "proposer_bias": 1.1,
@@ -979,7 +979,7 @@
       "action_temperature": 0.84
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.0,
@@ -989,7 +989,7 @@
       "action_temperature": 0.88
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.6,
@@ -1017,7 +1017,7 @@
       "action_temperature": 1.08
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 64,
       "gxe": 0.84,
       "proposer_bias": 1.15,
@@ -1032,7 +1032,7 @@
   ],
   "tauros62_temporal5": [
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.0,
@@ -1042,7 +1042,7 @@
       "action_temperature": 0.82
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.65,
@@ -1056,7 +1056,7 @@
       "action_temperature": 1.22
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 60,
       "gxe": 0.82,
       "proposer_bias": 1.05,
@@ -1066,7 +1066,7 @@
       "action_temperature": 0.9
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 64,
       "gxe": 0.84,
       "proposer_bias": 1.2,
@@ -1079,7 +1079,7 @@
       "action_temperature": 1.02
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 68,
       "gxe": 0.8,
       "proposer_bias": 1.15,
@@ -1095,7 +1095,7 @@
   ],
   "tauros62_wide6": [
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.0,
@@ -1105,7 +1105,7 @@
       "action_temperature": 0.82
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 62,
       "gxe": 0.86,
       "proposer_bias": 1.6,
@@ -1119,7 +1119,7 @@
       "action_temperature": 1.2
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 60,
       "gxe": 0.82,
       "proposer_bias": 1.0,
@@ -1129,7 +1129,7 @@
       "action_temperature": 0.9
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 64,
       "gxe": 0.84,
       "proposer_bias": 1.15,
@@ -1142,7 +1142,7 @@
       "action_temperature": 1.02
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 68,
       "gxe": 0.8,
       "proposer_bias": 1.1,
@@ -1156,7 +1156,7 @@
       "action_temperature": 1.06
     },
     {
-      "model_name": "TaurosV5",
+      "model_name": "TaurosV0",
       "checkpoint": 70,
       "gxe": 0.78,
       "proposer_bias": 1.0,
