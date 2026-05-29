@@ -30,7 +30,7 @@ from metamon.interface import (
 )
 from metamon.data import DATA_PATH
 from metamon.data.download import download_teams
-from metamon.env.metamon_player import MetamonPlayer
+from metamon.env.metamon_player import MetamonPlayer, PokeAgentPlayer
 from metamon.backend.team_prediction.team_index import (
     load_team_files,
     resolve_format_dir,

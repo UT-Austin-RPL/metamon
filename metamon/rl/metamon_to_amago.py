@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Optional, Any, Type
 import os
 import warnings
@@ -36,7 +38,6 @@ from metamon.env import (
     ChallengeByUsername,
     PokeAgentLadder,
 )
-from metamon.env.pokepy_battle import BattlePokepyVectorized, VectorizedPokepyEnv
 
 try:
     import amago
@@ -270,14 +271,14 @@ def make_placeholder_experiment(
 
 
 class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
-    """AMAGOEnv wrapper for poke-env gymnasium environments.
+    """AMAGOEnv wrapper for single-env pokepy / poke-env gymnasium environments.
 
-    - Extends the observation space with an illegal action mask, which will
-        be passed along to the actor network.
-    - Adds success rate and valid action rate logging.
+    Use with :class:`~metamon.env.pokepy_battle.PokepyEnv` (``batched_envs=1``)
+    or :class:`~metamon.env.PokeEnvWrapper`. Run AMAGO in ``env_mode="sync"`` with
+    ``parallel_actors=1`` — not ``already_vectorized``.
     """
 
-    def __init__(self, metamon_env: PokeEnvWrapper):
+    def __init__(self, metamon_env: PokeEnvWrapper | PokepyEnv):
         self.metamon_action_space = metamon_env.metamon_action_space
         super().__init__(
             env=metamon_env,
@@ -322,13 +323,17 @@ class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
 
     @property
     def env_name(self):
-        return f"{self.env.metamon_battle_format}_vs_{self.env.metamon_opponent_name}"
+        env = self.env
+        if hasattr(env, "env_name"):
+            return env.env_name
+        return f"{env.metamon_battle_format}_vs_{env.metamon_opponent_name}"
 
 
 class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
     """AMAGOEnv wrapper for batched pokepy VectorizedPokepyEnv (already_vectorized mode)."""
 
-    def __init__(self, metamon_env: VectorizedPokepyEnv):
+    def __init__(self, metamon_env):
+        self._metamon_env = metamon_env
         self.metamon_action_space = metamon_env.metamon_action_space
         super().__init__(
             env=metamon_env,
@@ -352,12 +357,12 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         obs["illegal_actions"] = illegal_actions
 
     def inner_reset(self, *args, **kwargs):
-        obs, info = self.env.reset(*args, **kwargs)
+        obs, info = self._metamon_env.reset(*args, **kwargs)
         self.add_illegal_action_mask_to_obs(obs, info)
         return obs, info
 
     def inner_step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
+        obs, reward, terminated, truncated, info = self._metamon_env.step(action)
         self.add_illegal_action_mask_to_obs(obs, info)
         return obs, reward, terminated, truncated, info
 
@@ -406,13 +411,22 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         return self.env.env_name
 
 
-def make_metamon_env(*args, **kwargs):
-    """Vectorized pokepy env vs another metamon PretrainedModel."""
+def make_pokepy_env(*args, **kwargs):
+    """Pokepy env vs another metamon PretrainedModel.
+
+    ``batched_envs=1`` returns :class:`PokepyEnv` wrapped for AMAGO ``sync`` mode.
+    ``batched_envs>1`` returns :class:`VectorizedPokepyEnv` (or a multiprocess
+    orchestrator when ``num_workers>1``) for ``already_vectorized``.
+    """
+    from metamon.env.pokepy_battle.vector_env import BattlePokepyVectorized, PokepyEnv
+
     _block_warnings()
     menv = BattlePokepyVectorized(*args, **kwargs)
     print(
-        f"Made Metamon Env ({menv.batched_envs} lanes vs {menv.metamon_opponent_name})"
+        f"Made Pokepy Env ({menv.batched_envs} lanes vs {menv.metamon_opponent_name})"
     )
+    if isinstance(menv, PokepyEnv):
+        return MetamonAMAGOWrapper(menv)
     return VectorizedMetamonAMAGOWrapper(menv)
 
 

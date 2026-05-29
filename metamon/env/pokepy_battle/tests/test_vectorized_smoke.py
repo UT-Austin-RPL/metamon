@@ -15,8 +15,8 @@ if POKEPY_ENGINE.exists():
     )
 
 
-@pytest.mark.slow
-def test_vectorized_self_play_smoke():
+def _make_smoke_env(batched_envs: int):
+    """Build a self-play env or skip if data / checkpoints are unavailable."""
     from pokepy.data.loader import get_data_path
 
     if not (get_data_path() / "type_chart.npy").exists():
@@ -25,7 +25,7 @@ def test_vectorized_self_play_smoke():
     try:
         from metamon.rl.pretrained import get_pretrained_model
         from metamon.env import get_metamon_teams
-        from metamon.rl.metamon_to_amago import make_metamon_env
+        from metamon.rl.metamon_to_amago import make_pokepy_env
     except ImportError as e:
         pytest.skip(str(e))
 
@@ -39,14 +39,13 @@ def test_vectorized_self_play_smoke():
     if not model_names:
         pytest.skip("no pretrained models registered")
 
-    model_name = model_names[0]
-    model = get_pretrained_model(model_name)
+    model = get_pretrained_model(model_names[0])
     if not model.model_name:
         pytest.skip("could not load pretrained model")
 
     team_set = get_metamon_teams("gen9ou", "competitive")
     opponent_agent = model.initialize_agent(log=False)
-    env = make_metamon_env(
+    return make_pokepy_env(
         battle_format="gen9ou",
         observation_space=model.observation_space,
         action_space=model.action_space,
@@ -56,18 +55,35 @@ def test_vectorized_self_play_smoke():
         opponent_policy=opponent_agent.policy,
         opponent_obs_space=model.observation_space,
         opponent_action_space=model.action_space,
-        batched_envs=4,
+        batched_envs=batched_envs,
         turn_limit=50,
     )
+
+
+def _run_smoke(env, n_steps: int = 100):
     obs, info = env.inner_reset()
     env.add_illegal_action_mask_to_obs(obs, info)
-    n_steps = 100
     t0 = time.time()
     for _ in range(n_steps):
         illegal = obs["illegal_actions"]
         actions = (~illegal).argmax(axis=-1)
         obs, _, terminated, truncated, info = env.inner_step(actions)
         env.add_illegal_action_mask_to_obs(obs, info)
-    fps = n_steps * env.batched_envs / max(time.time() - t0, 1e-6)
-    print(f"Smoke: {n_steps} steps x {env.batched_envs} lanes, FPS={fps:.1f}")
+    return n_steps * env.batched_envs / max(time.time() - t0, 1e-6)
+
+
+@pytest.mark.slow
+def test_vectorized_self_play_smoke():
+    env = _make_smoke_env(batched_envs=4)
+    fps = _run_smoke(env)
+    print(f"Smoke (batched): {env.batched_envs} lanes, FPS={fps:.1f}")
+    assert fps > 0
+
+
+@pytest.mark.slow
+def test_single_battle_self_play_smoke():
+    # batched_envs=1 routes through the standalone, readable PokepyEnv.
+    env = _make_smoke_env(batched_envs=1)
+    fps = _run_smoke(env)
+    print(f"Smoke (single): FPS={fps:.1f}")
     assert fps > 0

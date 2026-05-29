@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from poke_env.teambuilder import Teambuilder
+from pokepy.core.gen_profile import GEN9_PROFILE, GenProfile, profile_for_format, profile_for_gen
 from pokepy.data.loader import IDMappings, load_id_mappings
 
 from metamon.backend.replay_parser.str_parsing import clean_name, pokemon_name
@@ -31,6 +32,21 @@ def _lookup(mapping: Dict[str, int], raw_name: str, kind: str) -> int:
         if key in mapping:
             return int(mapping[key])
     raise KeyError(f"Unmapped pokepy {kind} id for {raw_name!r} (tried {candidates})")
+
+
+def _resolve_profile(
+    profile: Optional[GenProfile],
+    *,
+    gen: Optional[int] = None,
+    battle_format: Optional[str] = None,
+) -> GenProfile:
+    if profile is not None:
+        return profile
+    if battle_format is not None:
+        return profile_for_format(battle_format)
+    if gen is not None:
+        return profile_for_gen(gen)
+    return GEN9_PROFILE
 
 
 def _cleanup_move_id(move_id: str) -> str:
@@ -145,9 +161,14 @@ def _parse_packed_showdown_team(packed_team: str) -> List[dict]:
 def showdown_team_to_pokepy_dict(
     packed_team: str,
     mappings: Optional[IDMappings] = None,
+    profile: Optional[GenProfile] = None,
+    *,
+    gen: Optional[int] = None,
+    battle_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Parse a Showdown team string into pokepy's init_battle_state format."""
-    mappings = mappings or load_id_mappings()
+    profile = _resolve_profile(profile, gen=gen, battle_format=battle_format)
+    mappings = mappings or load_id_mappings(gen=profile.gen)
 
     if "]" in packed_team:
         parsed_mons = _parse_packed_showdown_team(packed_team)
@@ -194,18 +215,22 @@ def showdown_team_to_pokepy_dict(
         moves.append(move_ids[:4])
 
         item_name = mon["item"] if mon["item"] else ""
-        items.append(
-            _lookup(mappings.item_to_idx, item_name, "item") if item_name else 0
-        )
+        if profile.has_items and item_name and clean_name(item_name) not in {
+            "noitem",
+            "unknownitem",
+        }:
+            items.append(_lookup(mappings.item_to_idx, item_name, "item"))
+        else:
+            items.append(0)
+
         ability_name = mon["ability"] if mon["ability"] else ""
-        abilities.append(
-            _lookup(mappings.ability_to_idx, ability_name, "ability")
-            if ability_name
-            else 0
-        )
+        if profile.has_abilities and ability_name:
+            abilities.append(_lookup(mappings.ability_to_idx, ability_name, "ability"))
+        else:
+            abilities.append(0)
 
         tera_raw = mon.get("tera_type")
-        if tera_raw:
+        if profile.has_tera and tera_raw:
             tera_types.append(_lookup(mappings.type_to_idx, str(tera_raw), "type"))
         else:
             tera_types.append(-1)
@@ -242,7 +267,17 @@ def showdown_team_to_pokepy_dict(
 def team_set_to_pokepy_dict(
     team_set: TeamSet,
     mappings: Optional[IDMappings] = None,
+    profile: Optional[GenProfile] = None,
+    *,
+    gen: Optional[int] = None,
+    battle_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Sample a team from a metamon TeamSet and convert to pokepy format."""
     packed = team_set.yield_team()
-    return showdown_team_to_pokepy_dict(packed, mappings=mappings)
+    return showdown_team_to_pokepy_dict(
+        packed,
+        mappings=mappings,
+        profile=profile,
+        gen=gen,
+        battle_format=battle_format,
+    )

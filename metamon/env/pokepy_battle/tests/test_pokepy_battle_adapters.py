@@ -174,3 +174,35 @@ def test_obs_interchangeability_with_pokepy_kakuna(pokepy_fixtures):
     pokepy_obs = build_kakuna_obs(pokepy_universal)
     for key in ("numbers", "text"):
         np.testing.assert_array_equal(metamon_obs[key], pokepy_obs[key])
+
+
+def test_forced_switch_flag_is_side_aware(pokepy_fixtures):
+    from metamon.env.pokepy_battle.state_adapter import pokepy_state_to_universal
+    from pokepy.core.constants import PHASE_FORCED_SWITCH
+
+    gd, mappings, fresh, MonSpec = pokepy_fixtures
+    state, _ = fresh(
+        [MonSpec("garchomp", ["earthquake", "tackle", "tackle", "tackle"])],
+        [MonSpec("snorlax", ["tackle"] * 4)],
+    )
+    state.phase = PHASE_FORCED_SWITCH
+    state.forced_switch_side = 1
+
+    u0 = pokepy_state_to_universal(
+        state, gd, mappings, format_str="gen9ou", player_side=0
+    )
+    u1 = pokepy_state_to_universal(
+        state, gd, mappings, format_str="gen9ou", player_side=1
+    )
+    assert not u0.forced_switch
+    assert u1.forced_switch
+
+    state.forced_switch_side = 2
+    u0 = pokepy_state_to_universal(
+        state, gd, mappings, format_str="gen9ou", player_side=0
+    )
+    u1 = pokepy_state_to_universal(
+        state, gd, mappings, format_str="gen9ou", player_side=1
+    )
+    assert u0.forced_switch
+    assert u1.forced_switch
