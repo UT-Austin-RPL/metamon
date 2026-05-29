@@ -312,9 +312,15 @@ class PokeEnvWrapper(OpenAIGymEnv):
             player_class = MetamonPlayer
         elif battle_backend == "pokeagent":
             player_class = PokeAgentPlayer
+        elif battle_backend == "pokepy":
+            raise ValueError(
+                "battle_backend='pokepy' is only supported via metamon.env.pokepy_battle "
+                "(VectorizedPokepyEnv / BattlePokepyVectorized), not PokeEnvWrapper."
+            )
         else:
             raise ValueError(
-                f"Invalid battle backend: {battle_backend}. Options are 'poke-env', 'metamon', or 'pokeagent'."
+                f"Invalid battle backend: {battle_backend}. Options are "
+                "'poke-env', 'metamon', 'pokeagent', or 'pokepy' (vectorized eval only)."
             )
 
         super().__init__(
