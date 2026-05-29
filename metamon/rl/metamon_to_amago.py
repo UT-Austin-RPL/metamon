@@ -36,6 +36,7 @@ from metamon.env import (
     ChallengeByUsername,
     PokeAgentLadder,
 )
+from metamon.env.pokepy_battle import BattlePokepyVectorized, VectorizedPokepyEnv
 
 try:
     import amago
@@ -309,29 +310,110 @@ class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         return obs, reward, terminated, truncated, info
 
     def step(self, action):
-        try:
-            next_tstep, reward, terminated, truncated, info = super().step(action)
-            # amago will average these stats over episodes, devices, and parallel actors.
-            if "won" in info:
-                info[f"{AMAGO_ENV_LOG_PREFIX} Win Rate"] = info["won"]
-            if "valid_action_count" in info and "invalid_action_count" in info:
-                info[f"{AMAGO_ENV_LOG_PREFIX} Valid Actions"] = info[
-                    "valid_action_count"
-                ] / (info["valid_action_count"] + info["invalid_action_count"])
-            return next_tstep, reward, terminated, truncated, info
-        except Exception as e:
-            print(e)
-            print("Force resetting due to long-tail error")
-            self.reset()
-            next_tstep, reward, terminated, truncated, info = self.step(action)
-            reward *= 0.0
-            terminated[:] = False
-            truncated[:] = True  # force a proper reset asap
-            return next_tstep, reward, terminated, truncated, info
+        next_tstep, reward, terminated, truncated, info = super().step(action)
+        # amago will average these stats over episodes, devices, and parallel actors.
+        if "won" in info:
+            info[f"{AMAGO_ENV_LOG_PREFIX} Win Rate"] = info["won"]
+        if "valid_action_count" in info and "invalid_action_count" in info:
+            info[f"{AMAGO_ENV_LOG_PREFIX} Valid Actions"] = info[
+                "valid_action_count"
+            ] / (info["valid_action_count"] + info["invalid_action_count"])
+        return next_tstep, reward, terminated, truncated, info
 
     @property
     def env_name(self):
         return f"{self.env.metamon_battle_format}_vs_{self.env.metamon_opponent_name}"
+
+
+class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
+    """AMAGOEnv wrapper for batched pokepy VectorizedPokepyEnv (already_vectorized mode)."""
+
+    def __init__(self, metamon_env: VectorizedPokepyEnv):
+        self.metamon_action_space = metamon_env.metamon_action_space
+        super().__init__(
+            env=metamon_env,
+            env_name="metamon",
+            batched_envs=metamon_env.batched_envs,
+        )
+        assert isinstance(self.action_space, gym.spaces.Discrete)
+        self.observation_space["illegal_actions"] = gym.spaces.Box(
+            low=0,
+            high=1,
+            shape=(self.batched_envs, self.action_space.n),
+            dtype=bool,
+        )
+
+    def add_illegal_action_mask_to_obs(self, obs: dict, info: dict):
+        legal_actions = info["legal_actions"]
+        illegal_actions = np.ones((self.batched_envs, self.action_space.n), dtype=bool)
+        for lane in range(self.batched_envs):
+            for agent_legal_action in legal_actions[lane]:
+                illegal_actions[lane, agent_legal_action] = False
+        obs["illegal_actions"] = illegal_actions
+
+    def inner_reset(self, *args, **kwargs):
+        obs, info = self.env.reset(*args, **kwargs)
+        self.add_illegal_action_mask_to_obs(obs, info)
+        return obs, info
+
+    def inner_step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self.add_illegal_action_mask_to_obs(obs, info)
+        return obs, reward, terminated, truncated, info
+
+    def step(self, action):
+        next_tstep, reward, terminated, truncated, info = super().step(action)
+        if "won" in info:
+            wins = info["won"]
+            if isinstance(wins, list):
+                # Lanes that did not finish this step report `None`. Hand
+                # AMAGO the per-battle outcomes as an array (not a pre-
+                # averaged scalar) so each finished battle becomes one data
+                # point in SpecialMetricHistory; otherwise AMAGO's final mean
+                # is a mean-of-means biased by how many lanes happen to end
+                # on the same step. (Matches the xland_minigrid example.)
+                finished = [float(w) for w in wins if w is not None]
+                if finished:
+                    info[f"{AMAGO_ENV_LOG_PREFIX} Win Rate"] = np.array(
+                        finished, dtype=np.float32
+                    )
+            else:
+                info[f"{AMAGO_ENV_LOG_PREFIX} Win Rate"] = wins
+        valid = info.get("valid_action_count")
+        invalid = info.get("invalid_action_count")
+        if valid is not None and invalid is not None:
+            if isinstance(valid, list):
+                # One per-battle ratio for each lane that finished this step
+                # (others report None), mirroring how Win Rate is logged so each
+                # finished battle is a single data point in SpecialMetricHistory.
+                ratios = [
+                    v / (v + iv)
+                    for v, iv in zip(valid, invalid)
+                    if v is not None and iv is not None and (v + iv) > 0
+                ]
+                if ratios:
+                    info[f"{AMAGO_ENV_LOG_PREFIX} Valid Actions"] = np.array(
+                        ratios, dtype=np.float32
+                    )
+            else:
+                denom = valid + invalid
+                if denom > 0:
+                    info[f"{AMAGO_ENV_LOG_PREFIX} Valid Actions"] = valid / denom
+        return next_tstep, reward, terminated, truncated, info
+
+    @property
+    def env_name(self):
+        return self.env.env_name
+
+
+def make_metamon_env(*args, **kwargs):
+    """Vectorized pokepy env vs another metamon PretrainedModel."""
+    _block_warnings()
+    menv = BattlePokepyVectorized(*args, **kwargs)
+    print(
+        f"Made Metamon Env ({menv.batched_envs} lanes vs {menv.metamon_opponent_name})"
+    )
+    return VectorizedMetamonAMAGOWrapper(menv)
 
 
 @gin.configurable
@@ -369,11 +451,19 @@ class MetamonDiscrete(amago.nets.policy_dists.Discrete):
         self, vec: torch.Tensor, log_dict: Optional[dict] = None
     ) -> amago.nets.policy_dists._Categorical:
         scaled_logits = vec / self.temperature
-
         dist = amago.nets.policy_dists._Categorical(logits=scaled_logits)
         probs = dist.probs
-        clip_probs = probs.clamp(self.clip_prob_low, self.clip_prob_high)
-        safe_probs = clip_probs / clip_probs.sum(-1, keepdims=True).detach()
+        # The actor masks illegal actions to -inf before we get here (prob 0).
+        # clip_prob_low would otherwise clamp those zeros back up and resurrect
+        # masked actions, so only clip among the finite (legal) logits.
+        legal = torch.isfinite(scaled_logits)
+        clip_probs = torch.where(
+            legal,
+            probs.clamp(self.clip_prob_low, self.clip_prob_high),
+            torch.zeros_like(probs),
+        )
+        denom = clip_probs.sum(-1, keepdims=True).clamp(min=1e-8)
+        safe_probs = clip_probs / denom.detach()
         safe_dist = amago.nets.policy_dists._Categorical(probs=safe_probs)
 
         if log_dict is not None:
