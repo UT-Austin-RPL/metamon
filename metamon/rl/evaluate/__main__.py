@@ -94,6 +94,7 @@ def pretrained_vs_metamon(
     opponent_checkpoint: Optional[int] = None,
     total_battles: int = 250,
     num_parallel: int = 8,
+    n_workers: int = 1,
     opponent_gpu_idx: Optional[int] = None,
     action_temperature: float = 1.0,
     opponent_sample: bool = True,
@@ -118,6 +119,7 @@ def pretrained_vs_metamon(
         opponent_model=opponent_model,
         opponent_checkpoint=opponent_checkpoint,
         batched_envs=num_parallel,
+        n_workers=n_workers,
         opponent_sample=opponent_sample,
         eval_player_side=eval_player_side,
         save_trajectories_to=save_trajectories_to,
@@ -393,6 +395,7 @@ def _get_default_eval(args, base_eval_kwargs):
                 "opponent_model": get_pretrained_model(args.opponent_agent),
                 "opponent_checkpoint": args.opponent_checkpoint,
                 "num_parallel": args.num_parallel,
+                "n_workers": args.n_workers,
                 "opponent_sample": args.opponent_sample,
                 "eval_player_side": args.eval_player_side,
                 "opponent_gpu_idx": args.opponent_gpu_idx,
@@ -604,6 +607,16 @@ def add_cli(parser):
         type=int,
         default=8,
         help="Number of parallel Showdown battle lanes for --eval_type metamon.",
+    )
+    parser.add_argument(
+        "--n_workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of Node processes hosting Showdown sims for --eval_type metamon "
+            "(lanes are split across workers; opponent/eval NN batching stays at "
+            "--num_parallel)."
+        ),
     )
     parser.add_argument(
         "--opponent_sample",

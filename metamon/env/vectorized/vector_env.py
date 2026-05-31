@@ -24,6 +24,8 @@ import copy
 import json
 import os
 import random
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,7 +51,7 @@ from .lane import (
 )
 from .obs_utils import stack_obs_dicts
 from .opponent import BatchedOpponent, RandomBatchedOpponent
-from .sim_process import ShowdownSimProcess
+from .sim_process import ShowdownSimProcess, ShowdownSimProcessError, make_sim_process
 from .team_adapter import player_spec
 
 
@@ -78,6 +80,7 @@ class VectorizedShowdownEnv(gym.Env):
         save_results_to: Optional[str] = None,
         node_path: str = "node",
         showdown_dist: Optional[str] = None,
+        n_workers: int = 1,
         seed: Optional[int] = None,
         eval_player_side: int = 0,
     ):
@@ -142,9 +145,19 @@ class VectorizedShowdownEnv(gym.Env):
         self._team_files: List[Optional[str]] = [None] * self.batched_envs
         self._last_opp_obs: List[Optional[dict]] = [None] * self.batched_envs
 
-        self.proc = ShowdownSimProcess(node_path=node_path, showdown_dist=showdown_dist)
+        self.proc = make_sim_process(
+            num_lanes=self.batched_envs,
+            n_workers=n_workers,
+            node_path=node_path,
+            showdown_dist=showdown_dist,
+        )
         for i, lane in enumerate(self.lanes):
             self.proc.register_lane(i, lane)
+
+        self._profile = os.environ.get("METAMON_VEC_PROFILE") == "1"
+        self._profile_stats: Dict[str, float] = {}
+        self._profile_steps = 0
+        self._profile_reported = False
 
         self.observation_space = self._build_observation_space()
         self.action_space = eval_action_space.gym_space
@@ -179,6 +192,32 @@ class VectorizedShowdownEnv(gym.Env):
     @property
     def env_name(self) -> str:
         return f"{self.metamon_battle_format}_vs_{self.metamon_opponent_name}"
+
+    @contextmanager
+    def _profile_section(self, name: str):
+        if not self._profile:
+            yield
+            return
+        t0 = time.perf_counter()
+        yield
+        self._profile_stats[name] = self._profile_stats.get(name, 0.0) + (
+            time.perf_counter() - t0
+        )
+
+    def profile_report(self) -> str:
+        if not self._profile_stats:
+            return "no profile data (set METAMON_VEC_PROFILE=1)"
+        total = sum(self._profile_stats.values())
+        lines = [f"profile over {self._profile_steps} steps (total {total:.3f}s):"]
+        for name, secs in sorted(
+            self._profile_stats.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            pct = 100.0 * secs / total if total else 0.0
+            per_step = secs / max(self._profile_steps, 1)
+            lines.append(
+                f"  {name}: {secs:.3f}s ({pct:.1f}%, {per_step*1000:.2f}ms/step)"
+            )
+        return "\n".join(lines)
 
     # ----- lane lifecycle --------------------------------------------------
 
@@ -422,14 +461,15 @@ class VectorizedShowdownEnv(gym.Env):
                 else None
             )
             opp_pending: List[Tuple[int, int, UniversalState]] = []
+            choices: List[Tuple[int, str, str]] = []
             for i in auto:
                 lane = self.lanes[i]
                 k1 = lane.request_kind(self.eval_side)
                 k2 = lane.request_kind(self.opp_side)
                 if k1 == KIND_TEAMPREVIEW:
-                    self.proc.choose(i, self.eval_side, DEFAULT_CHOICE)
+                    choices.append((i, self.eval_side, DEFAULT_CHOICE))
                 if k2 == KIND_TEAMPREVIEW:
-                    self.proc.choose(i, self.opp_side, DEFAULT_CHOICE)
+                    choices.append((i, self.opp_side, DEFAULT_CHOICE))
                 elif k2 in AGENT_KINDS:
                     prev_opp = lane.universal_state(self.opp_side)
                     used_idx, choice = self._resolve_action(
@@ -438,9 +478,11 @@ class VectorizedShowdownEnv(gym.Env):
                         self.opponent_action_space,
                         int(opp_actions[i]),
                     )
-                    self.proc.choose(i, self.opp_side, choice)
+                    choices.append((i, self.opp_side, choice))
                     opp_pending.append((i, used_idx, prev_opp))
                 lane.mark_settled()
+            if choices:
+                self.proc.choose_batch(choices)
             self._pump_settle(auto)
             self._record_opp_rewards(opp_pending)
             pending = auto
@@ -487,80 +529,97 @@ class VectorizedShowdownEnv(gym.Env):
         truncated = np.zeros((self.batched_envs,), dtype=bool)
         infos: List[dict] = [{} for _ in range(self.batched_envs)]
 
-        # Opponent's decision for the *current* (parked) cycle: only lanes where
-        # the opponent must also act simultaneously (normal turn, or double-KO switch).
-        opp_active = np.zeros((self.batched_envs,), dtype=bool)
-        for i in range(self.batched_envs):
-            if self.lanes[i].request_kind(self.opp_side) in AGENT_KINDS:
-                opp_active[i] = True
-        opp_actions = (
-            self.opponent.act(opp_active, self._opp_obs_list(opp_active))
-            if opp_active.any()
-            else None
-        )
-
-        prev_eval: List[UniversalState] = [
-            lane.universal_state(self.eval_side) for lane in self.lanes
-        ]
-        eval_actions: List[int] = [0] * self.batched_envs
-        opp_pending: List[Tuple[int, int, UniversalState]] = []
-        for i in range(self.batched_envs):
-            lane = self.lanes[i]
-            eval_used_idx, eval_choice = self._resolve_action(
-                i, self.eval_side, self.eval_action_space, int(actions[i])
-            )
-            eval_actions[i] = int(eval_used_idx)
-            self.proc.choose(i, self.eval_side, eval_choice)
-            if opp_active[i]:
-                prev_opp = lane.universal_state(self.opp_side)
-                opp_used_idx, opp_choice = self._resolve_action(
-                    i, self.opp_side, self.opponent_action_space, int(opp_actions[i])
+        with self._profile_section("resolve_actions"):
+            # Opponent's decision for the *current* (parked) cycle: only lanes where
+            # the opponent must also act simultaneously (normal turn, or double-KO switch).
+            opp_active = np.zeros((self.batched_envs,), dtype=bool)
+            for i in range(self.batched_envs):
+                if self.lanes[i].request_kind(self.opp_side) in AGENT_KINDS:
+                    opp_active[i] = True
+            with self._profile_section("opponent_act"):
+                opp_actions = (
+                    self.opponent.act(opp_active, self._opp_obs_list(opp_active))
+                    if opp_active.any()
+                    else None
                 )
-                self.proc.choose(i, self.opp_side, opp_choice)
-                opp_pending.append((i, int(opp_used_idx), prev_opp))
-            lane.mark_settled()
 
-        self._pump_settle(list(range(self.batched_envs)))
+            prev_eval: List[UniversalState] = [
+                lane.universal_state(self.eval_side) for lane in self.lanes
+            ]
+            eval_actions: List[int] = [0] * self.batched_envs
+            opp_pending: List[Tuple[int, int, UniversalState]] = []
+            choices: List[Tuple[int, str, str]] = []
+            for i in range(self.batched_envs):
+                lane = self.lanes[i]
+                eval_used_idx, eval_choice = self._resolve_action(
+                    i, self.eval_side, self.eval_action_space, int(actions[i])
+                )
+                eval_actions[i] = int(eval_used_idx)
+                choices.append((i, self.eval_side, eval_choice))
+                if opp_active[i]:
+                    prev_opp = lane.universal_state(self.opp_side)
+                    opp_used_idx, opp_choice = self._resolve_action(
+                        i,
+                        self.opp_side,
+                        self.opponent_action_space,
+                        int(opp_actions[i]),
+                    )
+                    choices.append((i, self.opp_side, opp_choice))
+                    opp_pending.append((i, int(opp_used_idx), prev_opp))
+                lane.mark_settled()
+
+            with self._profile_section("choose_batch"):
+                self.proc.choose_batch(choices)
+
+        with self._profile_section("pump_settle"):
+            self._pump_settle(list(range(self.batched_envs)))
         self._record_opp_rewards(opp_pending)
 
         # Auto-resolve opponent-only cycles (e.g. opponent fainted, eval side waits)
         # until every live lane is parked back at an eval-side decision.
-        self._advance_lanes(list(range(self.batched_envs)))
+        with self._profile_section("advance_lanes"):
+            self._advance_lanes(list(range(self.batched_envs)))
 
         restarted: List[int] = []
-        for i in range(self.batched_envs):
-            lane = self.lanes[i]
-            self._lane_steps[i] += 1
-            new_eval = lane.universal_state(self.eval_side)
-            rewards[i] = float(self.eval_reward_function(prev_eval[i], new_eval))
-            if self._saving:
-                self._traj_actions[i].append(eval_actions[i])
-                self._traj_states[i].append(new_eval)
-            hit_limit = self._lane_steps[i] >= self.turn_limit
-            if lane.ended or hit_limit:
-                terminated[i] = bool(lane.ended) or hit_limit
-                truncated[i] = hit_limit and not lane.ended
-                infos[i]["won"] = bool(new_eval.battle_won)
+        with self._profile_section("rewards_restart"):
+            for i in range(self.batched_envs):
+                lane = self.lanes[i]
+                self._lane_steps[i] += 1
+                new_eval = lane.universal_state(self.eval_side)
+                rewards[i] = float(self.eval_reward_function(prev_eval[i], new_eval))
                 if self._saving:
-                    self._save_lane_outcome(i, new_eval)
-                self._start_lane(i)
-                restarted.append(i)
+                    self._traj_actions[i].append(eval_actions[i])
+                    self._traj_states[i].append(new_eval)
+                hit_limit = self._lane_steps[i] >= self.turn_limit
+                if lane.ended or hit_limit:
+                    terminated[i] = bool(lane.ended) or hit_limit
+                    truncated[i] = hit_limit and not lane.ended
+                    infos[i]["won"] = bool(new_eval.battle_won)
+                    if self._saving:
+                        self._save_lane_outcome(i, new_eval)
+                    self._start_lane(i)
+                    restarted.append(i)
 
         done_mask = terminated | truncated
         if done_mask.any():
             self.opponent.reset_lanes(done_mask)
         if restarted:
-            self._advance_lanes(restarted)
+            with self._profile_section("advance_lanes"):
+                self._advance_lanes(restarted)
             if self._saving:
                 for i in restarted:
                     self._init_lane_trajectory(i)
 
         obs_list, legal_actions = [], []
-        for i in range(self.batched_envs):
-            obs, info = self._build_eval_obs_and_info(i)
-            obs_list.append(obs)
-            legal_actions.append(info["legal_actions"])
-        batched_obs = stack_obs_dicts(obs_list)
+        with self._profile_section("build_obs"):
+            for i in range(self.batched_envs):
+                obs, info = self._build_eval_obs_and_info(i)
+                obs_list.append(obs)
+                legal_actions.append(info["legal_actions"])
+            batched_obs = stack_obs_dicts(obs_list)
+
+        if self._profile:
+            self._profile_steps += 1
 
         merged_info: Dict[str, Any] = {"legal_actions": legal_actions}
         for i, info in enumerate(infos):
@@ -600,6 +659,9 @@ class VectorizedShowdownEnv(gym.Env):
                 )
 
     def close(self) -> None:
+        if self._profile and self._profile_steps and not self._profile_reported:
+            self._profile_reported = True
+            print(self.profile_report(), flush=True)
         if getattr(self, "proc", None) is not None:
             self.proc.close()
             self.proc = None
@@ -716,6 +778,7 @@ def BattleAgainstMetamon(
     opponent_gpu_idx: Optional[int] = None,
     node_path: str = "node",
     showdown_dist: Optional[str] = None,
+    n_workers: int = 1,
     seed: Optional[int] = None,
 ):
     """Factory: vectorized Showdown env vs a metamon ``PretrainedModel`` opponent.
@@ -777,6 +840,7 @@ def BattleAgainstMetamon(
         save_results_to=save_results_to,
         node_path=node_path,
         showdown_dist=showdown_dist,
+        n_workers=n_workers,
         seed=seed,
     )
 
