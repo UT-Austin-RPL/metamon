@@ -1,6 +1,9 @@
 *logs_and_checkpoints/
 checkpoints/
 
+# Vectorized Showdown sim host — run `npm ci` in metamon/env/vectorized/
+metamon/env/vectorized/node_modules/
+
 # Weights & Biases
 wandb/
 

@@ -2,9 +2,9 @@
 
 Runs many battles in parallel inside a single Node process hosting N
 ``BattleStream``s (see ``battle_host.js``) and batches the in-the-loop opponent's
-neural-network inference across lanes. The evaluated agent plays p1; the opponent
-plays p2. New code lives entirely under this package; it imports the installed
-``pokemon-showdown`` npm package and does not touch ``server/pokemon-showdown``.
+neural-network inference across lanes. By default the evaluated agent plays Showdown
+``p1``; pass ``eval_player_side=1`` for ``p2``. New code lives entirely under this
+package and uses the installed ``pokemon-showdown`` npm package.
 """
 
 from .lane import StreamBattleLane
@@ -14,7 +14,12 @@ from .opponent import (
     RandomBatchedOpponent,
 )
 from .sim_process import ShowdownSimProcess, ShowdownSimProcessError
-from .vector_env import BattleShowdownVectorized, VectorizedShowdownEnv
+from .vector_env import (
+    BattleAgainstMetamon,
+    BattleShowdownVectorized,
+    ShowdownEnv,
+    VectorizedShowdownEnv,
+)
 
 __all__ = [
     "StreamBattleLane",
@@ -24,5 +29,7 @@ __all__ = [
     "RandomBatchedOpponent",
     "AmagoBatchedOpponent",
     "VectorizedShowdownEnv",
+    "ShowdownEnv",
+    "BattleAgainstMetamon",
     "BattleShowdownVectorized",
 ]
