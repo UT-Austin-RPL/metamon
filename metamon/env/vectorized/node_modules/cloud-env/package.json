@@ -1,0 +1,27 @@
+{
+  "name": "cloud-env",
+  "homepage": "https://github.com/ryanj/cloud-env",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryanj/cloud-env.git"
+  },
+  "version": "0.2.3",
+  "description": "Consistent naming for cloud-provided server config strings",
+  "dependencies": {},
+  "devDependencies": {},
+  "keywords": [
+    "config",
+    "paas",
+    "openshift",
+    "modulus",
+    "heroku",
+    "env",
+    "configuration"
+  ],
+  "main": "index.js",
+  "author": "ryanj",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ryanj/cloud-env/issues"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "metamon-vectorized-showdown-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node host that runs N in-process Pokemon Showdown BattleStreams and multiplexes them over JSON-lines stdio for Metamon's vectorized environment.",
+  "main": "battle_host.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node battle_host.js"
+  },
+  "dependencies": {
+    "pokemon-showdown": "^0.11.10"
+  }
+}

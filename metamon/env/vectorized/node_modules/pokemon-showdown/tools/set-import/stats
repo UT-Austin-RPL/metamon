@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+// Determines total battle counts per format since the beginning of stats
+// collection in order to determine what the fallback dates for the importer's
+// `STATISTICS` map should be.
+
+'use strict';
+
+require('child_process').execSync('node ' + __dirname + "/../../build");
+const Dex = require('../../sim/dex').Dex;
+global.toID = Dex.getId;
+
+const smogon = require('smogon');
+const importer = require('./importer');
+
+const formats = new Map();
+for (let gen = 1; gen <= 9; gen++) {
+	for (const tier of importer.TIERS) {
+		const format = Dex.formats.get(`gen${gen}${tier}`);
+		if (format.exists) {
+			formats.set(format.id, {});
+		}
+	}
+}
+
+(async () => {
+	const index = await importer.fetch(smogon.Statistics.URL);
+	const begin = new Date('Nov 2014');
+	const end = new Date(smogon.Statistics.latest(index));
+	end.setDate(end.getDate() + 1);
+	for (const d = begin; d <= end; d.setMonth(d.getMonth() + 1)) {
+		const month = `${d.getMonth() + 1}`.padStart(2, '0');
+		const date = `${1900 + d.getYear()}-${month}`;
+		for (const format of formats.keys()) {
+			try {
+				// The JSON files are quite large and needing to download and parse them to then
+				// extract the 'number of battles' field is much slower than instead grabbing the
+				// basic stats file and doing the comparatively cheap regex search.
+				const url = smogon.Statistics.url(date, format, 0).replace('chaos/', '').replace('.json', '.txt');
+				const usage = await importer.fetch(url);
+
+				if (usage) {
+					// https://www.smogon.com/stats/2016-10/cap-*.txt is invalid and doesn't match... *sigh*
+					const m = usage.match(/^ Total battles: (.*)/);
+					if (m) formats.get(format)[date] = Number(m[1]);
+				}
+			} catch (err) {
+				if (!err.message.startsWith('HTTP 404')) throw err;
+			}
+		}
+	}
+
+	console.log(JSON.stringify(Array.from(formats.entries()), null, 2));
+})().catch(err => console.error(err));
