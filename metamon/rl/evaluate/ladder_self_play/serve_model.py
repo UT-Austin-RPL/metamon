@@ -10,7 +10,11 @@ from metamon.env import get_metamon_teams, QueueOnLocalLadder, TeamSet
 from metamon.interface import ObservationSpace, RewardFunction, ActionSpace
 from metamon.rl.pretrained import get_pretrained_model
 from metamon.rl.metamon_to_amago import PSLadderAMAGOWrapper
-from metamon.rl.evaluate.common import load_config, merge_defaults, random_choice
+from metamon.rl.evaluate.common import (
+    load_config,
+    merge_defaults,
+    sample_policy_from_merged,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -132,22 +136,17 @@ if __name__ == "__main__":
     if "model_name" not in account_config:
         raise ValueError(f"Agent {base_username} missing required field: model_name")
 
-    # load model and team set
-    model_name = account_config["model_name"]
+    # team_set / checkpoint / temperature: see sample_policy_from_merged in common.py
+    policy = sample_policy_from_merged(base_username, account_config)
+    model_name = policy.model_name
     agent_maker = get_pretrained_model(model_name)
 
-    # team_set / checkpoint / temperature all support:
-    #   plain scalar, plain list, "range(...)", "linspace(...)", {weighted: {...}}
-    team_set_choice = random_choice(account_config["team_set"])
-    print(f"Using team_set {team_set_choice}")
-    player_team_set = get_metamon_teams(args.format, team_set_choice)
+    print(f"Using team_set {policy.team_set}")
+    player_team_set = get_metamon_teams(args.format, policy.team_set)
 
-    checkpoint = random_choice(account_config["checkpoints"])
-    print(f"Using checkpoint {checkpoint}")
-
-    temperature = float(random_choice(account_config.get("temperatures", [1.0])))
-    print(f"Using temperature {temperature}")
-    battle_backend = account_config["battle_backend"]
+    print(f"Using checkpoint {policy.checkpoint}")
+    print(f"Using temperature {policy.temperature}")
+    battle_backend = policy.battle_backend
     print(f"Using battle backend {battle_backend}")
 
     save_trajectories_to = os.path.join(
@@ -157,7 +156,7 @@ if __name__ == "__main__":
 
     # initialize agent
     agent = agent_maker.initialize_agent(
-        checkpoint=checkpoint, log=False, action_temperature=temperature
+        checkpoint=policy.checkpoint, log=False, action_temperature=policy.temperature
     )
     agent.env_mode = "sync"
     # create envs

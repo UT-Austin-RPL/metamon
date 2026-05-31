@@ -11,11 +11,13 @@ from .lane import StreamBattleLane
 from .opponent import (
     AmagoBatchedOpponent,
     BatchedOpponent,
+    ConfigBatchedOpponent,
     RandomBatchedOpponent,
 )
 from .sim_process import ShowdownSimProcess, ShowdownSimProcessError, make_sim_process
 from .vector_env import (
     BattleAgainstMetamon,
+    BattleAgainstOpponentPool,
     BattleShowdownVectorized,
     ShowdownEnv,
     VectorizedShowdownEnv,
@@ -29,8 +31,10 @@ __all__ = [
     "BatchedOpponent",
     "RandomBatchedOpponent",
     "AmagoBatchedOpponent",
+    "ConfigBatchedOpponent",
     "VectorizedShowdownEnv",
     "ShowdownEnv",
     "BattleAgainstMetamon",
+    "BattleAgainstOpponentPool",
     "BattleShowdownVectorized",
 ]

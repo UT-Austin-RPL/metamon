@@ -10,17 +10,23 @@ across the batch. Two implementations are provided:
     reproducing the batched forward from
     ``metamon.env.pokepy_battle.vector_env._opponent_actions`` (per-lane hidden
     state with snapshot/restore for inactive lanes, rl2 = [reward, prev_action]).
+  * :class:`ConfigBatchedOpponent` — one shared policy for all lanes; on full env
+    ``reset()``, sample an opponent from an :class:`~metamon.rl.evaluate.opponent_pool.OpponentPoolConfig`.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from .obs_utils import numpy_obs_to_torch, stack_obs_dicts
+
+if TYPE_CHECKING:
+    from metamon.env.wrappers import TeamSet
+    from metamon.rl.evaluate.common import PolicySpec
 
 
 class BatchedOpponent(ABC):
@@ -148,3 +154,90 @@ class AmagoBatchedOpponent(BatchedOpponent):
         self.hidden_state = self.policy.traj_encoder.init_hidden_state(
             self.num_lanes, self.device
         )
+
+
+class ConfigBatchedOpponent(BatchedOpponent):
+    """One opponent shared by all lanes; resample from config on env ``reset()`` only."""
+
+    def __init__(
+        self,
+        config: "OpponentPoolConfig",
+        num_lanes: int,
+        device: torch.device,
+        sample: bool = True,
+    ):
+        from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig
+
+        if not isinstance(config, OpponentPoolConfig):
+            raise TypeError(f"config must be OpponentPoolConfig, got {type(config)}")
+        self.config = config
+        self.num_lanes = int(num_lanes)
+        self.device = device
+        self.sample = sample
+        self.current_spec: Optional["PolicySpec"] = None
+        self.current_team: Optional["TeamSet"] = None
+        self._active_key: Optional[str] = None
+        self._bundle: Optional[AmagoBatchedOpponent] = None
+        self._cache: Dict[str, AmagoBatchedOpponent] = {}
+
+    def _make_bundle(self, spec: "PolicySpec") -> AmagoBatchedOpponent:
+        from metamon.rl.pretrained import get_pretrained_model
+
+        model = get_pretrained_model(spec.model_name)
+        agent = model.initialize_agent(
+            checkpoint=spec.checkpoint,
+            log=False,
+            action_temperature=spec.temperature,
+        )
+        action_dim = model.action_space.gym_space.n
+        if self._cache:
+            existing = next(iter(self._cache.values()))
+            if existing.action_dim != action_dim:
+                raise ValueError(
+                    "Opponent pool models must share action_dim; "
+                    f"got {action_dim} for {spec.model_name}"
+                )
+        agent.policy.to(self.device)
+        agent.policy.eval()
+        return AmagoBatchedOpponent(
+            policy=agent.policy,
+            device=self.device,
+            num_lanes=self.num_lanes,
+            action_dim=action_dim,
+            sample=self.sample,
+        )
+
+    def configure(self, spec: Optional["PolicySpec"] = None) -> "PolicySpec":
+        """Activate one sampled (or explicit) opponent for all lanes."""
+        if spec is None:
+            spec = self.config.sample_opponent()
+        self.current_spec = spec
+        self.current_team = self.config.team_set_for(spec.team_set)
+        key = spec.unique_key
+        if key not in self._cache:
+            self._cache[key] = self._make_bundle(spec)
+        self._bundle = self._cache[key]
+        self._active_key = key
+        self._bundle.reset_all()
+        return spec
+
+    def _require_bundle(self) -> AmagoBatchedOpponent:
+        if self._bundle is None:
+            raise RuntimeError(
+                "ConfigBatchedOpponent.configure() must run before act()"
+            )
+        return self._bundle
+
+    def act(self, active: np.ndarray, obs_list: List[dict]) -> np.ndarray:
+        return self._require_bundle().act(active, obs_list)
+
+    def observe(self, lane_idx: int, reward: float, action_idx: int) -> None:
+        self._require_bundle().observe(lane_idx, reward, action_idx)
+
+    def reset_lanes(self, done_mask: np.ndarray) -> None:
+        if self._bundle is not None:
+            self._bundle.reset_lanes(done_mask)
+
+    def reset_all(self) -> None:
+        if self._bundle is not None:
+            self._bundle.reset_all()

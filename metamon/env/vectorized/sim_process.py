@@ -298,14 +298,13 @@ class ShowdownSimProcess:
             if event == "_eof":
                 raise ShowdownSimProcessError(
                     "Showdown host stdout closed unexpectedly. stderr:\n"
-                    + "\n".join(self._stderr_lines[-20:])
+                    + self.stderr_tail
                 )
             return
         lane_id = msg.get("lane")
         stream = msg.get("stream")
         data = msg.get("data", "")
         if lane_id is not None:
-            # Drop chunks from a superseded battle on this lane.
             epoch = msg.get("epoch")
             if epoch is not None and epoch != self._epoch.get(int(lane_id)):
                 return
@@ -323,15 +322,7 @@ class ShowdownSimProcess:
         timeout: float = 30.0,
         idle_timeout: float = 10.0,
     ) -> None:
-        """Dispatch host chunks until ``predicate()`` is True.
-
-        Args:
-            predicate: Returns True once the caller has received everything it
-                needs (e.g. every pending lane has a fresh request or ended).
-            timeout: Hard cap on total wait time.
-            idle_timeout: Max time to wait for any single new chunk before
-                declaring the host stuck.
-        """
+        """Dispatch host chunks until ``predicate()`` is True."""
         if predicate():
             return
         deadline = time.monotonic() + timeout
@@ -340,18 +331,16 @@ class ShowdownSimProcess:
             if remaining <= 0:
                 raise ShowdownSimProcessError(
                     f"pump_until timed out after {timeout}s. stderr:\n"
-                    + "\n".join(self._stderr_lines[-20:])
+                    + self.stderr_tail
                 )
             try:
                 msg = self._inbox.get(timeout=min(idle_timeout, remaining))
             except queue.Empty:
                 raise ShowdownSimProcessError(
                     f"pump_until idle for {idle_timeout}s (host produced no "
-                    "output). stderr:\n" + "\n".join(self._stderr_lines[-20:])
+                    "output). stderr:\n" + self.stderr_tail
                 )
             self._dispatch(msg)
-            # Drain anything else already queued before re-checking the predicate
-            # (keeps us from checking the predicate on every single chunk).
             while True:
                 try:
                     msg = self._inbox.get_nowait()
