@@ -166,23 +166,19 @@ def pretrained_vs_metamon(
         seed=seed,
     )
     make_env = functools.partial(make_metamon_env, **env_kwargs)
-    if num_parallel == 1:
-        agent.env_mode = "sync"
-        agent.parallel_actors = 1
-        results = agent.evaluate_test(
-            [make_env],
-            timesteps=max(total_battles * 250, 250),
-            episodes=total_battles,
-        )
-    else:
-        agent.env_mode = "already_vectorized"
-        agent.parallel_actors = num_parallel
-        results = agent.evaluate_test(
-            make_env,
-            timesteps=max(total_battles * 250 // num_parallel, 250),
-            episodes=total_battles,
-        )
-    return results
+    from metamon.env.vectorized.amago_policy import vectorized_ladder_eval
+
+    sample = opponent_sample if opponent_sample is not None else True
+    timesteps = max(total_battles * 250 // num_parallel, 250)
+    return vectorized_ladder_eval(
+        policy=agent.policy,
+        device=agent.DEVICE,
+        make_env=make_env,
+        total_battles=total_battles,
+        action_dim=pretrained_model.action_space.gym_space.n,
+        sample=sample,
+        timesteps=timesteps,
+    )
 
 
 def _pretrained_on_ladder(

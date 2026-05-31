@@ -8,6 +8,7 @@ package and uses the installed ``pokemon-showdown`` npm package.
 """
 
 from .lane import StreamBattleLane
+from .amago_policy import AmagoLadderPolicyDriver, vectorized_ladder_eval
 from .opponent import (
     AmagoBatchedOpponent,
     BatchedOpponent,
@@ -31,7 +32,9 @@ __all__ = [
     "BatchedOpponent",
     "RandomBatchedOpponent",
     "AmagoBatchedOpponent",
+    "AmagoLadderPolicyDriver",
     "ConfigBatchedOpponent",
+    "vectorized_ladder_eval",
     "VectorizedShowdownEnv",
     "ShowdownEnv",
     "BattleAgainstMetamon",
