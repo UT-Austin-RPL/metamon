@@ -416,20 +416,26 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
 
 
 def make_metamon_env(*args, **kwargs):
-    """Showdown BattleStream env vs another metamon PretrainedModel.
+    """Showdown env with one shared opponent from :mod:`metamon.rl.evaluate.opponent_pool`.
 
-    ``batched_envs=1`` returns :class:`~metamon.env.vectorized.ShowdownEnv` wrapped
-    for AMAGO ``sync`` mode. ``batched_envs>1`` returns
-    :class:`~metamon.env.vectorized.VectorizedShowdownEnv` for
-    ``already_vectorized``.
+    Pass ``opponent_config`` or ``opponent_config_path`` (ladder self-play YAML).
+    Each full ``reset()`` samples an agent, checkpoint, temperature, and team set.
+    Use AMAGO ``force_reset_on_every=True`` to redraw between training epochs.
     """
-    from metamon.env.vectorized import BattleAgainstMetamon, ShowdownEnv
+    from metamon.env.vectorized import BattleAgainstOpponentPool, ShowdownEnv
 
+    opponent_config_path = kwargs.pop("opponent_config_path", None)
+    opponent_config = kwargs.pop("opponent_config", None)
     _block_warnings()
-    menv = BattleAgainstMetamon(*args, **kwargs)
+    menv = BattleAgainstOpponentPool(
+        *args,
+        opponent_config_path=opponent_config_path,
+        opponent_config=opponent_config,
+        **kwargs,
+    )
     print(
-        f"Made Metamon Showdown Env ({menv.batched_envs} lanes vs "
-        f"{menv.metamon_opponent_name}, eval_side={menv.eval_side})"
+        f"Made Metamon Showdown Env ({menv.batched_envs} lanes, opponent pool, "
+        f"eval_side={menv.eval_side})"
     )
     if isinstance(menv, ShowdownEnv):
         return MetamonAMAGOWrapper(menv)

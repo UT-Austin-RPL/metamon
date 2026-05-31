@@ -301,6 +301,32 @@ def merge_defaults(defaults: dict, overrides: dict) -> dict:
     return merged
 
 
+def sample_policy_from_merged(name: str, merged: dict) -> PolicySpec:
+    """Sample a :class:`PolicySpec` from a ladder-style merged agent config.
+
+    Draws from ``checkpoints`` / ``temperatures`` / ``team_set`` (or singular
+    ``checkpoint`` / ``temperature``) using :func:`random_choice`, matching
+    ``metamon.rl.evaluate.ladder_self_play.serve_model``.
+    """
+    model_name = merged.get("model_name", name)
+    checkpoint = random_choice(
+        merged.get("checkpoints", merged.get("checkpoint", [None]))
+    )
+    temperature = float(
+        random_choice(merged.get("temperatures", merged.get("temperature", [1.0])))
+    )
+    team_set = str(random_choice(merged.get("team_set", "competitive")))
+    battle_backend = str(merged.get("battle_backend", "metamon"))
+    return PolicySpec(
+        name=name,
+        model_name=model_name,
+        checkpoint=checkpoint,
+        temperature=temperature,
+        team_set=team_set,
+        battle_backend=battle_backend,
+    )
+
+
 def build_policy_spec(name: str, config: dict, defaults: dict) -> PolicySpec:
     """Build a PolicySpec from a per-policy config dict + defaults.
 

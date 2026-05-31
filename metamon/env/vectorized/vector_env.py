@@ -50,7 +50,8 @@ from .lane import (
     StreamBattleLane,
 )
 from .obs_utils import stack_obs_dicts
-from .opponent import BatchedOpponent, RandomBatchedOpponent
+from .opponent import BatchedOpponent, ConfigBatchedOpponent, RandomBatchedOpponent
+from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig, load_opponent_pool
 from .sim_process import ShowdownSimProcess, ShowdownSimProcessError, make_sim_process
 from .team_adapter import player_spec
 
@@ -220,6 +221,38 @@ class VectorizedShowdownEnv(gym.Env):
         return "\n".join(lines)
 
     # ----- lane lifecycle --------------------------------------------------
+
+    @staticmethod
+    def _coerce_policy_spec(value: Any) -> Optional["PolicySpec"]:
+        from metamon.rl.evaluate.common import PolicySpec
+
+        if value is None:
+            return None
+        if isinstance(value, PolicySpec):
+            return value
+        if isinstance(value, dict):
+            name = value.get("name") or value.get("model_name", "opponent")
+            return PolicySpec(
+                name=str(name),
+                model_name=str(value.get("model_name", name)),
+                checkpoint=value.get("checkpoint"),
+                temperature=float(value.get("temperature", 1.0)),
+                team_set=str(value.get("team_set", "competitive")),
+                battle_backend=str(value.get("battle_backend", "metamon")),
+            )
+        raise TypeError(
+            f"reset(options['opponent']) must be PolicySpec, dict, or None; "
+            f"got {type(value)}"
+        )
+
+    def _configure_opponent_for_reset(self, spec: Optional[Any] = None) -> None:
+        """Swap the shared in-the-loop opponent (full env reset only)."""
+        if not isinstance(self.opponent, ConfigBatchedOpponent):
+            return
+        resolved = self._coerce_policy_spec(spec)
+        active = self.opponent.configure(resolved)
+        self.opponent_team_set = self.opponent.current_team
+        self.metamon_opponent_name = active.short_label
 
     def _start_lane(self, i: int) -> None:
         lane = self.lanes[i]
@@ -505,6 +538,8 @@ class VectorizedShowdownEnv(gym.Env):
         if seed is not None:
             self._rng.seed(seed)
             np.random.seed(seed)
+        options = options or {}
+        self._configure_opponent_for_reset(options.get("opponent"))
         self.opponent.reset_all()
         for i in range(self.batched_envs):
             self._start_lane(i)
@@ -847,3 +882,86 @@ def BattleAgainstMetamon(
 
 # Backwards-compatible alias from early vectorized rollout.
 BattleShowdownVectorized = BattleAgainstMetamon
+
+
+def BattleAgainstOpponentPool(
+    battle_format: str,
+    observation_space: ObservationSpace,
+    action_space: ActionSpace,
+    reward_function: RewardFunction,
+    team_set,
+    opponent_config_path: Optional[str] = None,
+    opponent_config: Optional[OpponentPoolConfig] = None,
+    opponent_config_template_vars: Optional[Dict[str, str]] = None,
+    batched_envs: int = 8,
+    turn_limit: int = 200,
+    opponent_sample: bool = True,
+    eval_player_side: int = 0,
+    save_trajectories_to: Optional[str] = None,
+    save_results_to: Optional[str] = None,
+    player_username: Optional[str] = None,
+    device: Optional[str] = None,
+    opponent_gpu_idx: Optional[int] = None,
+    node_path: str = "node",
+    showdown_dist: Optional[str] = None,
+    n_workers: int = 1,
+    seed: Optional[int] = None,
+):
+    """Factory: one shared opponent sampled from an opponent pool config.
+
+    Each full env ``reset()`` calls :meth:`OpponentPoolConfig.sample_opponent`
+    (pick an agent, then sample checkpoint / temperature / team set). All lanes
+    share that opponent until the next ``reset()``. Pair with AMAGO
+    ``force_reset_on_every=True`` for diversity between training epochs.
+    """
+    from metamon.rl.pretrained import get_pretrained_model
+
+    if opponent_config is None:
+        if opponent_config_path is None:
+            raise ValueError("Provide opponent_config or opponent_config_path")
+        opponent_config = load_opponent_pool(
+            opponent_config_path,
+            battle_format=battle_format,
+            template_vars=opponent_config_template_vars,
+        )
+    if seed is not None:
+        opponent_config.rng.seed(seed)
+    opponent_device = _resolve_opponent_device(device, opponent_gpu_idx)
+
+    probe = opponent_config.sample_opponent()
+    probe_model = get_pretrained_model(probe.model_name)
+    opponent_obs_space = probe_model.observation_space
+    opponent_action_space = probe_model.action_space
+    opponent_reward_function = probe_model.reward_function
+
+    opponent = ConfigBatchedOpponent(
+        config=opponent_config,
+        num_lanes=int(batched_envs),
+        device=opponent_device,
+        sample=opponent_sample,
+    )
+
+    env_cls = ShowdownEnv if int(batched_envs) == 1 else VectorizedShowdownEnv
+    return env_cls(
+        player_team_set=team_set,
+        opponent_team_set=copy.deepcopy(team_set),
+        opponent=opponent,
+        opponent_obs_space=opponent_obs_space,
+        opponent_action_space=opponent_action_space,
+        eval_obs_space=observation_space,
+        eval_action_space=action_space,
+        eval_reward_function=reward_function,
+        opponent_reward_function=opponent_reward_function,
+        batched_envs=batched_envs,
+        battle_format=battle_format,
+        turn_limit=turn_limit,
+        opponent_model_name="opponent-pool",
+        eval_player_side=eval_player_side,
+        player_username=player_username,
+        save_trajectories_to=save_trajectories_to,
+        save_results_to=save_results_to,
+        node_path=node_path,
+        showdown_dist=showdown_dist,
+        n_workers=n_workers,
+        seed=seed,
+    )

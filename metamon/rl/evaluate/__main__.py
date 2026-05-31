@@ -88,11 +88,10 @@ def pretrained_vs_baselines(
 
 def pretrained_vs_metamon(
     pretrained_model: PretrainedModel,
-    opponent_model: PretrainedModel,
     battle_format: str,
     team_set: metamon.env.TeamSet,
+    team_set_name: str,
     checkpoint: Optional[int] = None,
-    opponent_checkpoint: Optional[int] = None,
     total_battles: int = 250,
     num_parallel: int = 8,
     n_workers: int = 1,
@@ -103,11 +102,50 @@ def pretrained_vs_metamon(
     log_to_wandb: bool = False,
     save_trajectories_to: Optional[str] = None,
     save_results_to: Optional[str] = None,
+    seed: Optional[int] = None,
+    opponent_agent: Optional[str] = None,
+    opponent_checkpoint: Optional[int] = None,
+    opponent_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Evaluate a pretrained model against another metamon model via vectorized Showdown."""
-    opponent_agent = opponent_model.initialize_agent(
-        checkpoint=opponent_checkpoint, log=False
+    """Evaluate via vectorized Showdown with one shared opponent from a pool config.
+
+    With ``opponent_agent``, builds a minimal one-agent config from the CLI name
+    and ``team_set_name``. With ``opponent_config_path``, loads a full YAML pool.
+    Each env ``reset()`` samples an agent, then checkpoint / temperature / team set.
+    """
+    import yaml
+
+    from metamon.rl.evaluate.opponent_pool import (
+        load_opponent_pool,
+        load_simple_opponent_pool,
+        make_simple_opponent_pool_dict,
     )
+
+    if opponent_config_path:
+        if opponent_agent:
+            raise ValueError("Use either opponent_config_path or opponent_agent")
+        pool_config = load_opponent_pool(
+            opponent_config_path, battle_format=battle_format
+        )
+    else:
+        if not opponent_agent:
+            raise ValueError("Provide opponent_agent or opponent_config_path")
+        pool_dict = make_simple_opponent_pool_dict(
+            opponent_agent=opponent_agent,
+            team_set=team_set_name,
+            checkpoint=opponent_checkpoint,
+            temperature=1.0,
+        )
+        print("Opponent pool config (auto-generated from CLI):")
+        print(yaml.dump(pool_dict, default_flow_style=False, sort_keys=False))
+        pool_config = load_simple_opponent_pool(
+            opponent_agent=opponent_agent,
+            battle_format=battle_format,
+            team_set=team_set_name,
+            checkpoint=opponent_checkpoint,
+            temperature=1.0,
+        )
+
     agent = pretrained_model.initialize_agent(
         checkpoint=checkpoint, log=log_to_wandb, action_temperature=action_temperature
     )
@@ -117,8 +155,7 @@ def pretrained_vs_metamon(
         action_space=pretrained_model.action_space,
         reward_function=pretrained_model.reward_function,
         team_set=team_set,
-        opponent_model=opponent_model,
-        opponent_checkpoint=opponent_checkpoint,
+        opponent_config=pool_config,
         batched_envs=num_parallel,
         n_workers=n_workers,
         opponent_sample=opponent_sample,
@@ -126,13 +163,10 @@ def pretrained_vs_metamon(
         save_trajectories_to=save_trajectories_to,
         save_results_to=save_results_to,
         opponent_gpu_idx=opponent_gpu_idx,
-        opponent_policy=opponent_agent.policy,
-        opponent_obs_space=opponent_model.observation_space,
-        opponent_action_space=opponent_model.action_space,
+        seed=seed,
     )
     make_env = functools.partial(make_metamon_env, **env_kwargs)
     if num_parallel == 1:
-        # Single battle -> ShowdownEnv + MetamonAMAGOWrapper (sync, not already_vectorized).
         agent.env_mode = "sync"
         agent.parallel_actors = 1
         results = agent.evaluate_test(
@@ -142,12 +176,7 @@ def pretrained_vs_metamon(
         )
     else:
         agent.env_mode = "already_vectorized"
-        # In already_vectorized mode AMAGO's inference loop initializes the policy's
-        # KV-cache hidden state with `parallel_actors` and reasons about per-lane
-        # `done` flags using the same value, so it must equal the env's batch size.
         agent.parallel_actors = num_parallel
-        # `already_vectorized` mode expects a single env-factory callable (the env
-        # itself owns the batch dimension), not a per-actor list.
         results = agent.evaluate_test(
             make_env,
             timesteps=max(total_battles * 250 // num_parallel, 250),
@@ -426,16 +455,22 @@ def _get_default_eval(args, base_eval_kwargs):
         )
         return pretrained_vs_challenge
     elif args.eval_type == "metamon":
-        if not args.opponent_agent:
-            raise ValueError("--eval_type metamon requires --opponent_agent")
-        # pretrained_vs_metamon uses the vectorized Showdown backend and does not
-        # accept the poke-env-only kwargs that the shared base dict carries.
         base_eval_kwargs.pop("battle_backend", None)
         base_eval_kwargs.pop("team_preview_model", None)
+        if args.opponent_config and args.opponent_agent:
+            raise ValueError(
+                "Use either --opponent_config or --opponent_agent, not both"
+            )
+        if not args.opponent_config and not args.opponent_agent:
+            raise ValueError(
+                "--eval_type metamon requires --opponent_agent or --opponent_config"
+            )
         base_eval_kwargs.update(
             {
-                "opponent_model": get_pretrained_model(args.opponent_agent),
+                "team_set_name": args.team_set,
+                "opponent_agent": args.opponent_agent,
                 "opponent_checkpoint": args.opponent_checkpoint,
+                "opponent_config_path": args.opponent_config,
                 "num_parallel": args.num_parallel,
                 "n_workers": args.n_workers,
                 "opponent_sample": args.opponent_sample,
@@ -655,7 +690,19 @@ def add_cli(parser):
         "--opponent_agent",
         default=None,
         choices=get_pretrained_model_names(),
-        help="Opponent pretrained model name (required for --eval_type metamon).",
+        help=(
+            "Opponent model for --eval_type metamon. Builds a minimal one-agent pool "
+            "from this name and --team_set (printed at startup). Omit when using "
+            "--opponent_config."
+        ),
+    )
+    parser.add_argument(
+        "--opponent_config",
+        default=None,
+        help=(
+            "YAML opponent pool for --eval_type metamon (ladder self-play format, "
+            "multiple agents). Mutually exclusive with --opponent_agent."
+        ),
     )
     parser.add_argument(
         "--opponent_checkpoint",
