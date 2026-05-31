@@ -77,6 +77,27 @@ python -m metamon.rl.evaluate --eval_type challenge --agent SyntheticRLV2 \
 
 The acceptor must be online before the challenger starts sending challenges.
 
+#### `metamon` — Vectorized Showdown Self-Play
+
+Head-to-head evaluation against another pretrained metamon model using the
+vectorized Showdown sim (``BattleAgainstMetamon``). Runs many battles in parallel
+inside one Node process and batches the opponent's NN inference across lanes.
+
+```bash
+python -m metamon.rl.evaluate \
+    --eval_type metamon \
+    --agent Kakuna \
+    --opponent_agent Kadabra \
+    --gens 9 \
+    --formats ou \
+    --total_battles 100 \
+    --num_parallel 8
+```
+
+Use ``--eval_player_side 1`` to have the evaluated agent play Showdown ``p2``
+instead of ``p1`` (same diagnostic as the old pokepy path). Use
+``--no-opponent-sample`` for deterministic opponent argmax.
+
 ### Common Flags
 
 | Flag | Default | Description |

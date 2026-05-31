@@ -1,0 +1,2 @@
+# Vectorized Showdown host (install: cd metamon/env/vectorized && npm ci)
+vectorized/node_modules/

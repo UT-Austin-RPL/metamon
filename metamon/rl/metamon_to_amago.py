@@ -271,14 +271,15 @@ def make_placeholder_experiment(
 
 
 class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
-    """AMAGOEnv wrapper for single-env pokepy / poke-env gymnasium environments.
+    """AMAGOEnv wrapper for single-env Showdown / pokepy / poke-env gym envs.
 
-    Use with :class:`~metamon.env.pokepy_battle.PokepyEnv` (``batched_envs=1``)
-    or :class:`~metamon.env.PokeEnvWrapper`. Run AMAGO in ``env_mode="sync"`` with
+    Use with :class:`~metamon.env.vectorized.ShowdownEnv`,
+    :class:`~metamon.env.pokepy_battle.PokepyEnv` (``batched_envs=1``), or
+    :class:`~metamon.env.PokeEnvWrapper`. Run AMAGO in ``env_mode="sync"`` with
     ``parallel_actors=1`` — not ``already_vectorized``.
     """
 
-    def __init__(self, metamon_env: PokeEnvWrapper | PokepyEnv):
+    def __init__(self, metamon_env):
         self.metamon_action_space = metamon_env.metamon_action_space
         super().__init__(
             env=metamon_env,
@@ -330,7 +331,7 @@ class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
 
 
 class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
-    """AMAGOEnv wrapper for batched pokepy VectorizedPokepyEnv (already_vectorized mode)."""
+    """AMAGOEnv wrapper for batched Showdown / pokepy vector envs (already_vectorized)."""
 
     def __init__(self, metamon_env):
         self._metamon_env = metamon_env
@@ -409,6 +410,27 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
     @property
     def env_name(self):
         return self.env.env_name
+
+
+def make_metamon_env(*args, **kwargs):
+    """Showdown BattleStream env vs another metamon PretrainedModel.
+
+    ``batched_envs=1`` returns :class:`~metamon.env.vectorized.ShowdownEnv` wrapped
+    for AMAGO ``sync`` mode. ``batched_envs>1`` returns
+    :class:`~metamon.env.vectorized.VectorizedShowdownEnv` for
+    ``already_vectorized``.
+    """
+    from metamon.env.vectorized import BattleAgainstMetamon, ShowdownEnv
+
+    _block_warnings()
+    menv = BattleAgainstMetamon(*args, **kwargs)
+    print(
+        f"Made Metamon Showdown Env ({menv.batched_envs} lanes vs "
+        f"{menv.metamon_opponent_name}, eval_side={menv.eval_side})"
+    )
+    if isinstance(menv, ShowdownEnv):
+        return MetamonAMAGOWrapper(menv)
+    return VectorizedMetamonAMAGOWrapper(menv)
 
 
 def make_pokepy_env(*args, **kwargs):

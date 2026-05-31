@@ -2,15 +2,16 @@
 
 N battles run inside one Node process (``battle_host.js``) hosting N
 ``BattleStream``s; Python advances them in lockstep and batches the opponent's
-neural-network forward pass across lanes. The evaluated agent always plays p1;
-the opponent plays p2.
+neural-network forward pass across lanes. By default the evaluated agent plays
+Showdown ``p1`` and the in-the-loop opponent plays ``p2``; ``eval_player_side``
+selects the other physical side instead (diagnostic for side-based asymmetries).
 
 Control flow is *request driven* (Showdown resolves all mid-turn sequencing for
-us): each ``step`` consumes the agent's action for the lane's current p1 decision
-(a normal move or a forced switch), applies the opponent's p2 decision for the
-same cycle when there is one, advances the sim, and then auto-resolves any cycles
-where only the opponent must act (e.g. the opponent replacing a fainted Pokemon
-while p1 waits) before parking each lane back at the next p1 decision.
+us): each ``step`` consumes the agent's action for the lane's current eval-side
+decision (a normal move or a forced switch), applies the opponent's decision for
+the same cycle when there is one, advances the sim, and then auto-resolves any
+cycles where only the opponent must act before parking each lane back at the next
+eval-side decision.
 
 The agent-facing contracts (``ObservationSpace``, ``DefaultActionSpace`` →
 ``Discrete(13)``, ``RewardFunction``, ``illegal_actions`` in the obs) match
@@ -20,12 +21,14 @@ The agent-facing contracts (``ObservationSpace``, ``DefaultActionSpace`` →
 from __future__ import annotations
 
 import copy
+import json
 import os
 import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
+import lz4.frame
 import numpy as np
 
 from metamon.interface import (
@@ -49,12 +52,9 @@ from .opponent import BatchedOpponent, RandomBatchedOpponent
 from .sim_process import ShowdownSimProcess
 from .team_adapter import player_spec
 
-EVAL_SIDE = "p1"
-OPP_SIDE = "p2"
-
 
 class VectorizedShowdownEnv(gym.Env):
-    """N-lane Showdown env: p1 is the eval agent, p2 is a batched NN opponent."""
+    """N-lane Showdown env with a batched in-the-loop NN opponent."""
 
     metadata = {"render_modes": []}
 
@@ -74,11 +74,19 @@ class VectorizedShowdownEnv(gym.Env):
         turn_limit: int = 200,
         opponent_model_name: str = "opponent",
         player_username: Optional[str] = None,
+        save_trajectories_to: Optional[str] = None,
         save_results_to: Optional[str] = None,
         node_path: str = "node",
         showdown_dist: Optional[str] = None,
         seed: Optional[int] = None,
+        eval_player_side: int = 0,
     ):
+        if eval_player_side not in (0, 1):
+            raise ValueError(f"eval_player_side must be 0 or 1; got {eval_player_side}")
+        # Which Showdown side the outer AMAGO agent plays; opponent plays the other.
+        self.eval_side = "p1" if int(eval_player_side) == 0 else "p2"
+        self.opp_side = "p2" if self.eval_side == "p1" else "p1"
+
         self.player_team_set = player_team_set
         self.opponent_team_set = opponent_team_set
         self.opponent = opponent
@@ -105,7 +113,22 @@ class VectorizedShowdownEnv(gym.Env):
         self.metamon_action_space = eval_action_space
         self.metamon_obs_space = eval_obs_space
 
+        if save_trajectories_to is not None:
+            self.save_trajectories_to = os.path.join(
+                save_trajectories_to, battle_format
+            )
+            os.makedirs(self.save_trajectories_to, exist_ok=True)
+        else:
+            self.save_trajectories_to = None
         self.save_results_to = save_results_to
+        self._saving = (
+            self.save_trajectories_to is not None or self.save_results_to is not None
+        )
+        self._traj_states: List[List[UniversalState]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._traj_actions: List[List[int]] = [[] for _ in range(self.batched_envs)]
+
         self.player_username = player_username or (
             f"MMVecSD-{''.join(str(random.randint(0, 9)) for _ in range(8))}"
         )
@@ -166,13 +189,22 @@ class VectorizedShowdownEnv(gym.Env):
         self.opponent_obs_spaces[i].reset()
         self._lane_steps[i] = 0
         self._last_opp_obs[i] = None
-        p1_spec, p1_file = player_spec(
-            f"p1-{i}", self.player_team_set, self.battle_format
-        )
-        p2_spec, _ = player_spec(f"p2-{i}", self.opponent_team_set, self.battle_format)
-        self._team_files[i] = p1_file
+        eval_team = self.player_team_set
+        opp_team = self.opponent_team_set
+        if self.eval_side == "p1":
+            p1_team, p2_team = eval_team, opp_team
+        else:
+            p1_team, p2_team = opp_team, eval_team
+        p1_spec, p1_file = player_spec(f"p1-{i}", p1_team, self.battle_format)
+        p2_spec, p2_file = player_spec(f"p2-{i}", p2_team, self.battle_format)
+        self._team_files[i] = p1_file if self.eval_side == "p1" else p2_file
         seed = self._random_seed()
         self.proc.start_battle(i, self.battle_format, p1=p1_spec, p2=p2_spec, seed=seed)
+
+    def _init_lane_trajectory(self, i: int) -> None:
+        """Seed per-lane trajectory buffers with the eval POV at battle start."""
+        self._traj_states[i] = [self.lanes[i].universal_state(self.eval_side)]
+        self._traj_actions[i] = []
 
     def _random_seed(self):
         # Showdown PRNG seed: four 16-bit ints (sodium seed also accepted as str).
@@ -189,9 +221,9 @@ class VectorizedShowdownEnv(gym.Env):
 
     def _build_eval_obs_and_info(self, i: int) -> Tuple[dict, dict]:
         lane = self.lanes[i]
-        state = lane.universal_state(EVAL_SIDE)
+        state = lane.universal_state(self.eval_side)
         obs = self.eval_obs_spaces[i].state_to_obs(state)
-        legal = lane.legal_action_indices(EVAL_SIDE, self.eval_action_space, state)
+        legal = lane.legal_action_indices(self.eval_side, self.eval_action_space, state)
         obs["illegal_actions"] = self._illegal_mask(
             legal, self.eval_action_space.gym_space.n
         )
@@ -199,9 +231,11 @@ class VectorizedShowdownEnv(gym.Env):
 
     def _build_opp_obs(self, i: int) -> dict:
         lane = self.lanes[i]
-        state = lane.universal_state(OPP_SIDE)
+        state = lane.universal_state(self.opp_side)
         obs = self.opponent_obs_spaces[i].state_to_obs(state)
-        legal = lane.legal_action_indices(OPP_SIDE, self.opponent_action_space, state)
+        legal = lane.legal_action_indices(
+            self.opp_side, self.opponent_action_space, state
+        )
         obs["illegal_actions"] = self._illegal_mask(
             legal, self.opponent_action_space.gym_space.n
         )
@@ -253,7 +287,9 @@ class VectorizedShowdownEnv(gym.Env):
             self.proc.choose(i, side, DEFAULT_CHOICE)
             return
         action_space = (
-            self.eval_action_space if side == EVAL_SIDE else self.opponent_action_space
+            self.eval_action_space
+            if side == self.eval_side
+            else self.opponent_action_space
         )
         state = lane.universal_state(side)
         legal = lane.legal_action_indices(side, action_space, state)
@@ -318,7 +354,7 @@ class VectorizedShowdownEnv(gym.Env):
                 # *both* sides together; an error re-prompt advances only the
                 # erroring side (or, for some errors, re-emits no request at all).
                 for s in SIDES:
-                    other = OPP_SIDE if s == EVAL_SIDE else EVAL_SIDE
+                    other = self.opp_side if s == self.eval_side else self.eval_side
                     advanced = lane.request_serial[s] > answered[i][s]
                     other_advanced = lane.request_serial[other] > answered[i][other]
                     if (
@@ -361,7 +397,7 @@ class VectorizedShowdownEnv(gym.Env):
 
     def _advance_lanes(self, lane_indices: List[int]) -> None:
         """Auto-resolve teampreview + opponent-only cycles until each lane is
-        parked at a p1 agent decision (or ended)."""
+        parked at an eval-side agent decision (or ended)."""
         pending = list(lane_indices)
         while pending:
             # Wait-only barrier (no choices owed yet this iteration); the previous
@@ -373,10 +409,10 @@ class VectorizedShowdownEnv(gym.Env):
                 lane = self.lanes[i]
                 if lane.ended:
                     continue
-                if lane.request_kind(EVAL_SIDE) in AGENT_KINDS:
+                if lane.request_kind(self.eval_side) in AGENT_KINDS:
                     continue  # eval owes a decision -> parked, stop advancing it
                 auto.append(i)
-                if lane.request_kind(OPP_SIDE) in AGENT_KINDS:
+                if lane.request_kind(self.opp_side) in AGENT_KINDS:
                     opp_active[i] = True
             if not auto:
                 break
@@ -388,18 +424,21 @@ class VectorizedShowdownEnv(gym.Env):
             opp_pending: List[Tuple[int, int, UniversalState]] = []
             for i in auto:
                 lane = self.lanes[i]
-                k1 = lane.request_kind(EVAL_SIDE)
-                k2 = lane.request_kind(OPP_SIDE)
+                k1 = lane.request_kind(self.eval_side)
+                k2 = lane.request_kind(self.opp_side)
                 if k1 == KIND_TEAMPREVIEW:
-                    self.proc.choose(i, EVAL_SIDE, DEFAULT_CHOICE)
+                    self.proc.choose(i, self.eval_side, DEFAULT_CHOICE)
                 if k2 == KIND_TEAMPREVIEW:
-                    self.proc.choose(i, OPP_SIDE, DEFAULT_CHOICE)
+                    self.proc.choose(i, self.opp_side, DEFAULT_CHOICE)
                 elif k2 in AGENT_KINDS:
-                    prev_opp = lane.universal_state(OPP_SIDE)
+                    prev_opp = lane.universal_state(self.opp_side)
                     used_idx, choice = self._resolve_action(
-                        i, OPP_SIDE, self.opponent_action_space, int(opp_actions[i])
+                        i,
+                        self.opp_side,
+                        self.opponent_action_space,
+                        int(opp_actions[i]),
                     )
-                    self.proc.choose(i, OPP_SIDE, choice)
+                    self.proc.choose(i, self.opp_side, choice)
                     opp_pending.append((i, used_idx, prev_opp))
                 lane.mark_settled()
             self._pump_settle(auto)
@@ -414,7 +453,7 @@ class VectorizedShowdownEnv(gym.Env):
                 self.opponent.observe(i, 0.0, used_idx)
             return
         for i, used_idx, prev_opp in opp_pending:
-            new_opp = self.lanes[i].universal_state(OPP_SIDE)
+            new_opp = self.lanes[i].universal_state(self.opp_side)
             reward = float(self.opponent_reward_function(prev_opp, new_opp))
             self.opponent.observe(i, reward, used_idx)
 
@@ -428,6 +467,9 @@ class VectorizedShowdownEnv(gym.Env):
         for i in range(self.batched_envs):
             self._start_lane(i)
         self._advance_lanes(list(range(self.batched_envs)))
+        if self._saving:
+            for i in range(self.batched_envs):
+                self._init_lane_trajectory(i)
 
         obs_list, infos = [], []
         for i in range(self.batched_envs):
@@ -446,10 +488,10 @@ class VectorizedShowdownEnv(gym.Env):
         infos: List[dict] = [{} for _ in range(self.batched_envs)]
 
         # Opponent's decision for the *current* (parked) cycle: only lanes where
-        # p2 must also act simultaneously (normal turn, or double-KO switch).
+        # the opponent must also act simultaneously (normal turn, or double-KO switch).
         opp_active = np.zeros((self.batched_envs,), dtype=bool)
         for i in range(self.batched_envs):
-            if self.lanes[i].request_kind(OPP_SIDE) in AGENT_KINDS:
+            if self.lanes[i].request_kind(self.opp_side) in AGENT_KINDS:
                 opp_active[i] = True
         opp_actions = (
             self.opponent.act(opp_active, self._opp_obs_list(opp_active))
@@ -458,44 +500,49 @@ class VectorizedShowdownEnv(gym.Env):
         )
 
         prev_eval: List[UniversalState] = [
-            lane.universal_state(EVAL_SIDE) for lane in self.lanes
+            lane.universal_state(self.eval_side) for lane in self.lanes
         ]
+        eval_actions: List[int] = [0] * self.batched_envs
         opp_pending: List[Tuple[int, int, UniversalState]] = []
         for i in range(self.batched_envs):
             lane = self.lanes[i]
-            _, eval_choice = self._resolve_action(
-                i, EVAL_SIDE, self.eval_action_space, int(actions[i])
+            eval_used_idx, eval_choice = self._resolve_action(
+                i, self.eval_side, self.eval_action_space, int(actions[i])
             )
-            self.proc.choose(i, EVAL_SIDE, eval_choice)
+            eval_actions[i] = int(eval_used_idx)
+            self.proc.choose(i, self.eval_side, eval_choice)
             if opp_active[i]:
-                prev_opp = lane.universal_state(OPP_SIDE)
-                used_idx, opp_choice = self._resolve_action(
-                    i, OPP_SIDE, self.opponent_action_space, int(opp_actions[i])
+                prev_opp = lane.universal_state(self.opp_side)
+                opp_used_idx, opp_choice = self._resolve_action(
+                    i, self.opp_side, self.opponent_action_space, int(opp_actions[i])
                 )
-                self.proc.choose(i, OPP_SIDE, opp_choice)
-                opp_pending.append((i, used_idx, prev_opp))
+                self.proc.choose(i, self.opp_side, opp_choice)
+                opp_pending.append((i, int(opp_used_idx), prev_opp))
             lane.mark_settled()
 
         self._pump_settle(list(range(self.batched_envs)))
         self._record_opp_rewards(opp_pending)
 
-        # Auto-resolve opponent-only cycles (e.g. opponent fainted, p1 waits)
-        # until every live lane is parked back at a p1 decision.
+        # Auto-resolve opponent-only cycles (e.g. opponent fainted, eval side waits)
+        # until every live lane is parked back at an eval-side decision.
         self._advance_lanes(list(range(self.batched_envs)))
 
         restarted: List[int] = []
         for i in range(self.batched_envs):
             lane = self.lanes[i]
             self._lane_steps[i] += 1
-            new_eval = lane.universal_state(EVAL_SIDE)
+            new_eval = lane.universal_state(self.eval_side)
             rewards[i] = float(self.eval_reward_function(prev_eval[i], new_eval))
+            if self._saving:
+                self._traj_actions[i].append(eval_actions[i])
+                self._traj_states[i].append(new_eval)
             hit_limit = self._lane_steps[i] >= self.turn_limit
             if lane.ended or hit_limit:
                 terminated[i] = bool(lane.ended) or hit_limit
                 truncated[i] = hit_limit and not lane.ended
                 infos[i]["won"] = bool(new_eval.battle_won)
-                if self.save_results_to is not None:
-                    self._save_result(i, new_eval)
+                if self._saving:
+                    self._save_lane_outcome(i, new_eval)
                 self._start_lane(i)
                 restarted.append(i)
 
@@ -504,6 +551,9 @@ class VectorizedShowdownEnv(gym.Env):
             self.opponent.reset_lanes(done_mask)
         if restarted:
             self._advance_lanes(restarted)
+            if self._saving:
+                for i in restarted:
+                    self._init_lane_trajectory(i)
 
         obs_list, legal_actions = [], []
         for i in range(self.batched_envs):
@@ -519,16 +569,35 @@ class VectorizedShowdownEnv(gym.Env):
                 merged_info[k][i] = v
         return batched_obs, rewards, terminated, truncated, merged_info
 
-    def _save_result(self, i: int, final_state: UniversalState) -> None:
+    def _save_lane_outcome(self, i: int, final_state: UniversalState) -> None:
+        """Write a finished lane's trajectory and/or result log (parsed-replay format)."""
         result = "WIN" if final_state.battle_won else "LOSS"
         battle_id = "".join(str(random.randint(0, 9)) for _ in range(10))
         timestamp = datetime.now().strftime("%m-%d-%Y-%H:%M:%S")
-        with open(self.save_results_to, "a") as f:
-            f.write(
-                f"{self.player_username},{self._team_files[i]},"
-                f"{self.metamon_opponent_name},{result},{int(self._lane_steps[i])},"
-                f"{battle_id}\n"
+        opponent_name = self.metamon_opponent_name
+
+        if self.save_trajectories_to is not None:
+            filename = (
+                f"metamon-{self.metamon_battle_format}-{battle_id}_Unrated_"
+                f"{self.player_username}_vs_{opponent_name}_{timestamp}_{result}.json.lz4"
             )
+            output_json = {
+                "states": [s.to_dict() for s in self._traj_states[i]],
+                "actions": self._traj_actions[i] + [-1],
+            }
+            path = os.path.join(self.save_trajectories_to, filename)
+            temp_path = path + ".tmp"
+            with lz4.frame.open(temp_path, "wb") as f:
+                f.write(json.dumps(output_json).encode("utf-8"))
+            os.rename(temp_path, path)
+
+        if self.save_results_to is not None:
+            with open(self.save_results_to, "a") as f:
+                f.write(
+                    f"{self.player_username},{self._team_files[i]},"
+                    f"{opponent_name},{result},{int(self._lane_steps[i])},"
+                    f"{battle_id}\n"
+                )
 
     def close(self) -> None:
         if getattr(self, "proc", None) is not None:
@@ -548,6 +617,73 @@ class VectorizedShowdownEnv(gym.Env):
             pass
 
 
+class ShowdownEnv(VectorizedShowdownEnv):
+    """Single-battle Showdown env — for debugging and AMAGO ``sync`` eval.
+
+    Presents a standard single-env gym interface (no leading batch dimension on
+    obs/rewards/dones). Wrap with
+    :class:`~metamon.rl.metamon_to_amago.MetamonAMAGOWrapper` and run AMAGO in
+    ``env_mode="sync"`` with ``parallel_actors=1`` — NOT ``already_vectorized``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        batched = kwargs.get("batched_envs", 1)
+        if int(batched) != 1:
+            raise ValueError(
+                f"ShowdownEnv is single-battle; batched_envs must be 1, got {batched}"
+            )
+        kwargs["batched_envs"] = 1
+        super().__init__(*args, **kwargs)
+        self._init_sync_observation_space()
+
+    def _init_sync_observation_space(self) -> None:
+        base_space = self.eval_obs_space.gym_space
+        if isinstance(base_space, gym.spaces.Dict):
+            spaces = {}
+            for k, space in base_space.spaces.items():
+                if isinstance(space, gym.spaces.Box):
+                    spaces[k] = gym.spaces.Box(
+                        low=-np.inf,
+                        high=np.inf,
+                        shape=space.shape,
+                        dtype=space.dtype,
+                    )
+                else:
+                    spaces[k] = space
+            self.observation_space = gym.spaces.Dict(spaces)
+        else:
+            self.observation_space = base_space
+        self.observation_space["illegal_actions"] = gym.spaces.Box(
+            low=0,
+            high=1,
+            shape=(self.eval_action_space.gym_space.n,),
+            dtype=bool,
+        )
+
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        batched_obs, merged_info = super().reset(seed=seed, options=options)
+        obs = {k: v[0] for k, v in batched_obs.items()}
+        return obs, {"legal_actions": merged_info["legal_actions"][0]}
+
+    def step(self, action):
+        batched_obs, rewards, terminated, truncated, merged_info = super().step(
+            np.asarray([action])
+        )
+        obs = {k: v[0] for k, v in batched_obs.items()}
+        info = {"legal_actions": merged_info["legal_actions"][0]}
+        for k, v in merged_info.items():
+            if k == "legal_actions":
+                continue
+            info[k] = v[0] if isinstance(v, list) else v
+        return (
+            obs,
+            float(rewards[0]),
+            bool(terminated[0]),
+            bool(truncated[0]),
+            info,
+        )
+
+
 def _resolve_opponent_device(device, opponent_gpu_idx):
     import torch
 
@@ -556,7 +692,7 @@ def _resolve_opponent_device(device, opponent_gpu_idx):
     return torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
 
-def BattleShowdownVectorized(
+def BattleAgainstMetamon(
     battle_format: str,
     observation_space: ObservationSpace,
     action_space: ActionSpace,
@@ -572,6 +708,8 @@ def BattleShowdownVectorized(
     batched_envs: int = 8,
     turn_limit: int = 200,
     opponent_sample: bool = True,
+    eval_player_side: int = 0,
+    save_trajectories_to: Optional[str] = None,
     save_results_to: Optional[str] = None,
     player_username: Optional[str] = None,
     device: Optional[str] = None,
@@ -579,12 +717,13 @@ def BattleShowdownVectorized(
     node_path: str = "node",
     showdown_dist: Optional[str] = None,
     seed: Optional[int] = None,
-) -> VectorizedShowdownEnv:
+):
     """Factory: vectorized Showdown env vs a metamon ``PretrainedModel`` opponent.
 
-    Parallels ``BattlePokepyVectorized`` so it slots into the same eval/training
-    harness, and produces an env compatible with ``VectorizedMetamonAMAGOWrapper``
-    (``illegal_actions`` in obs, ``env_mode='already_vectorized'``).
+    ``batched_envs=1`` returns :class:`ShowdownEnv` for AMAGO ``sync`` mode;
+    ``batched_envs>1`` returns :class:`VectorizedShowdownEnv` for
+    ``already_vectorized``. Compatible with the metamon eval harness and
+    ``VectorizedMetamonAMAGOWrapper`` (``illegal_actions`` in obs).
     """
     from metamon.rl.pretrained import PretrainedModel
     from .opponent import AmagoBatchedOpponent
@@ -617,7 +756,8 @@ def BattleShowdownVectorized(
         sample=opponent_sample,
     )
 
-    return VectorizedShowdownEnv(
+    env_cls = ShowdownEnv if int(batched_envs) == 1 else VectorizedShowdownEnv
+    return env_cls(
         player_team_set=team_set,
         opponent_team_set=opponent_team_set or copy.deepcopy(team_set),
         opponent=opponent,
@@ -631,9 +771,15 @@ def BattleShowdownVectorized(
         battle_format=battle_format,
         turn_limit=turn_limit,
         opponent_model_name=opponent_model.model_name,
+        eval_player_side=eval_player_side,
         player_username=player_username,
+        save_trajectories_to=save_trajectories_to,
         save_results_to=save_results_to,
         node_path=node_path,
         showdown_dist=showdown_dist,
         seed=seed,
     )
+
+
+# Backwards-compatible alias from early vectorized rollout.
+BattleShowdownVectorized = BattleAgainstMetamon
