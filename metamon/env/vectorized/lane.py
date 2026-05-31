@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import metamon.backend
 from metamon.env.metamon_battle import MetamonBackendBattle
@@ -66,6 +66,8 @@ class StreamBattleLane:
         self.ended = False
         self.winner: Optional[str] = None
         self.error: Dict[str, Optional[str]] = {s: None for s in SIDES}
+        self._mutation_serial: Dict[str, int] = {s: 0 for s in SIDES}
+        self._state_cache: Dict[str, Tuple[int, UniversalState]] = {}
         self.reset_state()
 
     # ----- lifecycle -------------------------------------------------------
@@ -87,8 +89,15 @@ class StreamBattleLane:
             self.request_serial[side] = 0
             self.settled_serial[side] = 0
             self.error[side] = None
+            self._mutation_serial[side] = 0
+            self._state_cache.pop(side, None)
         self.ended = False
         self.winner = None
+
+    def _touch_side(self, side: str) -> None:
+        """Record that ``side``'s parsed battle state changed."""
+        self._mutation_serial[side] += 1
+        self._state_cache.pop(side, None)
 
     def battle(self, side: str) -> MetamonBackendBattle:
         return self._battles[side]
@@ -99,7 +108,7 @@ class StreamBattleLane:
         if getattr(self, "_trace", None) is not None:
             self._trace.append((stream, data.split("\n", 1)[0][:50]))
         if stream == "omniscient":
-            # Backstop win/tie detection (also seen on player streams).
+            # Legacy host versions only; win/tie is handled on player streams.
             for line in data.split("\n"):
                 self._scan_global(line)
             return
@@ -126,10 +135,12 @@ class StreamBattleLane:
                         continue
                     battle.parse_request(req)
                     self._on_request(stream, req)
+                    self._touch_side(stream)
                 continue
             # Hand every other protocol line to the metamon parser.
             try:
                 battle.parse_message(parts)
+                self._touch_side(stream)
             except Exception as exc:  # noqa: BLE001
                 _LANE_LOGGER.debug(
                     "lane %s side %s parse_message failed on %r: %s",
@@ -147,9 +158,15 @@ class StreamBattleLane:
 
     def _scan_global(self, line: str) -> None:
         if line.startswith("|win|"):
+            if not self.ended:
+                for side in SIDES:
+                    self._touch_side(side)
             self.ended = True
             self.winner = line[len("|win|") :].strip() or None
         elif line == "|tie" or line.startswith("|tie|"):
+            if not self.ended:
+                for side in SIDES:
+                    self._touch_side(side)
             self.ended = True
 
     def _on_request(self, side: str, req: dict) -> None:
@@ -219,7 +236,13 @@ class StreamBattleLane:
     # ----- observations / legality ----------------------------------------
 
     def universal_state(self, side: str) -> UniversalState:
-        return UniversalState.from_Battle(self._battles[side])
+        serial = self._mutation_serial[side]
+        cached = self._state_cache.get(side)
+        if cached is not None and cached[0] == serial:
+            return cached[1]
+        state = UniversalState.from_Battle(self._battles[side])
+        self._state_cache[side] = (serial, state)
+        return state
 
     def legal_action_indices(
         self,
@@ -230,7 +253,7 @@ class StreamBattleLane:
         """Legal agent-action indices, mirroring ``PokeEnvWrapper._update_legal_actions``."""
         battle = self._battles[side]
         if state is None:
-            state = UniversalState.from_Battle(battle)
+            state = self.universal_state(side)
         legal_actions = UniversalAction.definitely_valid_actions(
             state=state, battle=battle
         )

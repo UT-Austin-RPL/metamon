@@ -350,6 +350,9 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         )
 
     def add_illegal_action_mask_to_obs(self, obs: dict, info: dict):
+        # VectorizedShowdownEnv already attaches illegal_actions in obs.
+        if "illegal_actions" in obs:
+            return
         legal_actions = info["legal_actions"]
         illegal_actions = np.ones((self.batched_envs, self.action_space.n), dtype=bool)
         for lane in range(self.batched_envs):

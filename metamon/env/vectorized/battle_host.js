@@ -4,26 +4,29 @@
  * Vectorized Showdown battle host.
  *
  * Runs N independent Pokemon Showdown battles inside a single Node process and
- * multiplexes them over a JSON-lines protocol on stdin/stdout. The Python side
- * (`metamon.env.vectorized.sim_process.ShowdownSimProcess`) drives the lanes and
- * batches neural-network inference across them.
+ * multiplexes them over stdin (JSON-lines commands) and stdout (binary frames).
+ * The Python side (`metamon.env.vectorized.sim_process.ShowdownSimProcess`) drives
+ * the lanes and batches neural-network inference across them.
  *
- * Protocol (one JSON object per line):
+ * Protocol:
  *
- *   Python -> host (stdin):
+ *   Python -> host (stdin, JSON-lines):
  *     {"cmd": "start",  "lane": K, "formatid": "gen9ou", "seed": "...",
  *      "p1": {"name": "p1", "team": "<packed>"},
  *      "p2": {"name": "p2", "team": "<packed>"}}
  *     {"cmd": "choose", "lane": K, "side": "p1", "choice": "move 3"}
- *     {"cmd": "reset",  "lane": K}      // tear a lane down (a fresh start re-creates it)
- *     {"cmd": "ping"}                    // host replies {"event": "pong"}
- *     {"cmd": "close"}                   // host exits
+ *     {"cmd": "choose_batch", "choices": [{"lane": K, "epoch": E, "side": "p1", "choice": "move 3"}, ...]}
+ *     {"cmd": "reset",  "lane": K}
+ *     {"cmd": "ping"}
+ *     {"cmd": "close"}
  *
- *   host -> Python (stdout):
- *     {"lane": K, "epoch": E, "stream": "p1"|"p2"|"omniscient", "data": "<text>"}
- *     {"lane": K, "epoch": E, "stream": "error", "data": "<message>"}
- *     {"event": "ready"}                                   // emitted once at startup
- *     {"event": "pong"}
+ *   host -> Python (stdout, little-endian binary frames):
+ *     type 0 ready
+ *     type 1 chunk: u8 type, u32 lane, u32 epoch, u8 stream, u32 data_len, data[bytes]
+ *         stream 0=p1, 1=p2, 2=error
+ *     type 2 host_error: u8 type, u32 data_len, data[bytes]
+ *     type 3 lane_error: u8 type, u32 lane, u32 epoch, u32 data_len, data[bytes]
+ *     type 4 pong
  *
  * The `pokemon-showdown` package is resolved normally; for development a dist
  * path can be supplied via METAMON_SHOWDOWN_DIST (we never modify that source).
@@ -57,9 +60,52 @@ function loadShowdown() {
 const Showdown = loadShowdown();
 const { BattleStream, getPlayerStreams } = Showdown;
 
-// Single shared writable stream to stdout. Each emit is exactly one line.
-function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
+const MSG = { READY: 0, CHUNK: 1, HOST_ERROR: 2, LANE_ERROR: 3, PONG: 4 };
+const STREAM = { p1: 0, p2: 1, error: 2 };
+
+function emitReady() {
+  const buf = Buffer.alloc(1);
+  buf.writeUInt8(MSG.READY, 0);
+  process.stdout.write(buf);
+}
+
+function emitPong() {
+  const buf = Buffer.alloc(1);
+  buf.writeUInt8(MSG.PONG, 0);
+  process.stdout.write(buf);
+}
+
+function emitHostError(message) {
+  const payload = Buffer.from(String(message), "utf8");
+  const frame = Buffer.alloc(5 + payload.length);
+  frame.writeUInt8(MSG.HOST_ERROR, 0);
+  frame.writeUInt32LE(payload.length, 1);
+  payload.copy(frame, 5);
+  process.stdout.write(frame);
+}
+
+function emitLaneError(lane, epoch, message) {
+  const payload = Buffer.from(String(message), "utf8");
+  const frame = Buffer.alloc(13 + payload.length);
+  frame.writeUInt8(MSG.LANE_ERROR, 0);
+  frame.writeUInt32LE(lane, 1);
+  frame.writeUInt32LE(epoch, 5);
+  frame.writeUInt32LE(payload.length, 9);
+  payload.copy(frame, 13);
+  process.stdout.write(frame);
+}
+
+function emitChunk(lane, epoch, streamName, data) {
+  const payload = Buffer.from(String(data), "utf8");
+  const streamId = STREAM[streamName] !== undefined ? STREAM[streamName] : STREAM.error;
+  const frame = Buffer.alloc(14 + payload.length);
+  frame.writeUInt8(MSG.CHUNK, 0);
+  frame.writeUInt32LE(lane, 1);
+  frame.writeUInt32LE(epoch, 5);
+  frame.writeUInt8(streamId, 9);
+  frame.writeUInt32LE(payload.length, 10);
+  payload.copy(frame, 14);
+  process.stdout.write(frame);
 }
 
 class Lane {
@@ -93,9 +139,8 @@ class Lane {
     // request. Battle end is detected Python-side from `|win|`/`|tie|`.
     this._pump(this.streams.p1, "p1", epochNow);
     this._pump(this.streams.p2, "p2", epochNow);
-    // Omniscient stream: full log, used by Python for win/tie detection and
-    // optional replay logging. Not required for per-POV parsing.
-    this._pump(this.streams.omniscient, "omniscient", epochNow);
+    // Win/tie is detected on player streams in Python; we do not pump
+    // omniscient (avoids ~33% duplicate IPC + parsing at high lane counts).
 
     const initMessage =
       `>start ${JSON.stringify(spec)}\n` +
@@ -108,16 +153,16 @@ class Lane {
     const id = this.id;
     try {
       for await (const chunk of stream) {
-        if (chunk) emit({ lane: id, epoch, stream: name, data: chunk });
+        if (chunk) emitChunk(id, epoch, name, chunk);
       }
     } catch (err) {
-      emit({ lane: id, epoch, stream: "error", data: `${name}: ${err.message}` });
+      emitLaneError(id, epoch, `${name}: ${err.message}`);
     }
   }
 
   choose(side, choice, epoch) {
     if (!this.streams) {
-      emit({ lane: this.id, epoch: this.epoch, stream: "error", data: "choose before start" });
+      emitLaneError(this.id, this.epoch, "choose before start");
       return;
     }
     if (epoch !== undefined && epoch !== this.epoch) {
@@ -168,13 +213,19 @@ function handleCommand(msg) {
       getLane(msg.lane).choose(msg.side, msg.choice, msg.epoch);
       break;
     }
+    case "choose_batch": {
+      for (const c of msg.choices || []) {
+        getLane(c.lane).choose(c.side, c.choice, c.epoch);
+      }
+      break;
+    }
     case "reset": {
       const lane = lanes.get(msg.lane);
       if (lane) lane.destroy();
       break;
     }
     case "ping": {
-      emit({ event: "pong" });
+      emitPong();
       break;
     }
     case "close": {
@@ -183,7 +234,7 @@ function handleCommand(msg) {
       break;
     }
     default:
-      emit({ stream: "error", data: `unknown cmd: ${JSON.stringify(msg)}` });
+      emitHostError(`unknown cmd: ${JSON.stringify(msg)}`);
   }
 }
 
@@ -195,19 +246,19 @@ rl.on("line", (line) => {
   try {
     msg = JSON.parse(trimmed);
   } catch (err) {
-    emit({ stream: "error", data: `bad json: ${err.message}` });
+    emitHostError(`bad json: ${err.message}`);
     return;
   }
   try {
     handleCommand(msg);
   } catch (err) {
-    emit({
-      lane: msg && msg.lane,
-      stream: "error",
-      data: `cmd ${msg && msg.cmd}: ${err.message}`,
-    });
+    emitLaneError(
+      msg && msg.lane !== undefined ? msg.lane : 0,
+      msg && msg.epoch !== undefined ? msg.epoch : 0,
+      `cmd ${msg && msg.cmd}: ${err.message}`
+    );
   }
 });
 rl.on("close", () => process.exit(0));
 
-emit({ event: "ready" });
+emitReady();

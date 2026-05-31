@@ -81,7 +81,8 @@ The acceptor must be online before the challenger starts sending challenges.
 
 Head-to-head evaluation against another pretrained metamon model using the
 vectorized Showdown sim (``BattleAgainstMetamon``). Runs many battles in parallel
-inside one Node process and batches the opponent's NN inference across lanes.
+across ``--num_parallel`` lanes (optionally split over ``--n_workers`` Node
+processes) while batching opponent NN inference across all lanes.
 
 ```bash
 python -m metamon.rl.evaluate \
@@ -91,7 +92,8 @@ python -m metamon.rl.evaluate \
     --gens 9 \
     --formats ou \
     --total_battles 100 \
-    --num_parallel 8
+    --num_parallel 8 \
+    --n_workers 4
 ```
 
 Use ``--eval_player_side 1`` to have the evaluated agent play Showdown ``p2``
