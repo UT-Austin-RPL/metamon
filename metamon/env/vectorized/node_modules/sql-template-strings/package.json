@@ -1,0 +1,49 @@
+{
+  "name": "sql-template-strings",
+  "version": "2.2.2",
+  "description": "ES6 tagged template strings for prepared statements with mysql and postgres",
+  "main": "index.js",
+  "typings": "index.d.ts",
+  "engines": {
+    "node": ">=4.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/felixfbecker/node-sql-template-strings"
+  },
+  "scripts": {
+    "lint": "eslint index.js test",
+    "test": "mocha test",
+    "cover": "nyc --all mocha test",
+    "typedoc": "typedoc --module es2015 --target es2015 --includeDeclarations --mode file --readme none --out typedoc index.d.ts"
+  },
+  "keywords": [
+    "mysql",
+    "mysql2",
+    "postgres",
+    "pg",
+    "prepared",
+    "statements",
+    "placeholder",
+    "es6",
+    "tagged",
+    "template",
+    "strings"
+  ],
+  "author": "Felix Becker",
+  "license": "ISC",
+  "devDependencies": {
+    "eslint": "^3.4.0",
+    "mocha": "^3.0.2",
+    "nyc": "^8.1.0",
+    "typedoc": "^0.4.4"
+  },
+  "nyc": {
+    "include": [
+      "index.js"
+    ],
+    "exclude": [
+      "test/**/*.js"
+    ]
+  }
+}
