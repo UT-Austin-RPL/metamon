@@ -3,8 +3,9 @@
 A :class:`StreamBattleLane` holds two points of view of a single Showdown
 battle, one per player, each backed by a :class:`MetamonBackendBattle`:
 
-  * ``p1`` -> the evaluated agent's POV
-  * ``p2`` -> the in-the-loop opponent's POV
+  * ``p1`` / ``p2`` -> one :class:`MetamonBackendBattle` POV per Showdown side
+  * The env maps ``eval_side`` / ``opp_side`` onto these physical sides via
+    ``eval_player_side`` (see :class:`~metamon.env.vectorized.vector_env.VectorizedShowdownEnv`).
 
 Showdown's per-player streams are channel-filtered (each side only sees its own
 hidden info and private ``|request|``), so feeding each side's stream into its
@@ -66,6 +67,9 @@ class StreamBattleLane:
         self.ended = False
         self.winner: Optional[str] = None
         self.error: Dict[str, Optional[str]] = {s: None for s in SIDES}
+        # Set on ``|error|``, cleared once the env re-answers that side's
+        # re-prompt. Unlike ``error``, survives the follow-up ``|request|``.
+        self.reprompt_pending: Dict[str, bool] = {s: False for s in SIDES}
         self._mutation_serial: Dict[str, int] = {s: 0 for s in SIDES}
         self._state_cache: Dict[str, Tuple[int, UniversalState]] = {}
         self.reset_state()
@@ -89,6 +93,7 @@ class StreamBattleLane:
             self.request_serial[side] = 0
             self.settled_serial[side] = 0
             self.error[side] = None
+            self.reprompt_pending[side] = False
             self._mutation_serial[side] = 0
             self._state_cache.pop(side, None)
         self.ended = False
@@ -155,6 +160,7 @@ class StreamBattleLane:
                 battle._mm_battle.turnlist = battle._mm_battle.turnlist[-2:]
             elif cmd == "error":
                 self.error[stream] = parts[2] if len(parts) > 2 else "error"
+                self.reprompt_pending[stream] = True
 
     def _scan_global(self, line: str) -> None:
         if line.startswith("|win|"):

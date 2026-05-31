@@ -46,11 +46,13 @@ from .lane import (
     KIND_FORCESWITCH,
     KIND_MOVE,
     KIND_TEAMPREVIEW,
+    KIND_WAIT,
     SIDES,
     StreamBattleLane,
 )
 from .obs_utils import stack_obs_dicts
 from .opponent import BatchedOpponent, ConfigBatchedOpponent, RandomBatchedOpponent
+from .amago_policy import AmagoLadderPolicyDriver
 from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig, load_opponent_pool
 from .sim_process import ShowdownSimProcess, ShowdownSimProcessError, make_sim_process
 from .team_adapter import player_spec
@@ -145,6 +147,10 @@ class VectorizedShowdownEnv(gym.Env):
         self._lane_steps = np.zeros((self.batched_envs,), dtype=np.int64)
         self._team_files: List[Optional[str]] = [None] * self.batched_envs
         self._last_opp_obs: List[Optional[dict]] = [None] * self.batched_envs
+        # Eval actions for the in-flight ``step`` (used to re-answer trap re-prompts).
+        self._step_eval_actions: Optional[np.ndarray] = None
+        # Ladder-identical policy driver for the evaluated agent (reprompts + rollout).
+        self.eval_driver: Optional[AmagoLadderPolicyDriver] = None
 
         self.proc = make_sim_process(
             num_lanes=self.batched_envs,
@@ -291,6 +297,31 @@ class VectorizedShowdownEnv(gym.Env):
                 mask[idx] = False
         return mask
 
+    def _build_eval_obs(self, i: int) -> dict:
+        obs, _info = self._build_eval_obs_and_info(i)
+        return obs
+
+    def bind_eval_driver(self, driver: AmagoLadderPolicyDriver) -> None:
+        """Attach a ladder-style driver for eval-side reprompts and symmetric rollouts."""
+        self.eval_driver = driver
+
+    def _choose_eval_side(self, i: int) -> None:
+        """Answer a single eval-side request with the bound ladder policy driver."""
+        active = np.zeros((self.batched_envs,), dtype=bool)
+        active[i] = True
+        obs_list: List[dict] = []
+        for j in range(self.batched_envs):
+            if active[j]:
+                obs_list.append(self._build_eval_obs(j))
+            else:
+                obs, _ = self._build_eval_obs_and_info(j)
+                obs_list.append(obs)
+        actions = self.eval_driver.act(active, obs_list)
+        _, choice = self._resolve_action(
+            i, self.eval_side, self.eval_action_space, int(actions[i])
+        )
+        self.proc.choose(i, self.eval_side, choice)
+
     def _build_eval_obs_and_info(self, i: int) -> Tuple[dict, dict]:
         lane = self.lanes[i]
         state = lane.universal_state(self.eval_side)
@@ -343,6 +374,19 @@ class VectorizedShowdownEnv(gym.Env):
             choice = DEFAULT_CHOICE
         return idx, choice
 
+    def _choose_opponent_side(self, i: int) -> None:
+        """Answer a single opponent-side request with the batched opponent policy."""
+        active = np.zeros((self.batched_envs,), dtype=bool)
+        active[i] = True
+        actions = self.opponent.act(active, self._opp_obs_list(active))
+        _, choice = self._resolve_action(
+            i,
+            self.opp_side,
+            self.opponent_action_space,
+            int(actions[i]),
+        )
+        self.proc.choose(i, self.opp_side, choice)
+
     def _send_side(self, i: int, side: str) -> None:
         """(Re)answer a single side from its current request.
 
@@ -357,23 +401,23 @@ class VectorizedShowdownEnv(gym.Env):
             # Teampreview, or a state we can't safely decode yet: let Showdown
             # auto-pick (always accepted), keeping the lockstep barrier intact.
             self.proc.choose(i, side, DEFAULT_CHOICE)
+            lane.reprompt_pending[side] = False
             return
-        action_space = (
-            self.eval_action_space
-            if side == self.eval_side
-            else self.opponent_action_space
-        )
-        state = lane.universal_state(side)
-        legal = lane.legal_action_indices(side, action_space, state)
-        if legal:
-            idx = int(self._rng.choice(legal))
-            choice = (
-                action_idx_to_choice(idx, lane.battle(side), lane.last_request[side])
-                or DEFAULT_CHOICE
-            )
-        else:
-            choice = DEFAULT_CHOICE
+        if side == self.opp_side:
+            self._choose_opponent_side(i)
+            lane.reprompt_pending[side] = False
+            return
+        if self.eval_driver is not None:
+            self._choose_eval_side(i)
+            lane.reprompt_pending[side] = False
+            return
+        action_space = self.eval_action_space
+        raw = 0
+        if self._step_eval_actions is not None:
+            raw = int(self._step_eval_actions[i])
+        _, choice = self._resolve_action(i, side, action_space, raw)
         self.proc.choose(i, side, choice)
+        lane.reprompt_pending[side] = False
 
     # ----- pumping ---------------------------------------------------------
 
@@ -432,7 +476,10 @@ class VectorizedShowdownEnv(gym.Env):
                     if (
                         advanced
                         and not other_advanced
+                        and lane.reprompt_pending[s]
                         and lane.request_kind(s) in self._ANSWERABLE_KINDS
+                        and lane.request_kind(other) == KIND_WAIT
+                        and lane._side_ready(s)
                     ):
                         # Re-emitted single-side request (e.g. now-revealed trap):
                         # answer it from the updated request. Never act when both
@@ -446,10 +493,12 @@ class VectorizedShowdownEnv(gym.Env):
                         and err_handled[i][s] != lane.request_serial[s]
                     ):
                         # Showdown rejected our choice without re-emitting a request
-                        # (e.g. a stale forme name). Let it auto-pick a legal action,
-                        # mirroring poke-env's re-choose-on-error, so the turn can
-                        # resolve instead of deadlocking the barrier.
-                        self.proc.choose(i, s, DEFAULT_CHOICE)
+                        # (e.g. a stale forme name). Re-answer with the policy when
+                        # possible so we do not silently weaken one side.
+                        if s == self.opp_side:
+                            self._choose_opponent_side(i)
+                        else:
+                            self._send_side(i, s)
                         err_handled[i][s] = lane.request_serial[s]
             return done
 
@@ -541,6 +590,8 @@ class VectorizedShowdownEnv(gym.Env):
         options = options or {}
         self._configure_opponent_for_reset(options.get("opponent"))
         self.opponent.reset_all()
+        if self.eval_driver is not None:
+            self.eval_driver.reset_all()
         for i in range(self.batched_envs):
             self._start_lane(i)
         self._advance_lanes(list(range(self.batched_envs)))
@@ -559,6 +610,7 @@ class VectorizedShowdownEnv(gym.Env):
 
     def step(self, actions: np.ndarray):
         actions = np.asarray(actions).reshape(self.batched_envs)
+        self._step_eval_actions = actions.copy()
         rewards = np.zeros((self.batched_envs,), dtype=np.float32)
         terminated = np.zeros((self.batched_envs,), dtype=bool)
         truncated = np.zeros((self.batched_envs,), dtype=bool)
@@ -625,6 +677,8 @@ class VectorizedShowdownEnv(gym.Env):
                 if self._saving:
                     self._traj_actions[i].append(eval_actions[i])
                     self._traj_states[i].append(new_eval)
+                if self.eval_driver is not None:
+                    self.eval_driver.observe(i, float(rewards[i]), int(eval_actions[i]))
                 hit_limit = self._lane_steps[i] >= self.turn_limit
                 if lane.ended or hit_limit:
                     terminated[i] = bool(lane.ended) or hit_limit
@@ -638,6 +692,8 @@ class VectorizedShowdownEnv(gym.Env):
         done_mask = terminated | truncated
         if done_mask.any():
             self.opponent.reset_lanes(done_mask)
+            if self.eval_driver is not None:
+                self.eval_driver.reset_lanes(done_mask)
         if restarted:
             with self._profile_section("advance_lanes"):
                 self._advance_lanes(restarted)

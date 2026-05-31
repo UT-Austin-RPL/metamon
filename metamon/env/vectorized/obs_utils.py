@@ -20,6 +20,13 @@ def stack_obs_dicts(obs_list: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarr
     return {k: np.stack([obs[k] for obs in obs_list], axis=0) for k in keys}
 
 
+def unstack_obs_dicts(obs: Dict[str, np.ndarray]) -> List[Dict[str, np.ndarray]]:
+    if not obs:
+        return []
+    batch = next(iter(obs.values())).shape[0]
+    return [{k: v[i] for k, v in obs.items()} for i in range(batch)]
+
+
 def numpy_obs_to_torch(
     obs: Dict[str, np.ndarray], device: torch.device
 ) -> Dict[str, torch.Tensor]:

@@ -365,7 +365,9 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         return obs, info
 
     def inner_step(self, action):
-        obs, reward, terminated, truncated, info = self._metamon_env.step(action)
+        action_arr = np.asarray(action).reshape(self._metamon_env.batched_envs)
+        self._metamon_env._step_eval_actions = action_arr.copy()
+        obs, reward, terminated, truncated, info = self._metamon_env.step(action_arr)
         self.add_illegal_action_mask_to_obs(obs, info)
         return obs, reward, terminated, truncated, info
 
