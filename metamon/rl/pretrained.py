@@ -7,6 +7,7 @@ from typing import Optional, Type
 warnings.filterwarnings("ignore")
 
 
+import gin
 import huggingface_hub
 import torch
 import amago
@@ -217,7 +218,10 @@ class PretrainedModel:
         log: bool = False,
         action_temperature: float = 1.0,
     ) -> amago.Experiment:
-        # use the base config and the gin file to configure the model
+        # Each load must start from a clean gin scope so an earlier model's
+        # bindings (e.g. TaurosV0's Multigammas.discrete) do not leak into
+        # the next initialize_agent call (opponent pool, ensembles, etc.).
+        gin.clear_config()
         amago.cli_utils.use_config(
             self.base_config | {"MetamonDiscrete.temperature": action_temperature},
             [self.model_gin_config_path, self.train_gin_config_path],
