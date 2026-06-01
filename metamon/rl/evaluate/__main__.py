@@ -174,17 +174,12 @@ def pretrained_vs_metamon(
             episodes=total_battles,
         )
     else:
-        from metamon.env.vectorized.amago_policy import vectorized_ladder_eval
-
-        device = next(agent.policy.parameters()).device
-        sample = getattr(agent, "sample_actions_val", True)
-        results = vectorized_ladder_eval(
-            policy=agent.policy,
-            device=device,
-            make_env=make_env,
-            total_battles=total_battles,
-            action_dim=pretrained_model.action_space.gym_space.n,
-            sample=sample,
+        agent.env_mode = "already_vectorized"
+        agent.parallel_actors = num_parallel
+        results = agent.evaluate_test(
+            make_env,
+            timesteps=max(total_battles * 250 // num_parallel, 250),
+            episodes=total_battles,
         )
     return results
 

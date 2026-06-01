@@ -144,7 +144,6 @@ def vectorized_ladder_eval(
         sample=sample,
     )
     policy.eval()
-    env.bind_eval_policy(eval_actor)
 
     if timesteps is None:
         timesteps = max(total_battles * 250 // num_lanes, 250)
