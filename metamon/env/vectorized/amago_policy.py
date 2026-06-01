@@ -131,10 +131,12 @@ def vectorized_ladder_eval(
     batched Showdown eval so the eval agent is not on a different code path than the
     opponent.
     """
+    from .opponent import AmagoBatchedOpponent
+
     wrapped = make_env()
     env = wrapped._metamon_env if hasattr(wrapped, "_metamon_env") else wrapped.env
     num_lanes = env.batched_envs
-    eval_driver = AmagoLadderPolicyDriver(
+    eval_actor = AmagoBatchedOpponent(
         policy=policy,
         device=device,
         num_lanes=num_lanes,
@@ -142,7 +144,7 @@ def vectorized_ladder_eval(
         sample=sample,
     )
     policy.eval()
-    env.bind_eval_driver(eval_driver)
+    env.bind_eval_policy(eval_actor)
 
     if timesteps is None:
         timesteps = max(total_battles * 250 // num_lanes, 250)
@@ -158,7 +160,7 @@ def vectorized_ladder_eval(
     while episodes_done < total_battles and steps < timesteps:
         obs_list = unstack_obs_dicts(obs)
         active = np.ones((num_lanes,), dtype=bool)
-        actions = eval_driver.act(active, obs_list)
+        actions = eval_actor.act(active, obs_list)
         obs, rewards, terminated, truncated, info = env.step(actions)
         steps += 1
         episode_return += rewards

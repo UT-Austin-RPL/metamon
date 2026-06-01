@@ -219,7 +219,11 @@ class StreamBattleLane:
         """
         if self.request_serial[side] <= self.settled_serial[side]:
             return False
-        if self.request_kind(side) in (KIND_MOVE, KIND_FORCESWITCH):
+        kind = self.request_kind(side)
+        # Force-switch requests follow a faint/removal; the outgoing active may
+        # already be cleared before we answer. Only gate move decisions on the
+        # active Pokemon being materialized (battle start |request| before |switch|).
+        if kind == KIND_MOVE:
             return self._battles[side].active_pokemon is not None
         return True
 

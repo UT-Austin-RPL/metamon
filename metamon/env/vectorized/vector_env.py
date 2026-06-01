@@ -51,8 +51,12 @@ from .lane import (
     StreamBattleLane,
 )
 from .obs_utils import stack_obs_dicts
-from .opponent import BatchedOpponent, ConfigBatchedOpponent, RandomBatchedOpponent
-from .amago_policy import AmagoLadderPolicyDriver
+from .opponent import (
+    AmagoBatchedOpponent,
+    BatchedOpponent,
+    ConfigBatchedOpponent,
+    RandomBatchedOpponent,
+)
 from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig, load_opponent_pool
 from .sim_process import ShowdownSimProcess, ShowdownSimProcessError, make_sim_process
 from .team_adapter import player_spec
@@ -149,8 +153,10 @@ class VectorizedShowdownEnv(gym.Env):
         self._last_opp_obs: List[Optional[dict]] = [None] * self.batched_envs
         # Eval actions for the in-flight ``step`` (used to re-answer trap re-prompts).
         self._step_eval_actions: Optional[np.ndarray] = None
-        # Ladder-identical policy driver for the evaluated agent (reprompts + rollout).
-        self.eval_driver: Optional[AmagoLadderPolicyDriver] = None
+        # Final action index per (lane, side) after pump_settle re-prompts.
+        self._committed_side_actions: Dict[Tuple[int, str], int] = {}
+        # Optional ladder-style actor for eval-side re-prompts (mirrors opponent).
+        self.eval_policy_actor: Optional[AmagoBatchedOpponent] = None
 
         self.proc = make_sim_process(
             num_lanes=self.batched_envs,
@@ -301,25 +307,50 @@ class VectorizedShowdownEnv(gym.Env):
         obs, _info = self._build_eval_obs_and_info(i)
         return obs
 
-    def bind_eval_driver(self, driver: AmagoLadderPolicyDriver) -> None:
-        """Attach a ladder-style driver for eval-side reprompts and symmetric rollouts."""
-        self.eval_driver = driver
+    def bind_eval_policy(self, actor: AmagoBatchedOpponent) -> None:
+        """Attach a ladder-style actor for eval-side re-prompts and symmetric rollouts."""
+        self.eval_policy_actor = actor
+
+    def _append_lane_choices(
+        self,
+        choices: List[Tuple[int, str, str]],
+        lane_idx: int,
+        side_choices: Dict[str, str],
+    ) -> None:
+        """Append one lane's choices in physical Showdown order (p1, then p2)."""
+        for side in SIDES:
+            choice = side_choices.get(side)
+            if choice is not None:
+                choices.append((lane_idx, side, choice))
+
+    def _eval_obs_list(self, eval_active: np.ndarray) -> List[dict]:
+        obs_list: List[dict] = []
+        for i in range(self.batched_envs):
+            if eval_active[i]:
+                obs_list.append(self._build_eval_obs(i))
+            else:
+                obs, _ = self._build_eval_obs_and_info(i)
+                obs_list.append(obs)
+        return obs_list
 
     def _choose_eval_side(self, i: int) -> None:
-        """Answer a single eval-side request with the bound ladder policy driver."""
-        active = np.zeros((self.batched_envs,), dtype=bool)
-        active[i] = True
-        obs_list: List[dict] = []
-        for j in range(self.batched_envs):
-            if active[j]:
-                obs_list.append(self._build_eval_obs(j))
-            else:
-                obs, _ = self._build_eval_obs_and_info(j)
-                obs_list.append(obs)
-        actions = self.eval_driver.act(active, obs_list)
-        _, choice = self._resolve_action(
-            i, self.eval_side, self.eval_action_space, int(actions[i])
-        )
+        """Answer a single eval-side request with the bound ladder policy actor."""
+        if self.eval_policy_actor is None:
+            action_space = self.eval_action_space
+            raw = 0
+            if self._step_eval_actions is not None:
+                raw = int(self._step_eval_actions[i])
+            used_idx, choice = self._resolve_action(
+                i, self.eval_side, action_space, raw
+            )
+        else:
+            active = np.zeros((self.batched_envs,), dtype=bool)
+            active[i] = True
+            actions = self.eval_policy_actor.act(active, self._eval_obs_list(active))
+            used_idx, choice = self._resolve_action(
+                i, self.eval_side, self.eval_action_space, int(actions[i])
+            )
+        self._committed_side_actions[(i, self.eval_side)] = int(used_idx)
         self.proc.choose(i, self.eval_side, choice)
 
     def _build_eval_obs_and_info(self, i: int) -> Tuple[dict, dict]:
@@ -379,12 +410,13 @@ class VectorizedShowdownEnv(gym.Env):
         active = np.zeros((self.batched_envs,), dtype=bool)
         active[i] = True
         actions = self.opponent.act(active, self._opp_obs_list(active))
-        _, choice = self._resolve_action(
+        used_idx, choice = self._resolve_action(
             i,
             self.opp_side,
             self.opponent_action_space,
             int(actions[i]),
         )
+        self._committed_side_actions[(i, self.opp_side)] = int(used_idx)
         self.proc.choose(i, self.opp_side, choice)
 
     def _send_side(self, i: int, side: str) -> None:
@@ -407,16 +439,7 @@ class VectorizedShowdownEnv(gym.Env):
             self._choose_opponent_side(i)
             lane.reprompt_pending[side] = False
             return
-        if self.eval_driver is not None:
-            self._choose_eval_side(i)
-            lane.reprompt_pending[side] = False
-            return
-        action_space = self.eval_action_space
-        raw = 0
-        if self._step_eval_actions is not None:
-            raw = int(self._step_eval_actions[i])
-        _, choice = self._resolve_action(i, side, action_space, raw)
-        self.proc.choose(i, side, choice)
+        self._choose_eval_side(i)
         lane.reprompt_pending[side] = False
 
     # ----- pumping ---------------------------------------------------------
@@ -478,13 +501,24 @@ class VectorizedShowdownEnv(gym.Env):
                         and not other_advanced
                         and lane.reprompt_pending[s]
                         and lane.request_kind(s) in self._ANSWERABLE_KINDS
-                        and lane.request_kind(other) == KIND_WAIT
                         and lane._side_ready(s)
                     ):
                         # Re-emitted single-side request (e.g. now-revealed trap):
                         # answer it from the updated request. Never act when both
                         # advanced (that is the next cycle whose |switch| public
                         # log may not be applied yet; wait, don't pre-empt).
+                        self._send_side(i, s)
+                        answered[i][s] = lane.request_serial[s]
+                    elif (
+                        lane.request_serial[s] > answered[i][s]
+                        and lane.request_kind(s) in self._ANSWERABLE_KINDS
+                        and not other_advanced
+                        and lane._side_ready(s)
+                        and not lane.reprompt_pending[s]
+                    ):
+                        # Single-side actionable request while the other waits
+                        # (e.g. force-switch after a faint). Not an |error| re-prompt
+                        # but the same "answer one side, pump, repeat" pattern.
                         self._send_side(i, s)
                         answered[i][s] = lane.request_serial[s]
                     elif (
@@ -546,12 +580,13 @@ class VectorizedShowdownEnv(gym.Env):
             choices: List[Tuple[int, str, str]] = []
             for i in auto:
                 lane = self.lanes[i]
+                side_choices: Dict[str, str] = {}
                 k1 = lane.request_kind(self.eval_side)
                 k2 = lane.request_kind(self.opp_side)
                 if k1 == KIND_TEAMPREVIEW:
-                    choices.append((i, self.eval_side, DEFAULT_CHOICE))
+                    side_choices[self.eval_side] = DEFAULT_CHOICE
                 if k2 == KIND_TEAMPREVIEW:
-                    choices.append((i, self.opp_side, DEFAULT_CHOICE))
+                    side_choices[self.opp_side] = DEFAULT_CHOICE
                 elif k2 in AGENT_KINDS:
                     prev_opp = lane.universal_state(self.opp_side)
                     used_idx, choice = self._resolve_action(
@@ -560,8 +595,10 @@ class VectorizedShowdownEnv(gym.Env):
                         self.opponent_action_space,
                         int(opp_actions[i]),
                     )
-                    choices.append((i, self.opp_side, choice))
-                    opp_pending.append((i, used_idx, prev_opp))
+                    side_choices[self.opp_side] = choice
+                    self._committed_side_actions[(i, self.opp_side)] = int(used_idx)
+                    opp_pending.append((i, int(used_idx), prev_opp))
+                self._append_lane_choices(choices, i, side_choices)
                 lane.mark_settled()
             if choices:
                 self.proc.choose_batch(choices)
@@ -574,12 +611,18 @@ class VectorizedShowdownEnv(gym.Env):
     ) -> None:
         if self.opponent_reward_function is None:
             for i, used_idx, _ in opp_pending:
-                self.opponent.observe(i, 0.0, used_idx)
+                final_idx = self._committed_side_actions.get(
+                    (i, self.opp_side), int(used_idx)
+                )
+                self.opponent.observe(i, 0.0, final_idx)
             return
         for i, used_idx, prev_opp in opp_pending:
             new_opp = self.lanes[i].universal_state(self.opp_side)
             reward = float(self.opponent_reward_function(prev_opp, new_opp))
-            self.opponent.observe(i, reward, used_idx)
+            final_idx = self._committed_side_actions.get(
+                (i, self.opp_side), int(used_idx)
+            )
+            self.opponent.observe(i, reward, final_idx)
 
     # ----- gym API ---------------------------------------------------------
 
@@ -590,8 +633,8 @@ class VectorizedShowdownEnv(gym.Env):
         options = options or {}
         self._configure_opponent_for_reset(options.get("opponent"))
         self.opponent.reset_all()
-        if self.eval_driver is not None:
-            self.eval_driver.reset_all()
+        if self.eval_policy_actor is not None:
+            self.eval_policy_actor.reset_all()
         for i in range(self.batched_envs):
             self._start_lane(i)
         self._advance_lanes(list(range(self.batched_envs)))
@@ -611,6 +654,7 @@ class VectorizedShowdownEnv(gym.Env):
     def step(self, actions: np.ndarray):
         actions = np.asarray(actions).reshape(self.batched_envs)
         self._step_eval_actions = actions.copy()
+        self._committed_side_actions = {}
         rewards = np.zeros((self.batched_envs,), dtype=np.float32)
         terminated = np.zeros((self.batched_envs,), dtype=bool)
         truncated = np.zeros((self.batched_envs,), dtype=bool)
@@ -642,7 +686,8 @@ class VectorizedShowdownEnv(gym.Env):
                     i, self.eval_side, self.eval_action_space, int(actions[i])
                 )
                 eval_actions[i] = int(eval_used_idx)
-                choices.append((i, self.eval_side, eval_choice))
+                side_choices: Dict[str, str] = {self.eval_side: eval_choice}
+                self._committed_side_actions[(i, self.eval_side)] = int(eval_used_idx)
                 if opp_active[i]:
                     prev_opp = lane.universal_state(self.opp_side)
                     opp_used_idx, opp_choice = self._resolve_action(
@@ -651,8 +696,10 @@ class VectorizedShowdownEnv(gym.Env):
                         self.opponent_action_space,
                         int(opp_actions[i]),
                     )
-                    choices.append((i, self.opp_side, opp_choice))
+                    side_choices[self.opp_side] = opp_choice
+                    self._committed_side_actions[(i, self.opp_side)] = int(opp_used_idx)
                     opp_pending.append((i, int(opp_used_idx), prev_opp))
+                self._append_lane_choices(choices, i, side_choices)
                 lane.mark_settled()
 
             with self._profile_section("choose_batch"):
@@ -677,8 +724,13 @@ class VectorizedShowdownEnv(gym.Env):
                 if self._saving:
                     self._traj_actions[i].append(eval_actions[i])
                     self._traj_states[i].append(new_eval)
-                if self.eval_driver is not None:
-                    self.eval_driver.observe(i, float(rewards[i]), int(eval_actions[i]))
+                if self.eval_policy_actor is not None:
+                    final_eval = self._committed_side_actions.get(
+                        (i, self.eval_side), int(eval_actions[i])
+                    )
+                    self.eval_policy_actor.observe(
+                        i, float(rewards[i]), int(final_eval)
+                    )
                 hit_limit = self._lane_steps[i] >= self.turn_limit
                 if lane.ended or hit_limit:
                     terminated[i] = bool(lane.ended) or hit_limit
@@ -692,8 +744,8 @@ class VectorizedShowdownEnv(gym.Env):
         done_mask = terminated | truncated
         if done_mask.any():
             self.opponent.reset_lanes(done_mask)
-            if self.eval_driver is not None:
-                self.eval_driver.reset_lanes(done_mask)
+            if self.eval_policy_actor is not None:
+                self.eval_policy_actor.reset_lanes(done_mask)
         if restarted:
             with self._profile_section("advance_lanes"):
                 self._advance_lanes(restarted)
