@@ -7,9 +7,22 @@ from typing import Optional, Type
 warnings.filterwarnings("ignore")
 
 
+import gin
 import huggingface_hub
 import torch
 import amago
+import amago.nets.transformer as _amago_transformer
+
+try:
+    import flash_attn  # noqa: F401
+    _SLIDING_WINDOW_ATTN_OVERRIDES = {
+        "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": _amago_transformer.FlashAttention,
+        "amago.nets.transformer.FlashAttention.window_size": (32, 0),
+    }
+except ImportError:
+    _SLIDING_WINDOW_ATTN_OVERRIDES = {
+        "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": _amago_transformer.VanillaAttention,
+    }
 
 import metamon
 from metamon.rl.metamon_to_amago import (
@@ -628,8 +641,7 @@ class SmallRLGen9Beta(PretrainedModel):
             # temporarily forced to flash attention until we can verify numerical stability
             # of a switch to a standard pytorch sliding window inference alternative
             gin_overrides={
-                "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": amago.nets.transformer.FlashAttention,
-                "amago.nets.transformer.FlashAttention.window_size": (32, 0),
+                **_SLIDING_WINDOW_ATTN_OVERRIDES,
             },
             battle_backend="pokeagent",
         )
@@ -688,8 +700,7 @@ class Abra(PretrainedModel):
             observation_space=get_observation_space("PAC-TeamPreviewObservationSpace"),
             tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
             gin_overrides={
-                "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": amago.nets.transformer.FlashAttention,
-                "amago.nets.transformer.FlashAttention.window_size": (32, 0),
+                **_SLIDING_WINDOW_ATTN_OVERRIDES,
             },
             battle_backend="pokeagent",
         )
@@ -714,8 +725,7 @@ class Kadabra(PretrainedModel):
             tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
             battle_backend="pokeagent",
             gin_overrides={
-                "amago.nets.traj_encoders.TformerTrajEncoder.attention_type": amago.nets.transformer.FlashAttention,
-                "amago.nets.transformer.FlashAttention.window_size": (32, 0),
+                **_SLIDING_WINDOW_ATTN_OVERRIDES,
             },
         )
 
