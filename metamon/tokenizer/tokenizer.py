@@ -92,6 +92,8 @@ PREMADE_TOKEN_LISTS = {
     "DefaultObservationSpace-v0": "DefaultObservationSpace-v0.json",
     # adds ~1k new words for gen 9
     "DefaultObservationSpace-v1": "DefaultObservationSpace-v1.json",
+    # adds gen 7 words (Z-crystals, Z-move names, mega formes, new mons)
+    "DefaultObservationSpace-v1-gen7": "DefaultObservationSpace-v1-gen7.json",
 }
 
 

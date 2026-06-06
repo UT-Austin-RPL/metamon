@@ -21,6 +21,7 @@ SUPPORTED_BATTLE_FORMATS = [
     "gen4uu",
     "gen4nu",
     "gen4ubers",
+    "gen7ou",
     "gen9ou",
 ]
 

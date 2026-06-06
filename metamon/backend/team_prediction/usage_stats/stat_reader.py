@@ -31,6 +31,7 @@ EARLIEST_USAGE_STATS_DATE = datetime.date(2014, 1, 1)
 LATEST_USAGE_STATS_DATE = datetime.date(2026, 4, 1)
 DEFAULT_USAGE_RANK = 1500
 
+
 ELITE_REPLAY_SOURCES = ("smogtours",)
 
 
@@ -718,6 +719,17 @@ class PreloadedSmogonUsageStats(SmogonStat):
             end_month=end_date.month,
         )
         if not self._movesets:
+            # Date range had no data (e.g. a retired format queried with a recent date).
+            # Fall back to the full available history for this format.
+            self._movesets = load_between_dates(
+                movesets_path,
+                start_year=EARLIEST_USAGE_STATS_DATE.year,
+                start_month=EARLIEST_USAGE_STATS_DATE.month,
+                end_year=LATEST_USAGE_STATS_DATE.year,
+                end_month=LATEST_USAGE_STATS_DATE.month,
+                warn_if_empty=False,
+            )
+        if not self._movesets:
             raise FileNotFoundError(
                 f"No usage stats found for {self.format} at rank={self.rank} "
                 f"between {start_date} and {end_date} in {movesets_path}."
@@ -827,12 +839,10 @@ def get_usage_stats(
     if start_date is None or start_date < EARLIEST_USAGE_STATS_DATE:
         start_date = EARLIEST_USAGE_STATS_DATE
     else:
-        # force to start of months to prevent cache miss (we only have monthly stats anyway)
         start_date = datetime.date(start_date.year, start_date.month, 1)
     if end_date is None or end_date > LATEST_USAGE_STATS_DATE:
         end_date = LATEST_USAGE_STATS_DATE
     else:
-        # force to start of months to prevent cache miss (we only have monthly stats anyway)
         end_date = datetime.date(end_date.year, end_date.month, 1)
     return _cached_smogon_stats(
         format,

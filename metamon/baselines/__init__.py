@@ -2,7 +2,7 @@ import poke_env
 
 FORMATS = ["ou", "uu", "ubers", "nu"]
 _blank = lambda: {f: [] for f in FORMATS}
-BASELINES_BY_GEN = {i: _blank() for i in [1, 2, 3, 4, 9]}
+BASELINES_BY_GEN = {i: _blank() for i in [1, 2, 3, 4, 7, 9]}
 ALL_BASELINES = {}
 GENS = BASELINES_BY_GEN.keys()
 GEN_DATA = {gen: poke_env.data.GenData(gen) for gen in GENS}
