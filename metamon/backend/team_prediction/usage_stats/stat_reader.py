@@ -31,7 +31,6 @@ EARLIEST_USAGE_STATS_DATE = datetime.date(2014, 1, 1)
 LATEST_USAGE_STATS_DATE = datetime.date(2026, 4, 1)
 DEFAULT_USAGE_RANK = 1500
 
-
 ELITE_REPLAY_SOURCES = ("smogtours",)
 
 
@@ -839,10 +838,12 @@ def get_usage_stats(
     if start_date is None or start_date < EARLIEST_USAGE_STATS_DATE:
         start_date = EARLIEST_USAGE_STATS_DATE
     else:
+        # force to start of months to prevent cache miss (we only have monthly stats anyway)
         start_date = datetime.date(start_date.year, start_date.month, 1)
     if end_date is None or end_date > LATEST_USAGE_STATS_DATE:
         end_date = LATEST_USAGE_STATS_DATE
     else:
+        # force to start of months to prevent cache miss (we only have monthly stats anyway)
         end_date = datetime.date(end_date.year, end_date.month, 1)
     return _cached_smogon_stats(
         format,
