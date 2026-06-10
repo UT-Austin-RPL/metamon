@@ -229,18 +229,23 @@ def check_action_alignment(replay):
                 # standard switch
                 if action.target in switches and action.is_switch:
                     continue
+            elif action.is_zmove:
+                # Z-move name is intentionally absent from moves (one-turn transform)
+                continue
             elif action.name in active_pokemon.moves.keys() and not action.is_switch:
                 # standard move
                 continue
-            elif action.name is None and action.is_tera:
-                # revealed only the choice to tera (at the start of the turn),
-                # but never found out what the move was...
+            elif action.name is None and (action.is_tera or action.is_mega or action.is_zmove):
+                # revealed the gimmick (tera/mega/z) but the pokemon couldn't act (flinch, sleep, etc.)
                 continue
             elif action.is_revival:
                 pokemon = turn.get_pokemon(replay.from_p1_pov)
                 if action.target in pokemon and action.target not in switches:
                     # our revival choice is on our team but had fainted (can't be switched to)
                     continue
+            elif replay.replay.has_warning(WarningFlags.ZOROARK):
+                # Illusion makes action/pokemon alignment ambiguous; already flagged
+                continue
             raise ActionMisaligned(active_pokemon, action)
 
 
@@ -262,8 +267,8 @@ def check_action_idxs(
             continue
         if action_idx > 13 or action_idx < -1:
             raise ActionIndexError(f"Action index {action_idx} is out of bounds")
-        # check tera by action idx
-        if action_idx >= 9:
+        # Z-move and mega also use action_idx >= 9 but are not tera
+        if action_idx >= 9 and action.is_tera:
             tera += 1
         if tera and gen != 9:
             raise ActionIndexError(f"Found Tera action in gen {gen}")
@@ -279,10 +284,13 @@ def check_action_idxs(
             raise ActionIndexError(
                 f"Forced switch {state.forced_switch} != action {action.is_switch}"
             )
-        if action_idx > 9 and (not state.can_tera or not action.is_tera):
-            # check tera action index is valid
+        if action_idx > 9 and not (
+            (state.can_tera and action.is_tera)
+            or (state.can_z and action.is_zmove)
+            or (state.can_mega and action.is_mega)
+        ):
             raise ActionIndexError(
-                f"Found Tera action index {action_idx} but can_tera is False"
+                f"Found gimmick action index {action_idx} but no valid gimmick flag is set"
             )
         if action.is_switch and (action_idx <= 3 or action_idx >= 9):
             # check move actions become move action indices
@@ -317,6 +325,29 @@ def check_tera_consistency(replay):
         can_tera_2 &= turn.can_tera_2
     if gen == 9 and not (ever_tera_1 and ever_tera_2):
         raise ForwardVerify("Found no Tera available in gen 9")
+
+
+def check_gimmick_consistency(replay):
+    gen = replay.gen
+    can_z_1 = can_z_2 = True
+    can_mega_1 = can_mega_2 = True
+    for turn in replay:
+        if gen not in (6, 7) and (turn.can_mega_1 or turn.can_mega_2):
+            raise ForwardVerify("Found mega flag in gen without mega evolution")
+        if gen != 7 and (turn.can_z_1 or turn.can_z_2):
+            raise ForwardVerify("Found Z-move flag in gen != 7")
+        if not can_z_1 and turn.can_z_1:
+            raise MultipleZMove("p1")
+        if not can_z_2 and turn.can_z_2:
+            raise MultipleZMove("p2")
+        if not can_mega_1 and turn.can_mega_1:
+            raise MultipleMega("p1")
+        if not can_mega_2 and turn.can_mega_2:
+            raise MultipleMega("p2")
+        can_z_1 &= turn.can_z_1
+        can_z_2 &= turn.can_z_2
+        can_mega_1 &= turn.can_mega_1
+        can_mega_2 &= turn.can_mega_2
 
 
 def check_forced_switching(replay):

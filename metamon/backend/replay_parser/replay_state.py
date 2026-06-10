@@ -186,6 +186,9 @@ class Pokemon:
         self.moves: Dict[str, Move] = {}
         self.had_moves: Dict[str, Move] = {}
         self.move_change_to_from: Dict[str, str] = {}
+        # type and crystal of a damaging Z-move, if one was used
+        self.zmove_used_type: Optional[str] = None
+        self.zmove_crystal: Optional[str] = None
 
         self.last_used_move: Move = None
         self.boosts: Boosts = Boosts()
@@ -430,8 +433,13 @@ class Pokemon:
             if move_name not in self.had_moves:
                 _backup_move(future_move, self.had_moves)
 
-        if len(self.had_moves.keys()) > 4:
-            raise TooManyMoves(self)
+        while len(self.had_moves) > 4:
+            # prefer dropping full-PP moves (never used; likely predictor guesses)
+            removable = [k for k, v in self.had_moves.items() if v.pp == v.maximum_pp]
+            if removable:
+                del self.had_moves[removable[-1]]
+            else:
+                raise TooManyMoves(self)
 
         move_change_from_to = {v: k for k, v in self.move_change_to_from.items()}
         if self.transformed_into is None:
@@ -569,6 +577,8 @@ class Action:
     is_noop: bool = False
     is_switch: bool = False
     is_tera: bool = False
+    is_zmove: bool = False
+    is_mega: bool = False
     is_revival: bool = False
 
     def __repr__(self):
@@ -608,6 +618,10 @@ class Turn:
     subturns: List = field(default_factory=list)
     can_tera_1: bool = False
     can_tera_2: bool = False
+    can_z_1: bool = False
+    can_z_2: bool = False
+    can_mega_1: bool = False
+    can_mega_2: bool = False
     teampreview_1: List[Pokemon] = field(default_factory=list)
     teampreview_2: List[Pokemon] = field(default_factory=list)
 
@@ -815,6 +829,8 @@ class Turn:
         user: Optional[Pokemon] = None,
         target: Optional[Pokemon] = None,
         is_tera: Optional[bool] = None,
+        is_zmove: Optional[bool] = None,
+        is_mega: Optional[bool] = None,
     ) -> None:
         # "p1a", "p2a", ...
         if s[1] == "1":
@@ -839,6 +855,8 @@ class Turn:
                 user=user or None,
                 target=target or None,
                 is_tera=is_tera or False,
+                is_zmove=is_zmove or False,
+                is_mega=is_mega or False,
             )
         else:
             # adjust existing Action
@@ -854,6 +872,10 @@ class Turn:
                 moves_list[index].is_noop = is_noop
             if is_tera is not None:
                 moves_list[index].is_tera = is_tera
+            if is_zmove is not None:
+                moves_list[index].is_zmove = is_zmove
+            if is_mega is not None:
+                moves_list[index].is_mega = is_mega
 
     def __repr__(self) -> str:
         poke_1_str = "\n\t\t".join([str(x) for x in self.pokemon_1])
@@ -985,4 +1007,6 @@ class ReplayState:
     battle_won: bool
     battle_lost: bool
     can_tera: bool
+    can_z: bool
+    can_mega: bool
     opponent_teampreview: List[Pokemon]

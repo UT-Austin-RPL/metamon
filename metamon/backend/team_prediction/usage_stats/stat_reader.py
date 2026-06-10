@@ -718,6 +718,17 @@ class PreloadedSmogonUsageStats(SmogonStat):
             end_month=end_date.month,
         )
         if not self._movesets:
+            # Date range had no data (e.g. a retired format queried with a recent date).
+            # Fall back to the full available history for this format.
+            self._movesets = load_between_dates(
+                movesets_path,
+                start_year=EARLIEST_USAGE_STATS_DATE.year,
+                start_month=EARLIEST_USAGE_STATS_DATE.month,
+                end_year=LATEST_USAGE_STATS_DATE.year,
+                end_month=LATEST_USAGE_STATS_DATE.month,
+                warn_if_empty=False,
+            )
+        if not self._movesets:
             raise FileNotFoundError(
                 f"No usage stats found for {self.format} at rank={self.rank} "
                 f"between {start_date} and {end_date} in {movesets_path}."

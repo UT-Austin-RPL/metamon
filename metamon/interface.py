@@ -24,6 +24,7 @@ from poke_env.player import BattleOrder, Player
 import metamon
 from metamon.config import format_for_agent
 from metamon.tokenizer import PokemonTokenizer, UNKNOWN_TOKEN
+from metamon.backend.showdown_dex.dex import Dex as ShowdownDex
 from metamon.backend.replay_parser.replay_state import (
     Move as ReplayMove,
     Pokemon as ReplayPokemon,
@@ -509,6 +510,8 @@ class UniversalState:
 
     # version-specific
     can_tera: bool  # added v3-beta
+    can_z: bool  # gen 7
+    can_mega: bool  # gen 7
     opponent_teampreview: List[str]  # added v3
 
     @property
@@ -566,6 +569,8 @@ class UniversalState:
             battle_won=state.battle_won,
             battle_lost=state.battle_lost,
             can_tera=state.can_tera,
+            can_z=state.can_z,
+            can_mega=state.can_mega,
             opponent_teampreview=opponent_teampreview,
         )
 
@@ -609,6 +614,8 @@ class UniversalState:
             battle_lost=battle.lost if battle.lost else False,
             opponents_remaining=opponents_remaining,
             can_tera=battle.can_tera is not None,
+            can_z=battle.can_z_move,
+            can_mega=battle.can_mega_evolve,
             opponent_teampreview=opponent_teampreview,
         )
     # fmt: on
@@ -636,6 +643,12 @@ class UniversalState:
             # backwards compat (if it's missing; it's an old version of the dataset
             # --> gen 1-4 --> no tera)
             data["can_tera"] = False
+
+        if "can_z" not in data:
+            data["can_z"] = False
+
+        if "can_mega" not in data:
+            data["can_mega"] = False
 
         if "opponent_teampreview" not in data:
             # backwards compat (if it's missing; it's an old version of the dataset
@@ -667,9 +680,12 @@ class UniversalAction:
         cls, state: ReplayState, action: ReplayAction
     ) -> Optional["UniversalAction"]:
         action_idx = None
-        if action is None or (action.name is None and action.is_tera):
+        if action is None or (
+            action.name is None and (action.is_tera or action.is_mega or action.is_zmove)
+        ):
             # action was never revealed
-            # (or tera animation was shown but the rest of the action was never revealed)
+            # (or the gimmick animation was shown but the move itself was never
+            # revealed, e.g. mega evolved and then flinched)
             action_idx = -1
         elif action.is_noop:
             assert action.name == "Recharge"
@@ -688,9 +704,21 @@ class UniversalAction:
             for move_idx, move in enumerate(consistent_move_order(move_options)):
                 if move.name == action.name:
                     action_idx = move_idx
-                    if action.is_tera:
+                    if action.is_tera or action.is_zmove or action.is_mega:
                         action_idx += 9
                     break
+            if action_idx is None and action.is_zmove:
+                # forward fill stores the Z-move name but the base move may not have
+                # been revealed yet; resolve it here using the full post-backward moveset
+                dex = ShowdownDex.from_format(state.format)
+                z_entry = dex.moves.get(move_name(action.name), {})
+                z_type = z_entry.get("type", "").upper()
+                for move_idx, move in enumerate(consistent_move_order(move_options)):
+                    bm_entry = getattr(move, "entry", {})
+                    if (not bm_entry.get("isZ")
+                            and bm_entry.get("type", "").upper() == z_type):
+                        action_idx = move_idx + 9
+                        break
         if action_idx is None:
             return None
         return cls(action_idx)
@@ -701,7 +729,7 @@ class UniversalAction:
         if not state.forced_switch:
             moves = len(state.player_active_pokemon.moves)
             legal.extend(range(moves))
-            if state.can_tera:
+            if state.can_tera or state.can_z or state.can_mega:
                 legal.extend(range(9, 9 + moves))
         legal.extend(range(4, 4 + len(state.available_switches)))
         return set(UniversalAction(action_idx=action_idx) for action_idx in legal)
@@ -757,10 +785,12 @@ class UniversalAction:
                 [p for p in list(battle.team.values()) if p.fainted and not p.active]
             )
 
-        wants_tera = False
+        wants_gimmick = False
         can_tera = battle.can_tera is not None
+        can_z = battle.can_z_move
+        can_mega = battle.can_mega_evolve
         if action_idx >= 9:
-            wants_tera = True
+            wants_gimmick = True
             action_idx -= 9
 
         if action_idx <= 3 and not battle.force_switch:
@@ -768,10 +798,16 @@ class UniversalAction:
             if action_idx < len(move_options):
                 selected_move = move_options[action_idx]
                 if selected_move.id in valid_moves:
-                    # NOTE: giving the player a little help on invalid tera requests here
-                    order = Player.create_order(
-                        selected_move, terastallize=wants_tera and can_tera
-                    )
+                    if wants_gimmick and can_tera:
+                        order = Player.create_order(selected_move, terastallize=True)
+                    elif wants_gimmick and can_mega:
+                        order = Player.create_order(selected_move, mega=True)
+                    elif wants_gimmick and can_z and selected_move.id in {
+                        m.id for m in battle.active_pokemon.available_z_moves
+                    }:
+                        order = Player.create_order(selected_move, z_move=True)
+                    else:
+                        order = Player.create_order(selected_move)
                     return order
         if 4 <= action_idx <= 8:
             # switch to one of up to 5 alternative pokemon
@@ -1179,6 +1215,30 @@ class DefaultObservationSpace(ObservationSpace):
         text = np.array(text, dtype=np.str_)
         numbers = np.array(numerical, dtype=np.float32)
         return {"text": text, "numbers": numbers}
+
+
+@register_observation_space()
+class Gen7ObservationSpace(DefaultObservationSpace):
+    """DefaultObservationSpace + can_z/can_mega flags appended to numbers (50 dims)."""
+
+    @property
+    def gym_space(self):
+        base_space = super().gym_space
+        base_space["numbers"] = gym.spaces.Box(
+            low=-10.0,
+            high=10.0,
+            shape=(50,),
+            dtype=np.float32,
+        )
+        return base_space
+
+    def state_to_obs(self, state: UniversalState) -> dict[str, np.ndarray]:
+        obs = super().state_to_obs(state)
+        gimmick_features = np.array(
+            [float(state.can_z), float(state.can_mega)], dtype=np.float32
+        )
+        obs["numbers"] = np.concatenate([obs["numbers"], gimmick_features])
+        return obs
 
 
 @register_observation_space()

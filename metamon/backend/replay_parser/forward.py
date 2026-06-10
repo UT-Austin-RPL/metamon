@@ -223,11 +223,16 @@ class SimProtocol:
         |gen|GENNUM
         """
         self.replay.gen = int(args[0])
-        if not (self.replay.gen <= 4 or self.replay.gen == 9):
+        if not (self.replay.gen <= 4 or self.replay.gen in (7, 9)):
             raise SoftLockedGen(self.replay.gen)
         if self.replay.gen == 9:
             self.curr_turn.can_tera_1 = True
             self.curr_turn.can_tera_2 = True
+        if self.replay.gen == 7:
+            self.curr_turn.can_z_1 = True
+            self.curr_turn.can_z_2 = True
+            self.curr_turn.can_mega_1 = True
+            self.curr_turn.can_mega_2 = True
 
     def _parse_player(self, args: List[str]):
         """
@@ -308,7 +313,11 @@ class SimProtocol:
             for poke_idx, poke_choice in enumerate(player_choice.split(",")):
                 msg = poke_choice.split(" ")
                 command = msg[0]
-                choice_args = re.sub(r"\d+", "", " ".join(msg[1:])).strip()
+                # strip protocol gimmick flags (mega, zmove, etc.) — they are not part of the move name
+                _GIMMICK_FLAGS = {"mega", "zmove", "ultra", "dynamax", "terastallize", "primal", "gigantamax"}
+                choice_args = re.sub(r"\d+", "", " ".join(
+                    w for w in msg[1:] if w.lower() not in _GIMMICK_FLAGS
+                )).strip()
                 if (
                     command == "move"
                     and choice_args
@@ -587,6 +596,25 @@ class SimProtocol:
         pokemon.use_move(move, pp_used=pp_used)
         if pokemon.transformed_into is not None:
             pokemon.transformed_into.reveal_move(copy.deepcopy(move))
+        team, slot = self.curr_turn.player_id_to_action_idx(poke_str)
+        curr_action = (self.curr_turn.moves_1 if team == 1 else self.curr_turn.moves_2)[slot]
+        action_move_name = move.name
+        if curr_action is not None and curr_action.is_zmove and move.entry.get("isZ"):
+            # the log records the Z-move name, but the action should point at the
+            # base move, which shares the Z-crystal's type. status Z-moves keep
+            # their own name in the log and skip this entirely.
+            z_type = move.entry.get("type", "").upper()
+            pokemon.zmove_used_type = z_type
+            pokemon.zmove_crystal = move.entry.get("isZ")
+            for bm_name, bm in pokemon.had_moves.items():
+                bm_entry = getattr(bm, "entry", {})
+                if (bm_name != move.name
+                        and not bm_entry.get("isZ")
+                        and bm_entry.get("type", "").upper() == z_type):
+                    action_move_name = bm_name
+                    break
+            pokemon.had_moves.pop(move.name, None)
+            pokemon.moves.pop(move.name, None)
         # create edge between pokemon to help track down special cases
         pokemon.last_target = Targeting(
             pokemon=target_pokemon,
@@ -600,7 +628,7 @@ class SimProtocol:
         # create Action
         self.curr_turn.set_move_attribute(
             s=poke_str,
-            move_name=move.name,
+            move_name=action_move_name,
             is_noop=False,
             is_switch=False,
             user=pokemon,
@@ -999,11 +1027,29 @@ class SimProtocol:
         else:
             self.curr_turn.can_tera_2 = False
 
-    def _parse_zpower_mega(self, args: List[str]):
+    def _parse_zpower(self, args: List[str]):
         """
-        |-zpower|... or |-mega|...
+        |-zpower|POKEMON
         """
-        raise SoftLockedGen(self.replay.gen)
+        poke_str = args[0][:3]
+        self.curr_turn.set_move_attribute(s=poke_str, is_zmove=True)
+        team, _ = self.curr_turn.player_id_to_action_idx(poke_str)
+        if team == 1:
+            self.curr_turn.can_z_1 = False
+        else:
+            self.curr_turn.can_z_2 = False
+
+    def _parse_mega(self, args: List[str]):
+        """
+        |-mega|POKEMON|MEGASTONE
+        """
+        poke_str = args[0][:3]
+        self.curr_turn.set_move_attribute(s=poke_str, is_mega=True)
+        team, _ = self.curr_turn.player_id_to_action_idx(poke_str)
+        if team == 1:
+            self.curr_turn.can_mega_1 = False
+        else:
+            self.curr_turn.can_mega_2 = False
 
     def _parse_transform(self, args: List[str]):
         """
@@ -1259,7 +1305,13 @@ class SimProtocol:
         """
         |-burst|POKEMON|SPECIES|ITEM
         """
-        raise UnimplementedMessage(["-burst"] + args)
+        poke_str = args[0][:3]
+        self.curr_turn.set_move_attribute(s=poke_str, is_mega=True)
+        team, _ = self.curr_turn.player_id_to_action_idx(poke_str)
+        if team == 1:
+            self.curr_turn.can_mega_1 = False
+        else:
+            self.curr_turn.can_mega_2 = False
 
     def _parse_fail(self, args: List[str]):
         """
@@ -1390,8 +1442,10 @@ class SimProtocol:
             self._parse_item_enditem(data, name)
         elif name == "-terastallize":
             self._parse_terastallize(data)
-        elif name == "-zpower" or name == "-mega":
-            self._parse_zpower_mega(data)
+        elif name == "-zpower":
+            self._parse_zpower(data)
+        elif name == "-mega":
+            self._parse_mega(data)
         elif name == "-transform":
             self._parse_transform(data)
         elif name == "-fieldstart" or name == "-fieldend":
@@ -1598,4 +1652,5 @@ def forward_fill(
     checks.check_forward_consistency(replay)
     checks.check_name_permanence(replay)
     checks.check_tera_consistency(replay)
+    checks.check_gimmick_consistency(replay)
     return replay

@@ -237,3 +237,17 @@ class MultipleTera(BackwardException):
         super().__init__(
             f"Detected multiple Tera moves for player {player} in a single battle."
         )
+
+
+class MultipleZMove(BackwardException):
+    def __init__(self, player: str):
+        super().__init__(
+            f"Detected multiple Z-moves for player {player} in a single battle."
+        )
+
+
+class MultipleMega(BackwardException):
+    def __init__(self, player: str):
+        super().__init__(
+            f"Detected multiple Mega evolutions/Ultra Bursts for player {player} in a single battle."
+        )
