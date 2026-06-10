@@ -52,4 +52,5 @@ traj_encoders.TformerTrajEncoder.sigma_reparam = True
 traj_encoders.TformerTrajEncoder.norm = "layer"
 traj_encoders.TformerTrajEncoder.head_scaling = True
 traj_encoders.TformerTrajEncoder.activation = "leaky_relu"
-traj_encoders.TformerTrajEncoder.attention_type = @transformer.VanillaAttention
+traj_encoders.TformerTrajEncoder.attention_type = @transformer.FlashAttention
+transformer.FlashAttention.window_size = (96, 0)

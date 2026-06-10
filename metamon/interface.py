@@ -24,6 +24,7 @@ from poke_env.player import BattleOrder, Player
 import metamon
 from metamon.config import format_for_agent
 from metamon.tokenizer import PokemonTokenizer, UNKNOWN_TOKEN
+from metamon.backend.showdown_dex.dex import Dex as ShowdownDex
 from metamon.backend.replay_parser.replay_state import (
     Move as ReplayMove,
     Pokemon as ReplayPokemon,
@@ -679,9 +680,12 @@ class UniversalAction:
         cls, state: ReplayState, action: ReplayAction
     ) -> Optional["UniversalAction"]:
         action_idx = None
-        if action is None or (action.name is None and action.is_tera):
+        if action is None or (
+            action.name is None and (action.is_tera or action.is_mega or action.is_zmove)
+        ):
             # action was never revealed
-            # (or tera animation was shown but the rest of the action was never revealed)
+            # (or the gimmick animation was shown but the move itself was never
+            # revealed, e.g. mega evolved and then flinched)
             action_idx = -1
         elif action.is_noop:
             assert action.name == "Recharge"
@@ -703,6 +707,18 @@ class UniversalAction:
                     if action.is_tera or action.is_zmove or action.is_mega:
                         action_idx += 9
                     break
+            if action_idx is None and action.is_zmove:
+                # forward fill stores the Z-move name but the base move may not have
+                # been revealed yet; resolve it here using the full post-backward moveset
+                dex = ShowdownDex.from_format(state.format)
+                z_entry = dex.moves.get(move_name(action.name), {})
+                z_type = z_entry.get("type", "").upper()
+                for move_idx, move in enumerate(consistent_move_order(move_options)):
+                    bm_entry = getattr(move, "entry", {})
+                    if (not bm_entry.get("isZ")
+                            and bm_entry.get("type", "").upper() == z_type):
+                        action_idx = move_idx + 9
+                        break
         if action_idx is None:
             return None
         return cls(action_idx)

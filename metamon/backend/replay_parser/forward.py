@@ -598,7 +598,21 @@ class SimProtocol:
             pokemon.transformed_into.reveal_move(copy.deepcopy(move))
         team, slot = self.curr_turn.player_id_to_action_idx(poke_str)
         curr_action = (self.curr_turn.moves_1 if team == 1 else self.curr_turn.moves_2)[slot]
-        if curr_action is not None and curr_action.is_zmove:
+        action_move_name = move.name
+        if curr_action is not None and curr_action.is_zmove and move.entry.get("isZ"):
+            # the log records the Z-move name, but the action should point at the
+            # base move, which shares the Z-crystal's type. status Z-moves keep
+            # their own name in the log and skip this entirely.
+            z_type = move.entry.get("type", "").upper()
+            pokemon.zmove_used_type = z_type
+            pokemon.zmove_crystal = move.entry.get("isZ")
+            for bm_name, bm in pokemon.had_moves.items():
+                bm_entry = getattr(bm, "entry", {})
+                if (bm_name != move.name
+                        and not bm_entry.get("isZ")
+                        and bm_entry.get("type", "").upper() == z_type):
+                    action_move_name = bm_name
+                    break
             pokemon.had_moves.pop(move.name, None)
             pokemon.moves.pop(move.name, None)
         # create edge between pokemon to help track down special cases
@@ -614,7 +628,7 @@ class SimProtocol:
         # create Action
         self.curr_turn.set_move_attribute(
             s=poke_str,
-            move_name=move.name,
+            move_name=action_move_name,
             is_noop=False,
             is_switch=False,
             user=pokemon,

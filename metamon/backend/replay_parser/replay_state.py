@@ -186,6 +186,9 @@ class Pokemon:
         self.moves: Dict[str, Move] = {}
         self.had_moves: Dict[str, Move] = {}
         self.move_change_to_from: Dict[str, str] = {}
+        # type and crystal of a damaging Z-move, if one was used
+        self.zmove_used_type: Optional[str] = None
+        self.zmove_crystal: Optional[str] = None
 
         self.last_used_move: Move = None
         self.boosts: Boosts = Boosts()

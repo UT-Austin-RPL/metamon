@@ -8,6 +8,7 @@ from metamon.backend.replay_parser import checks
 from metamon.backend.replay_parser.exceptions import *
 from metamon.backend.replay_parser.replay_state import (
     Action,
+    Move,
     Pokemon,
     Turn,
     Winner,
@@ -15,8 +16,59 @@ from metamon.backend.replay_parser.replay_state import (
     Replacement,
     ParsedReplay,
 )
+from metamon.backend.replay_parser.str_parsing import move_name
+from metamon.backend.showdown_dex.dex import Dex
 from metamon.backend.team_prediction.predictor import TeamPredictor
 from metamon.backend.team_prediction.team import TeamSet, PokemonSet
+
+
+def _enforce_zmove_consistency(
+    pokemon: Pokemon,
+    revealed_moves: set[str],
+    item_was_revealed: bool,
+    usage_stats,
+) -> None:
+    """
+    A damaging Z-move reveals that this pokemon carries a base move of the
+    Z-crystal's type and holds the crystal itself. Team prediction doesn't know
+    that, so fix up its guesses: if the moveset has no move of the required
+    type, swap the least common predicted move for the most common move of that
+    type, and if the item was never revealed, replace it with the crystal.
+    """
+    dex = Dex.from_gen(pokemon.gen)
+
+    def base_move_type(name: str) -> Optional[str]:
+        entry = dex.moves.get(move_name(name), {})
+        if entry.get("isZ") or entry.get("category") == "Status":
+            return None
+        return entry.get("type", "").upper()
+
+    if not item_was_revealed and pokemon.zmove_crystal:
+        # dex ids like "kommoniumz" --> "Kommonium Z"
+        pokemon.had_item = pokemon.zmove_crystal[:-1].capitalize() + " Z"
+
+    if any(base_move_type(m) == pokemon.zmove_used_type for m in pokemon.had_moves):
+        return
+    try:
+        move_usage = usage_stats[pokemon.name].get("moves", {})
+    except KeyError:
+        return
+    candidates = [
+        (weight, name)
+        for name, weight in move_usage.items()
+        if base_move_type(name) == pokemon.zmove_used_type
+    ]
+    if not candidates:
+        return
+    replacement = max(candidates)[1]
+    predicted = [m for m in pokemon.had_moves if m not in revealed_moves]
+    if len(pokemon.had_moves) >= 4:
+        if not predicted:
+            return
+        least_common = min(predicted, key=lambda m: move_usage.get(m, 0.0))
+        del pokemon.had_moves[least_common]
+    new_move = Move(name=replacement, gen=pokemon.gen)
+    pokemon.had_moves[new_move.name] = new_move
 
 
 def fill_missing_team_info(
@@ -81,7 +133,16 @@ def fill_missing_team_info(
                 break
         else:
             raise BackwardException(f"Could not find match for {p.name}")
+        revealed_moves = set(p.had_moves.keys())
+        item_was_revealed = p.had_item is not None
         p.fill_from_PokemonSet(match)
+        if p.zmove_used_type is not None:
+            usage_stats = team_predictor.get_usage_stats(
+                battle_format, date_played, rating=rating, gameid=gameid
+            )
+            _enforce_zmove_consistency(
+                p, revealed_moves, item_was_revealed, usage_stats
+            )
 
         if (
             p.had_item == BackwardMarkers.FORCE_UNKNOWN

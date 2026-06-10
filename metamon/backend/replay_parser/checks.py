@@ -267,8 +267,8 @@ def check_action_idxs(
             continue
         if action_idx > 13 or action_idx < -1:
             raise ActionIndexError(f"Action index {action_idx} is out of bounds")
-        # check tera by action idx
-        if action_idx >= 9:
+        # Z-move and mega also use action_idx >= 9 but are not tera
+        if action_idx >= 9 and action.is_tera:
             tera += 1
         if tera and gen != 9:
             raise ActionIndexError(f"Found Tera action in gen {gen}")
