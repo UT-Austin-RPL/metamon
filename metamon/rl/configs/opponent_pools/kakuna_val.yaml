@@ -1,0 +1,12 @@
+# Fixed Kakuna opponent for gen9ou online RL validation.
+# Kakuna is the current best Metamon policy (~71% GXE vs humans in gen9ou).
+defaults:
+  team_set: gl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  Kakuna:
+    model_name: Kakuna

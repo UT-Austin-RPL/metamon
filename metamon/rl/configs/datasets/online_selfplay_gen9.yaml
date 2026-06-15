@@ -1,0 +1,11 @@
+# Offline mixture for gen9ou online RL (mini_online_g9_v0).
+# Mirrors online_selfplay.yaml but drops pac-tauros (gen1ou-only) and restricts
+# to gen9ou. pac-base / pac-exploratory both publish gen9ou self-play data; their
+# weights are renormalized so replay stays at ~5% of the offline mix.
+# Mixed with the online FIFO buffer at --online_weight (default 0.40 → 60% offline).
+replay_weight: 0.05
+self_play:
+  pac-base: 0.6
+  pac-exploratory: 0.35
+formats:
+  - gen9ou

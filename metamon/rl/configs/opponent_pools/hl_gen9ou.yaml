@@ -1,0 +1,41 @@
+# High-level gen9ou opponent pool for online RL training collection.
+# Each agent samples a checkpoint below its default (null = default/best) and a temperature.
+# num_agents (defaults or per-agent) duplicates pool rows → higher sample weight.
+# All agents are PokéAgent-Challenge self-play models trained on gens1-4 & 9, so they
+# play gen9ou with the gl_05_26 team set. TaurosV0 is gen1ou-only and is omitted.
+# Checkpoint ranges mirror hl_gen1ou.yaml (same weights, format-agnostic); verify
+# epochs exist on HuggingFace before long runs.
+defaults:
+  team_set: gl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0, 1.25, 1.5, 1.75, 2.0]
+  num_agents: 1
+
+agents:
+  Kakuna:
+    model_name: Kakuna
+    num_agents: 2
+    # default ckpt 34
+    checkpoints: "range(24, 35, 2)"
+
+  Superkazam:
+    model_name: Superkazam
+    num_agents: 2
+    # default ckpt 50
+    checkpoints: "range(38, 51, 2)"
+
+  Kadabra4:
+    model_name: Kadabra4
+    # default ckpt 50
+    checkpoints: "range(40, 51, 2)"
+
+  Kadabra3:
+    model_name: Kadabra3
+    # default ckpt 20
+    checkpoints: "range(10, 21, 2)"
+
+  Alakazam:
+    model_name: Alakazam
+    # default ckpt 8
+    checkpoints: "range(2, 9, 2)"

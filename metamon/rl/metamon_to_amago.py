@@ -1169,8 +1169,19 @@ class MetamonGroupedTstepEncoderV2(amago.nets.tstep_encoders.TstepEncoder):
         qk_norm: bool = False,
         ff_mult: int = 4,
         pokemon_role_emb: bool = False,
+        pokemon_num_len: Optional[int] = None,
     ):
         super().__init__(obs_space=obs_space, rl2_space=rl2_space)
+
+        # Per-Pokemon numeric width. Default: infer from the observation space so
+        # variants like GroupedStatsObservationSpace (37) work without an encoder
+        # config change; falls back to the class default (31) and is overridable
+        # via gin (`pokemon_num_len`).
+        self.POKEMON_NUM_LEN = (
+            pokemon_num_len
+            if pokemon_num_len is not None
+            else obs_space["numbers_active_pokemon"].shape[-1]
+        )
 
         self.extra_emb = nn.Linear(rl2_space.shape[-1], extra_emb_dim)
 
