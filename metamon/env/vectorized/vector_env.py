@@ -255,6 +255,18 @@ class VectorizedShowdownEnv(gym.Env):
             f"got {type(value)}"
         )
 
+    def _sync_opponent_model_spaces(self, model_name: str) -> None:
+        """Refresh per-lane opponent obs/action spaces when the pool opponent changes."""
+        from metamon.rl.pretrained import get_pretrained_model
+
+        model = get_pretrained_model(model_name)
+        self.opponent_obs_space = model.observation_space
+        self.opponent_action_space = model.action_space
+        self.opponent_reward_function = model.reward_function
+        self.opponent_obs_spaces = [
+            copy.deepcopy(self.opponent_obs_space) for _ in range(self.batched_envs)
+        ]
+
     def _configure_opponent_for_reset(self, spec: Optional[Any] = None) -> None:
         """Swap the shared in-the-loop opponent (full env reset only)."""
         if not isinstance(self.opponent, ConfigBatchedOpponent):
@@ -263,6 +275,7 @@ class VectorizedShowdownEnv(gym.Env):
         active = self.opponent.configure(resolved)
         self.opponent_team_set = self.opponent.current_team
         self.metamon_opponent_name = active.short_label
+        self._sync_opponent_model_spaces(active.model_name)
 
     def _start_lane(self, i: int) -> None:
         lane = self.lanes[i]

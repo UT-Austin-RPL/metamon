@@ -1,0 +1,11 @@
+# Offline mixture for online RL (Tauros-v5 lineage).
+# pac-tauros replaces the old iter_0/iter_1 custom piles at 40% of offline weight;
+# pac-base / pac-exploratory share the remainder in their original ratio.
+# Mixed with the online FIFO buffer at --online_weight (default 0.40 → 60% offline).
+replay_weight: 0.05
+self_play:
+  pac-base: 0.347
+  pac-exploratory: 0.203
+  pac-tauros: 0.40
+formats:
+  - gen1ou

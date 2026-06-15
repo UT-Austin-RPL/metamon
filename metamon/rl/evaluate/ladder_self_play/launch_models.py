@@ -8,6 +8,7 @@ from typing import List, Dict
 
 from metamon.rl.evaluate.common import (
     distribute_across_gpus,
+    expand_agent_pool_entries,
     load_config,
     merge_defaults,
     run_subprocess,
@@ -85,20 +86,9 @@ def get_usernames(config_path: str) -> List[str]:
                 f"Agent {base_username} missing required field: model_name"
             )
 
-        # expand based on num_agents
         merged_config = merge_defaults(defaults, agent_config or {})
-        num_agents = merged_config.get("num_agents", 1)
-        # handle None/null values in yaml
-        if num_agents is None:
-            num_agents = 1
-
-        if num_agents == 1:
-            expanded_usernames.append(base_username)
-        else:
-            # add numbered copies
-            for i in range(1, num_agents + 1):
-                expanded_username = f"{base_username}-{i}"
-                expanded_usernames.append(expanded_username)
+        for username, _ in expand_agent_pool_entries(base_username, merged_config):
+            expanded_usernames.append(username)
 
     print(
         f"Found {len(agents)} base agents, expanded to {len(expanded_usernames)} total: {', '.join(expanded_usernames)}"
@@ -115,14 +105,7 @@ def get_agent_details(config_path: str) -> List[dict]:
     details = []
     for base_username, agent_config in agents.items():
         merged = merge_defaults(defaults, agent_config or {})
-        num_agents = merged.get("num_agents", 1) or 1
-
-        usernames = (
-            [base_username]
-            if num_agents == 1
-            else [f"{base_username}-{i}" for i in range(1, num_agents + 1)]
-        )
-        for username in usernames:
+        for username, _ in expand_agent_pool_entries(base_username, merged):
             details.append(
                 {
                     "username": username,

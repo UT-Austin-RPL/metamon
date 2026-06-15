@@ -11,12 +11,16 @@ across the batch. Two implementations are provided:
     the same ``rl2`` / ``time_idx`` bookkeeping as ``QueueOnLocalLadder``.
   * :class:`ConfigBatchedOpponent` — one shared policy for all lanes; on full env
     ``reset()``, sample an opponent from an :class:`~metamon.rl.evaluate.opponent_pool.OpponentPoolConfig`.
+    Pool entries may mix action dimensions: each cached policy bundle owns its own
+    ``rl2`` buffer and hidden state; ``configure()`` swaps bundles and reinitializes.
 """
 
 from __future__ import annotations
 
+import gc
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, TYPE_CHECKING
+from collections import OrderedDict
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -108,6 +112,7 @@ class ConfigBatchedOpponent(BatchedOpponent):
         num_lanes: int,
         device: torch.device,
         sample: bool = True,
+        cache_size: int = 1,
     ):
         from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig
 
@@ -117,11 +122,16 @@ class ConfigBatchedOpponent(BatchedOpponent):
         self.num_lanes = int(num_lanes)
         self.device = device
         self.sample = sample
+        # Bound how many opponent policies stay resident on the GPU. Each cached
+        # bundle holds a full policy (60-200M params) plus per-lane KV caches, so
+        # an unbounded cache OOMs collectors that resample a new opponent every
+        # epoch. LRU-evict and free GPU memory beyond this many distinct opponents.
+        self._cache_size = max(1, int(cache_size))
         self.current_spec: Optional["PolicySpec"] = None
         self.current_team: Optional["TeamSet"] = None
         self._active_key: Optional[str] = None
         self._bundle: Optional[AmagoBatchedOpponent] = None
-        self._cache: Dict[str, AmagoBatchedOpponent] = {}
+        self._cache: "OrderedDict[str, AmagoBatchedOpponent]" = OrderedDict()
 
     def _make_bundle(self, spec: "PolicySpec") -> AmagoBatchedOpponent:
         from metamon.rl.pretrained import get_pretrained_model
@@ -133,13 +143,6 @@ class ConfigBatchedOpponent(BatchedOpponent):
             action_temperature=spec.temperature,
         )
         action_dim = model.action_space.gym_space.n
-        if self._cache:
-            existing = next(iter(self._cache.values()))
-            if existing.action_dim != action_dim:
-                raise ValueError(
-                    "Opponent pool models must share action_dim; "
-                    f"got {action_dim} for {spec.model_name}"
-                )
         agent.policy.to(self.device)
         agent.policy.eval()
         return AmagoBatchedOpponent(
@@ -150,6 +153,13 @@ class ConfigBatchedOpponent(BatchedOpponent):
             sample=self.sample,
         )
 
+    def _free_bundle(self, bundle: AmagoBatchedOpponent) -> None:
+        """Drop a bundle's GPU tensors (policy weights + per-lane KV caches)."""
+        driver = getattr(bundle, "_driver", None)
+        if driver is not None:
+            driver.hidden_state = None
+            driver.policy = None
+
     def configure(self, spec: Optional["PolicySpec"] = None) -> "PolicySpec":
         """Activate one sampled (or explicit) opponent for all lanes."""
         if spec is None:
@@ -157,8 +167,21 @@ class ConfigBatchedOpponent(BatchedOpponent):
         self.current_spec = spec
         self.current_team = self.config.team_set_for(spec.team_set)
         key = spec.unique_key
-        if key not in self._cache:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
             self._cache[key] = self._make_bundle(spec)
+            # LRU-evict the oldest opponents and reclaim their GPU memory.
+            evicted = False
+            while len(self._cache) > self._cache_size:
+                _, old_bundle = self._cache.popitem(last=False)
+                self._free_bundle(old_bundle)
+                del old_bundle
+                evicted = True
+            if evicted:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         self._bundle = self._cache[key]
         self._active_key = key
         self._bundle.reset_all()

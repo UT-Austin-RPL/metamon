@@ -29,7 +29,7 @@ from metamon.il.model import (
     PerceiverEncoder,
 )
 from metamon.tokenizer import PokemonTokenizer, UNKNOWN_TOKEN
-from metamon.data import ParsedReplayDataset
+from metamon.data import ParsedReplayDataset, MetamonDataset
 from metamon.env import (
     TeamSet,
     PokeEnvWrapper,
@@ -370,6 +370,14 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         obs, reward, terminated, truncated, info = self._metamon_env.step(action_arr)
         self.add_illegal_action_mask_to_obs(obs, info)
         return obs, reward, terminated, truncated, info
+
+    def take_long_break(self):
+        if hasattr(self._metamon_env, "take_long_break"):
+            self._metamon_env.take_long_break()
+
+    def resume_from_break(self):
+        if hasattr(self._metamon_env, "resume_from_break"):
+            self._metamon_env.resume_from_break()
 
     def step(self, action):
         next_tstep, reward, terminated, truncated, info = super().step(action)
@@ -1421,7 +1429,6 @@ class MetamonAMAGODataset(RLDataset):
         return None
 
     def on_end_of_collection(self, experiment) -> dict[str, Any]:
-        # TODO: implement FIFO replay buffer
         if self.refresh_files_every_epoch:
             self.parsed_replay_dset.refresh_files()
         return {"Num Replays": len(self.parsed_replay_dset)}
@@ -1435,48 +1442,146 @@ class MetamonAMAGODataset(RLDataset):
 
     def _process_data(self, data):
         obs, action_infos, rewards, dones = data
-        # amago expects discrete actions to be one-hot encoded
         num_actions = self.parsed_replay_dset.action_space.gym_space.n
         actions_torch = F.one_hot(
             torch.tensor(action_infos["chosen"]).long().clamp(min=0),
             num_classes=num_actions,
         ).float()
 
-        # set all illegal. needs to be one timestep longer than the actions to match the size of observations
         illegal_actions = torch.ones(
             (len(action_infos["chosen"]) + 1, num_actions)
         ).bool()
         for i, legal_actions in enumerate(action_infos["legal"]):
             for legal_action in legal_actions:
                 legal_universal_action = UniversalAction(action_idx=legal_action)
-                # discrete action spaces don't need a state input...
                 legal_agent_action = (
                     self.parsed_replay_dset.action_space.action_to_agent_output(
                         state=None, action=legal_universal_action
                     )
                 )
-                # set the action legal
                 illegal_actions[i, legal_agent_action] = False
 
-        # a bit of a hack: put action info in the amago observation dict, let the network ignore it,
-        # and make it accessible to mask the actor/critic loss later on.
         obs_torch = {k: torch.from_numpy(np.stack(v, axis=0)) for k, v in obs.items()}
-        # add a final missing action to match the size of observations
         missing_acts = torch.tensor(action_infos["missing"] + [True]).unsqueeze(-1)
         obs_torch["missing_action_mask"] = missing_acts
-        # the environment wrappers also add illegal_actions to the obs
         obs_torch["illegal_actions"] = illegal_actions
         rewards_torch = torch.from_numpy(rewards).unsqueeze(-1)
         dones_torch = torch.from_numpy(dones).unsqueeze(-1)
         time_idxs = torch.arange(len(action_infos["chosen"]) + 1).long().unsqueeze(-1)
-        rl_data = RLData(
+        return RLData(
             obs=obs_torch,
             actions=actions_torch,
             rews=rewards_torch,
             dones=dones_torch,
             time_idxs=time_idxs,
         )
-        return rl_data
+
+
+class MetamonFIFODataset(MetamonAMAGODataset):
+    """Online replay buffer backed by metamon ``json.lz4`` trajectories on disk.
+
+    Vectorized envs write finished battles to ``{buffer_root}/{format}/``; this
+    dataset rescans that tree each epoch and evicts the oldest files when the
+    buffer exceeds ``dset_max_size``. Training begins once
+    ``len(dset) > dset_min_size`` (mirrors AMAGO ``DiskTrajDataset``).
+    """
+
+    def __init__(
+        self,
+        parsed_replay_dset: MetamonDataset,
+        dset_max_size: int,
+        dset_min_size: int = 1,
+        dset_name: Optional[str] = None,
+    ):
+        super().__init__(
+            parsed_replay_dset=parsed_replay_dset,
+            dset_name=dset_name or "Online FIFO Buffer",
+            refresh_files_every_epoch=True,
+        )
+        self.dset_max_size = dset_max_size
+        self.dset_min_size = dset_min_size
+
+    @property
+    def ready_for_training(self) -> bool:
+        return (
+            super().ready_for_training
+            and len(self.parsed_replay_dset) > self.dset_min_size
+        )
+
+    def _scan_disk_mtimes(self) -> list[tuple[float, str]]:
+        """Single ``scandir`` pass over the on-disk format dirs.
+
+        Returns ``(mtime, abspath)`` for every replay file. We scan the directory
+        tree directly (rather than ``parsed_replay_dset.filenames``) so eviction
+        is independent of the dataset's filename filters, and we read mtime from
+        the ``DirEntry`` stat instead of a separate ``os.path.getmtime`` call per
+        file -- one stat round-trip each, which matters when the buffer holds
+        hundreds of thousands of files on NFS.
+        """
+        dset = self.parsed_replay_dset
+        entries: list[tuple[float, str]] = []
+        for fmt in dset.formats:
+            if dset._format_is_tar.get(fmt, False):
+                continue
+            fmt_dir = os.path.join(dset.dset_root, fmt)
+            try:
+                with os.scandir(fmt_dir) as it:
+                    for entry in it:
+                        name = entry.name
+                        if not name.endswith((".json", ".json.lz4")):
+                            continue
+                        try:
+                            entries.append((entry.stat().st_mtime, entry.path))
+                        except OSError:
+                            continue
+            except (OSError, FileNotFoundError):
+                continue
+        return entries
+
+    def _evict_oldest(self) -> int:
+        """Delete oldest on-disk trajectories until ``dset_max_size`` is satisfied."""
+        files = self._scan_disk_mtimes()
+        num_to_remove = max(len(files) - self.dset_max_size, 0)
+        if num_to_remove <= 0:
+            return 0
+        files.sort(key=lambda x: x[0])
+        removed = 0
+        for _, path in files[:num_to_remove]:
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+        return removed
+
+    def on_end_of_collection(self, experiment) -> dict[str, Any]:
+        """Mirror ``DiskTrajDataset.on_end_of_collection`` (amago.loading).
+
+        All ranks rescan/resync the file list; only ``has_edit_rights`` processes
+        (the learner) evict on the main rank, then all ranks refresh again.
+        Collectors set ``has_dset_edit_rights=False`` and only perform the reads.
+        """
+        self.parsed_replay_dset.refresh_files()
+        if not self.has_edit_rights:
+            return {"FIFO Buffer Size": len(self.parsed_replay_dset)}
+        old_size = len(self.parsed_replay_dset)
+        experiment.accelerator.wait_for_everyone()
+        if experiment.accelerator.is_main_process:
+            self._evict_oldest()
+        experiment.accelerator.wait_for_everyone()
+        self.parsed_replay_dset.refresh_files()
+        new_size = len(self.parsed_replay_dset)
+        return {
+            "FIFO Buffer Size": new_size,
+            "FIFO Files Deleted": old_size - new_size,
+            "FIFO Files Before Eviction": old_size,
+        }
+
+    def get_description(self) -> str:
+        return (
+            f"Metamon FIFO Buffer ({self.dset_name}, "
+            f"max={self.dset_max_size}, min>{self.dset_min_size})"
+        )
 
 
 @gin.configurable
@@ -1529,6 +1634,16 @@ class MetamonAMAGOExperiment(amago.Experiment):
         policy.edit_actor_mask = _edit_actor_mask
         policy.edit_critic_mask = _edit_critic_mask
 
+    def write_latest_policy(self) -> None:
+        """Main-process-only atomic write so multi-GPU learners do not race on NFS."""
+        if not self.accelerator.is_main_process:
+            return
+        ckpt_dir = os.path.join(self.ckpt_dir, "latest")
+        ckpt_name = os.path.join(ckpt_dir, "policy.pt")
+        tmp_name = os.path.join(ckpt_dir, "policy.pt.tmp")
+        torch.save(self.policy.state_dict(), tmp_name)
+        os.replace(tmp_name, ckpt_name)
+
     def train_step(self, batch: Batch, log_step: bool):
         fbc_filter = self.policy.fbc_filter_func
         if hasattr(fbc_filter, "set_mask"):
@@ -1541,3 +1656,110 @@ class MetamonAMAGOExperiment(amago.Experiment):
             seq_mask = (~(batch.rl2s == MAGIC_PAD_VAL).all(-1, keepdim=True)).bool()
             fbc_filter.set_seq_mask(seq_mask)
         return super().train_step(batch, log_step=log_step)
+
+
+_ONLINE_EXPERIMENT_GIN_PARAMS = (
+    "agent_type",
+    "tstep_encoder_type",
+    "traj_encoder_type",
+    "max_seq_len",
+    "learning_rate",
+    "lr_warmup_steps",
+    "l2_coeff",
+    "grad_clip",
+)
+
+
+def mirror_online_experiment_gin_bindings() -> None:
+    """Copy ``MetamonAMAGOExperiment`` gin scope onto ``MetamonOnlineExperiment``."""
+    for param in _ONLINE_EXPERIMENT_GIN_PARAMS:
+        src = f"{MetamonAMAGOExperiment.__name__}.{param}"
+        dst = f"{MetamonOnlineExperiment.__name__}.{param}"
+        try:
+            gin.bind_parameter(dst, gin.query_parameter(src))
+        except ValueError:
+            pass
+
+
+@gin.configurable
+class MetamonOnlineExperiment(MetamonAMAGOExperiment):
+    """Online RL experiment with per-lane AMAGO policy temperature during collection."""
+
+    def __init__(
+        self,
+        temp_low: float = 1.0,
+        temp_high: float = 2.0,
+        gin_config: Optional[dict] = None,
+        gin_config_files: Optional[list[str]] = None,
+        gin_extra_bindings: Optional[dict] = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.temp_low = temp_low
+        self.temp_high = temp_high
+        self._gin_config = gin_config
+        self._gin_config_files = gin_config_files
+        self._gin_extra_bindings = gin_extra_bindings or {}
+
+    def _reload_gin(self) -> None:
+        """Re-apply gin after env init (opponent ``initialize_agent`` clears gin).
+
+        Collection envs load opponents during ``init_envs``. Each opponent load
+        calls ``gin.clear_config()`` and rebinds that opponent's scope, leaving
+        global gin holding the *last* opponent's bindings. Some opponents set
+        params the trainee config does not (e.g. ``Multigammas.discrete``), so we
+        must ``clear_config`` before re-applying the trainee scope -- otherwise a
+        leaked binding (e.g. a 2-gamma opponent) silently changes the trainee
+        architecture and the published ``latest/policy.pt`` fails to load.
+
+        Validation envs also load opponents, so they need the same treatment.
+        Learn-only uses placeholder train *and* val envs (no opponents), so gin
+        stays locked from ``create_online_experiment`` and must not be rebound.
+        """
+        loads_opponents = (
+            self.train_timesteps_per_epoch > 0 or self.val_timesteps_per_epoch > 0
+        )
+        if not loads_opponents:
+            return
+        if self._gin_config is not None and self._gin_config_files is not None:
+            gin.clear_config()
+            amago.cli_utils.use_config(
+                self._gin_config, self._gin_config_files, finalize=False
+            )
+            for name, value in self._gin_extra_bindings.items():
+                try:
+                    gin.bind_parameter(name, value)
+                except ValueError:
+                    pass
+            mirror_online_experiment_gin_bindings()
+            gin.finalize()
+
+    def start(self):
+        self.init_dsets()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            warnings.filterwarnings("always", category=amago.utils.AmagoWarning)
+            env_summary = self.init_envs()
+        self._reload_gin()
+        self.init_dloaders()
+        self.init_model()
+        self.init_checkpoints()
+        self.init_logger()
+        if self.verbose:
+            self.summary(env_summary=env_summary)
+
+    def _reset_policy_temperature(self) -> None:
+        policy_dist = self.policy.actor.policy_dist
+        device = next(self.policy.parameters()).device
+        policy_dist.temperature = torch.tensor(1.0, device=device)
+
+    def collect_new_training_data(self) -> None:
+        policy_dist = self.policy.actor.policy_dist
+        device = next(self.policy.parameters()).device
+        n = self.parallel_actors
+        temps = torch.empty(n, device=device).uniform_(self.temp_low, self.temp_high)
+        policy_dist.temperature = temps.view(n, 1, 1, 1)
+        try:
+            super().collect_new_training_data()
+        finally:
+            self._reset_policy_temperature()

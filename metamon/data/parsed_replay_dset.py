@@ -75,6 +75,10 @@ class MetamonDataset(Dataset):
         verbose: Print progress information.
         shuffle: Shuffle the filename list.
         use_cached_filenames: Use cached index files for faster startup.
+        write_index_cache: Persist the directory listing to ``index.csv`` after a
+            fresh scan. Disable for buffers shared by multiple processes (e.g. the
+            online FIFO) where concurrent writers would race on the same file and
+            the cache is never read back anyway.
 
     Returns (from __getitem__):
         nested_obs: Dict of lists of numpy arrays for each observation key.
@@ -106,6 +110,7 @@ class MetamonDataset(Dataset):
         verbose: bool = False,
         shuffle: bool = False,
         use_cached_filenames: bool = False,
+        write_index_cache: bool = True,
         split: Optional[str] = None,
         test_fraction: float = 0.1,
         split_seed: int = 42,
@@ -131,6 +136,7 @@ class MetamonDataset(Dataset):
         self.verbose = verbose
         self.shuffle = shuffle
         self.use_cached_filenames = use_cached_filenames
+        self.write_index_cache = write_index_cache
         self.split = split
         self.test_fraction = test_fraction
         self.split_seed = split_seed
@@ -272,17 +278,25 @@ class MetamonDataset(Dataset):
     def _filter_filename(self, filename: str, format_name: str) -> bool:
         """Apply rating, date, and win/loss filters to a filename."""
         # Parse filename: battle_id_rating_p1_vs_p2_date_result.json
+        #
+        # Player/team tokens can themselves contain underscores (e.g. online
+        # collection writes opponents like "Superkazam-ckpt40-gl_05_26"), so we
+        # anchor on the fixed positions from each end rather than requiring an
+        # exact split count. The schema always has:
+        #   parts[0]  = battle_id            parts[1]  = rating
+        #   parts[-2] = date                 parts[-1] = result
+        # with one or more player/"vs"/team tokens in between.
         name_without_ext = (
             filename[:-9] if filename.endswith(".json.lz4") else filename[:-5]
         )
         parts = name_without_ext.split("_")
 
-        if len(parts) == 7:
-            battle_id, rating_str, p1, _, p2, date_str, result = parts
-        elif len(parts) == 8:
-            battle_id, rating_str, p1a, p1b, _, p2, date_str, result = parts
-        else:
+        if len(parts) < 7 or "vs" not in parts[2:-2]:
             return False
+        battle_id = parts[0]
+        rating_str = parts[1]
+        date_str = parts[-2]
+        result = parts[-1]
 
         # Validate format in battle_id
         if (
@@ -355,11 +369,16 @@ class MetamonDataset(Dataset):
         has_directory_formats = any(
             not self._format_is_tar.get(fmt, False) for fmt in self.formats
         )
-        will_rebuild_dir_index = has_directory_formats and (
-            not self.use_cached_filenames or not os.path.exists(self.index_path)
+        will_rebuild_dir_index = (
+            has_directory_formats
+            and self.write_index_cache
+            and (not self.use_cached_filenames or not os.path.exists(self.index_path))
         )
         if will_rebuild_dir_index and os.path.exists(self.index_path):
-            os.remove(self.index_path)  # Clear stale index before rebuilding
+            try:
+                os.remove(self.index_path)  # Clear stale index before rebuilding
+            except FileNotFoundError:
+                pass
 
         for format_name in self.formats:
             if self._format_is_tar.get(format_name, False):
@@ -414,13 +433,17 @@ class MetamonDataset(Dataset):
             rel_paths = self._index_directory(format_name)
             if self.verbose:
                 print(f"Indexed {len(rel_paths)} files from {format_name}/")
-            # Write to index.csv cache (append if exists, create with header if not)
-            write_header = not os.path.exists(self.index_path)
-            with open(self.index_path, "a") as f:
-                if write_header:
-                    f.write("filename\n")
-                for rel_path in rel_paths:
-                    f.write(f"{rel_path}\n")
+            # Write to index.csv cache (append if exists, create with header if not).
+            # Skipped when write_index_cache is False (e.g. the online FIFO buffer,
+            # which is scanned fresh every epoch and shared by many processes that
+            # would otherwise race on this file).
+            if self.write_index_cache:
+                write_header = not os.path.exists(self.index_path)
+                with open(self.index_path, "a") as f:
+                    if write_header:
+                        f.write("filename\n")
+                    for rel_path in rel_paths:
+                        f.write(f"{rel_path}\n")
 
         # Filter and add as absolute paths
         iterator = (

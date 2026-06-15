@@ -301,6 +301,35 @@ def merge_defaults(defaults: dict, overrides: dict) -> dict:
     return merged
 
 
+def expand_agent_pool_entries(
+    base_name: str, merged: dict
+) -> List[Tuple[str, dict]]:
+    """Expand one merged agent config into weighted pool rows.
+
+    ``num_agents: 1`` (or omitted) yields a single ``(base_name, merged)`` row.
+    ``num_agents: N`` yields ``N`` rows named ``base_name-1`` … ``base_name-N``,
+    each pointing at the same merged config. Opponent pools sample uniformly over
+    rows, so this matches ladder self-play's ``num_agents`` weighting.
+    """
+    num_agents = merged.get("num_agents", 1)
+    if num_agents is None:
+        num_agents = 1
+    try:
+        num_agents = int(num_agents)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Agent {base_name!r}: num_agents must be a positive integer, "
+            f"got {num_agents!r}"
+        ) from exc
+    if num_agents < 1:
+        raise ValueError(
+            f"Agent {base_name!r}: num_agents must be >= 1, got {num_agents}"
+        )
+    if num_agents == 1:
+        return [(base_name, merged)]
+    return [(f"{base_name}-{i}", merged) for i in range(1, num_agents + 1)]
+
+
 def sample_policy_from_merged(name: str, merged: dict) -> PolicySpec:
     """Sample a :class:`PolicySpec` from a ladder-style merged agent config.
 

@@ -1,0 +1,14 @@
+import metamon.rl.custom_agent
+
+# Online RL finetune overrides (loaded after the base model train gin).
+#
+# AMAGO uses linear LR warmup (0 → peak) for lr_warmup_steps gradient updates, then
+# holds peak LR constant. online_rl.py also sets lr_warmup_steps from
+# --lr_warmup_epochs × steps_per_epoch × grad_accum (default 20 epochs).
+
+MetamonAMAGOExperiment.learning_rate = 8e-5
+MetamonAMAGOExperiment.lr_warmup_steps = 20_000
+MetamonAMAGOExperiment.grad_clip = 1.0
+
+# Ramp IS sequence-floor alongside LR warmup (when ISAdvantageFilter is active).
+custom_agent.ISAdvantageFilter.seq_floor_warmup_steps = 20_000
