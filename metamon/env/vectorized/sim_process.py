@@ -319,8 +319,8 @@ class ShowdownSimProcess:
     def pump_until(
         self,
         predicate: Callable[[], bool],
-        timeout: float = 30.0,
-        idle_timeout: float = 10.0,
+        timeout: float = 90.0,
+        idle_timeout: float = 45.0,
     ) -> None:
         """Dispatch host chunks until ``predicate()`` is True."""
         if predicate():
@@ -562,8 +562,8 @@ class ShardedShowdownSimProcess:
     def pump_until(
         self,
         predicate: Callable[[], bool],
-        timeout: float = 30.0,
-        idle_timeout: float = 10.0,
+        timeout: float = 90.0,
+        idle_timeout: float = 45.0,
     ) -> None:
         if predicate():
             return

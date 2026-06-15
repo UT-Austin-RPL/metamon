@@ -1325,6 +1325,38 @@ class V2AGroupedV2DataAblation(PretrainedModel):
 
 
 @pretrained_model()
+class V2AGroupedV2StatsAblation(PretrainedModel):
+    """Same small GroupedV2 architecture as ``V2AGroupedV2DataAblation`` but using
+    the computed-stats observation space (``GroupedStatsObservationSpace``, per-
+    Pokemon numeric width 37 instead of 31).
+
+    There are no pretrained weights on HF for this config; it exists as the
+    *from-scratch* base for the gen9ou online RL run ``mini_online_g9_v0``
+    (``--base_model V2AGroupedV2StatsAblation --from_scratch``). ``default_checkpoint=0``
+    means "untrained base, skip weight load" so instantiating it never tries to
+    download a checkpoint.
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="v2_grouped_v2_arch_stats_ablation",
+            model_gin_config="smaller_multitaskagent_grouped_v2_arch.gin",
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            default_checkpoint=0,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("GroupedStatsObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonGroupedTstepEncoderV2.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+
+@pretrained_model()
 class TaurosV0(PretrainedModel):
     def __init__(self):
         super().__init__(

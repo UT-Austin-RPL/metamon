@@ -1961,6 +1961,43 @@ class GroupedObservationSpace(ObservationSpace):
 
 
 @register_observation_space()
+class GroupedStatsObservationSpace(GroupedObservationSpace):
+    """GroupedObservationSpace variant that also encodes computed battle stats.
+
+    On top of the pokedex ``base_*`` stats, each Pokemon gets its *computed*
+    battle stats (``hp_stat, atk_stat, def_stat, spa_stat, spd_stat, spe_stat``),
+    which fold in level / IV / EV / nature. These are real for newly collected
+    self-play battles but are ``UniversalPokemon.MISSING_STAT`` (-1) for older /
+    offline data (and for opponent Pokemon whose stats cannot be inferred).
+    Missing values are encoded as a distinct sentinel so the model can fall back
+    to the base stats / name token, which keeps this space backward-compatible
+    with the large offline dataset.
+
+    The per-Pokemon numeric width grows 31 -> 37; ``MetamonGroupedTstepEncoderV2``
+    infers this from ``gym_space``, so no encoder config change is required.
+    """
+
+    POKEMON_NUM_LEN = 37  # base GroupedObservationSpace (31) + computed stats×6
+
+    # Computed stats are normalized by an approximate max (HP can reach ~714 at
+    # lvl 100); missing stats use a sentinel outside the normal [0, ~1] range.
+    STAT_NORM = 714.0
+    MISSING_STAT_SENTINEL = -2.0
+
+    def _get_universal_pokemon_numbers(
+        self, pokemon: UniversalPokemon, is_active: bool = True
+    ) -> list[float]:
+        out = super()._get_universal_pokemon_numbers(pokemon, is_active=is_active)
+        for stat in ("atk", "spa", "def", "spd", "spe", "hp"):
+            val = getattr(pokemon, f"{stat}_stat")
+            if val == UniversalPokemon.MISSING_STAT:
+                out.append(self.MISSING_STAT_SENTINEL)
+            else:
+                out.append(val / self.STAT_NORM)
+        return out
+
+
+@register_observation_space()
 class PatchPokeAgentTeraBug(ObservationSpace):
     """
     Intentionally reintroduces a bug in the "pokeagent" backend that has been fixed.

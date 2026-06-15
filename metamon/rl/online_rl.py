@@ -40,6 +40,8 @@ Launch patterns
 from __future__ import annotations
 
 import os
+import copy
+import random
 from functools import partial
 from typing import Optional
 
@@ -50,7 +52,13 @@ import wandb
 import metamon
 from metamon.data import MetamonDataset
 from metamon.env import get_metamon_teams
-from metamon.interface import get_reward_function, get_reward_function_names
+from metamon.interface import (
+    ObservationSpace,
+    UniversalPokemon,
+    UniversalState,
+    get_reward_function,
+    get_reward_function_names,
+)
 from metamon.rl.dataset_config import (
     DATASET_CONFIG_DIR,
     build_dataset,
@@ -205,6 +213,16 @@ def add_cli(parser):
         "--online_weight after the buffer becomes ready (also applies on restart when "
         "the buffer is already full).",
     )
+    parser.add_argument(
+        "--stats_dropout_prob",
+        type=float,
+        default=0.0,
+        help="Probability of dropping computed battle stats (*_stat -> MISSING) on a "
+        "sampled ONLINE FIFO trajectory, so the online buffer's stat distribution "
+        "matches the offline data (which has stats == -1). Only meaningful with a "
+        "computed-stats observation space (e.g. GroupedStatsObservationSpace). "
+        "0.0 disables.",
+    )
     parser.add_argument("--lanes", type=int, default=32)
     parser.add_argument("--n_workers", type=int, default=1)
     parser.add_argument(
@@ -233,6 +251,20 @@ def add_cli(parser):
         default=None,
         help="Showdown battle format (e.g. gen1ou). Defaults to the first "
         "format in --dataset_config, else gen1ou.",
+    )
+    parser.add_argument(
+        "--train_team_set",
+        type=str,
+        default=DEFAULT_TRAIN_TEAM_SET,
+        help=f"Team set for collection (self-play) envs. Default: "
+        f"{DEFAULT_TRAIN_TEAM_SET}.",
+    )
+    parser.add_argument(
+        "--val_team_set",
+        type=str,
+        default=DEFAULT_VAL_TEAM_SET,
+        help=f"Team set for validation envs. Default: {DEFAULT_VAL_TEAM_SET} "
+        f"(gen9ou runs typically use gl_05_26).",
     )
     parser.add_argument(
         "--reward_function",
@@ -362,6 +394,67 @@ def _resolve_val_opponent_config(
     }
 
 
+class StatsDropoutObservationSpace(ObservationSpace):
+    """Online-only wrapper that randomly hides computed battle stats.
+
+    Newly collected self-play battles carry real per-Pokemon computed stats
+    (``*_stat``), but the large offline replay dataset stores them as
+    ``UniversalPokemon.MISSING_STAT`` (-1). To keep the online FIFO buffer's
+    stat distribution compatible with the offline data -- and to stop the model
+    from over-relying on a feature that is absent in most of its training data --
+    we randomly drop the computed stats from sampled online trajectories before
+    they are encoded.
+
+    The dice are rolled once per trajectory in ``reset()`` (``MetamonDataset``
+    calls ``reset()`` once and then ``state_to_obs`` per timestep), so a sampled
+    trajectory is dropped as a whole, mirroring how real data either has or
+    lacks computed stats for an entire battle.
+
+    Applied ONLY to the FIFO (online) dataset's observation space; offline data
+    and live collection / validation keep their real stats.
+    """
+
+    STAT_NAMES = ("hp", "atk", "def", "spa", "spd", "spe")
+
+    def __init__(self, base_obs_space: ObservationSpace, dropout_prob: float):
+        self.base_obs_space = base_obs_space
+        self.dropout_prob = float(dropout_prob)
+        self._drop_this_traj = False
+        super().__init__()
+
+    def reset(self):
+        self.base_obs_space.reset()
+        self._drop_this_traj = (
+            self.dropout_prob > 0.0 and random.random() < self.dropout_prob
+        )
+
+    @property
+    def gym_space(self):
+        return self.base_obs_space.gym_space
+
+    @property
+    def tokenizable(self):
+        return self.base_obs_space.tokenizable
+
+    @property
+    def tokenizer(self):
+        # delegate so downstream code that reads obs_space.tokenizer still works
+        return self.base_obs_space.tokenizer
+
+    def _drop_stats(self, pokemon: UniversalPokemon) -> None:
+        for stat in self.STAT_NAMES:
+            setattr(pokemon, f"{stat}_stat", UniversalPokemon.MISSING_STAT)
+
+    def state_to_obs(self, state: UniversalState):
+        if self._drop_this_traj:
+            state = copy.deepcopy(state)
+            self._drop_stats(state.player_active_pokemon)
+            self._drop_stats(state.opponent_active_pokemon)
+            for pokemon in state.available_switches:
+                self._drop_stats(pokemon)
+        return self.base_obs_space.state_to_obs(state)
+
+
 def build_online_mixture_dataset(
     *,
     pretrained,
@@ -373,15 +466,23 @@ def build_online_mixture_dataset(
     online_anneal_epochs: int,
     battle_format: str,
     reward_function,
+    stats_dropout_prob: float = 0.0,
 ):
     """Offline replay mix + FIFO buffer of online-collected trajectories."""
     config = load_dataset_config(dataset_config_path)
     formats = config.formats or [battle_format]
     fifo_root = os.path.abspath(buffer_dir)
     os.makedirs(os.path.join(fifo_root, battle_format), exist_ok=True)
+    # Offline data already has stats == -1; only the online FIFO buffer needs
+    # stat dropout to match that distribution.
+    fifo_obs_space = pretrained.observation_space
+    if stats_dropout_prob > 0.0:
+        fifo_obs_space = StatsDropoutObservationSpace(
+            base_obs_space=fifo_obs_space, dropout_prob=stats_dropout_prob
+        )
     fifo_metamon = MetamonDataset(
         dset_root=fifo_root,
-        observation_space=pretrained.observation_space,
+        observation_space=fifo_obs_space,
         action_space=pretrained.action_space,
         reward_function=reward_function,
         formats=formats,
@@ -428,8 +529,9 @@ def _make_collect_train_env(
     lanes: int,
     n_workers: int,
     seed: Optional[int],
+    team_set_name: str = DEFAULT_TRAIN_TEAM_SET,
 ):
-    team_set = get_metamon_teams(battle_format, DEFAULT_TRAIN_TEAM_SET)
+    team_set = get_metamon_teams(battle_format, team_set_name)
     return partial(
         make_metamon_env,
         battle_format=battle_format,
@@ -491,8 +593,9 @@ def _make_val_env(
     lanes: int,
     n_workers: int,
     seed: Optional[int],
+    team_set_name: str = DEFAULT_VAL_TEAM_SET,
 ):
-    team_set = get_metamon_teams(battle_format, DEFAULT_VAL_TEAM_SET)
+    team_set = get_metamon_teams(battle_format, team_set_name)
     return partial(
         make_metamon_env,
         battle_format=battle_format,
@@ -523,6 +626,8 @@ def create_online_experiment(
     buffer_dir: str,
     lanes: int,
     n_workers: int,
+    train_team_set: str = DEFAULT_TRAIN_TEAM_SET,
+    val_team_set: str = DEFAULT_VAL_TEAM_SET,
     temp_low: float,
     temp_high: float,
     epochs: int,
@@ -598,6 +703,7 @@ def create_online_experiment(
             lanes=lanes,
             n_workers=n_workers,
             seed=seed,
+            team_set_name=train_team_set,
         )
         parallel_actors = lanes
         effective_train_timesteps = train_timesteps_per_epoch
@@ -627,6 +733,7 @@ def create_online_experiment(
             lanes=lanes,
             n_workers=n_workers,
             seed=seed,
+            team_set_name=val_team_set,
         )
         effective_val_timesteps = val_timesteps
         effective_val_interval = val_interval
@@ -803,6 +910,7 @@ if __name__ == "__main__":
             online_anneal_epochs=args.online_anneal_epochs,
             battle_format=battle_format,
             reward_function=reward_function,
+            stats_dropout_prob=args.stats_dropout_prob,
         )
 
     config_save_path = os.path.join(args.save_dir, args.run_name, "dataset_config.yaml")
@@ -823,6 +931,8 @@ if __name__ == "__main__":
         buffer_dir=args.buffer_dir,
         lanes=args.lanes,
         n_workers=args.n_workers,
+        train_team_set=args.train_team_set,
+        val_team_set=args.val_team_set,
         temp_low=args.temp_low,
         temp_high=args.temp_high,
         epochs=args.epochs,
