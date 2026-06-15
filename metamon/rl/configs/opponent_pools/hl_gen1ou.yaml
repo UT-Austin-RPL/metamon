@@ -1,0 +1,42 @@
+# High-level gen1ou opponent pool for online RL training collection.
+# Each agent samples a checkpoint below its default (null = default/best) and a temperature.
+# num_agents (defaults or per-agent) duplicates pool rows → higher sample weight.
+# Verify checkpoint epochs exist on HuggingFace before long runs.
+defaults:
+  team_set: gl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0, 1.25, 1.5, 1.75, 2.0]
+  num_agents: 1
+
+agents:
+  TaurosV0:
+    model_name: TaurosV0
+    num_agents: 2
+    # default ckpt 62; verify epochs exist on HF / adjust
+    checkpoints: "range(50, 63, 2)"
+
+  Kakuna:
+    model_name: Kakuna
+    num_agents: 2
+    checkpoints: "range(24, 35, 2)"
+
+  Alakazam:
+    model_name: Alakazam
+    checkpoints: "range(2, 9, 2)"
+
+  SyntheticRLV2:
+    model_name: SyntheticRLV2
+    checkpoints: "range(36, 49, 2)"
+
+  V2ADataAblation:
+    model_name: V2AGroupedV2DataAblation
+    checkpoints: "range(74, 91, 2)"
+
+  Superkazam:
+    model_name: Superkazam
+    checkpoints: "range(38, 51, 2)"
+
+  Kadabra3:
+    model_name: Kadabra3
+    checkpoints: "range(10, 21, 2)"

@@ -14,6 +14,7 @@ from metamon.env import get_metamon_teams
 from metamon.env.wrappers import TeamSet
 from metamon.rl.evaluate.common import (
     PolicySpec,
+    expand_agent_pool_entries,
     load_config,
     merge_defaults,
     sample_policy_from_merged,
@@ -21,7 +22,11 @@ from metamon.rl.evaluate.common import (
 
 
 def parse_opponent_pool_dict(raw: Dict[str, Any]) -> List[Tuple[str, dict]]:
-    """Parse ``agents`` / ``policies`` + ``defaults`` into (name, merged_config) rows."""
+    """Parse ``agents`` / ``policies`` + ``defaults`` into (name, merged_config) rows.
+
+    Each agent is expanded by its merged ``num_agents`` field (default 1). A value
+    of ``N`` adds ``N`` equally-weighted rows, matching ladder self-play expansion.
+    """
     defaults = raw.get("defaults", {})
     agents = raw.get("agents")
     if agents is None:
@@ -36,7 +41,7 @@ def parse_opponent_pool_dict(raw: Dict[str, Any]) -> List[Tuple[str, dict]]:
         merged = merge_defaults(defaults, agent_config or {})
         if "model_name" not in merged:
             merged["model_name"] = base_name
-        rows.append((base_name, merged))
+        rows.extend(expand_agent_pool_entries(base_name, merged))
     return rows
 
 

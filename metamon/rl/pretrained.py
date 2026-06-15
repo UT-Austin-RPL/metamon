@@ -240,7 +240,9 @@ class PretrainedModel:
         )
         # starting the experiment will build the initial model
         experiment.start()
-        if checkpoint is not None:
+        # checkpoint == 0 means "untrained base, skip load"; any non-zero value
+        # (including the LATEST_CHECKPOINT sentinel) loads weights from disk.
+        if checkpoint != 0:
             ckpt_state = torch.load(ckpt_path, map_location="cpu")
             ckpt_state = self._normalize_checkpoint_keys(ckpt_state)
             model_state = experiment.policy.state_dict()
@@ -392,6 +394,7 @@ class LocalFinetunedModel(LocalPretrainedModel):
             reward_function=reward_function,
             battle_backend=battle_backend,
             dataset_config=dataset_config,
+            gin_overrides=base_model.gin_overrides,
         )
 
 
@@ -1340,6 +1343,90 @@ class TaurosV0(PretrainedModel):
                 ),
             },
         )
+
+
+ONLINE_TAUROS_V1_SAVE_DIR = (
+    "/mnt/nfs_client/jake/metamon_scratchpad/online_tauros_v1"
+)
+
+# Sentinel checkpoint id that resolves to the learner's rolling ``latest/policy.pt``
+# instead of a saved ``policy_epoch_{N}.pt``. Lets us eval exactly what the
+# validator loads each epoch (e.g. ``--checkpoints -1``).
+LATEST_CHECKPOINT = -1
+
+
+@pretrained_model()
+class OnlineTaurosV1(LocalFinetunedModel):
+    """Online RL finetune of TaurosV0 from ``metamon.rl.online_rl`` run ``online_tauros_v1``.
+
+    Checkpoints live under
+    ``{save_dir}/online_tauros_v1/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    Pass ``checkpoint=N`` to ``initialize_agent`` or the evaluate CLI to pick a
+    specific epoch (``default_checkpoint`` is 290, the last ``policy_epoch_*``
+    saved at ``ckpt_interval=10`` when training finished).
+    Pass ``checkpoint=-1`` (``LATEST_CHECKPOINT``) to load the learner's rolling
+    ``ckpts/latest/policy.pt`` — the same file the validator reads each epoch.
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=TaurosV0,
+            amago_ckpt_dir=ONLINE_TAUROS_V1_SAVE_DIR,
+            model_name="online_tauros_v1",
+            default_checkpoint=290,
+            # Same train gin stack as online_rl.py (TaurosV0 default + online_rl.gin
+            # overrides are LR-only and irrelevant at eval time).
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
+MINI_ONLINE_V1_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/mini_online_v1"
+
+
+@pretrained_model()
+class SmallG1OnlineV0(LocalFinetunedModel):
+    """Online RL run ``mini_online_v1`` from ``metamon.rl.online_rl``.
+
+    Unlike ``OnlineTaurosV1`` (a finetune of TaurosV0), this run was trained
+    *from scratch* (``--from_scratch``) using the smaller ``V2AGroupedV2DataAblation``
+    architecture (GroupedV2 tstep encoder), the same offline mixture
+    (``online_selfplay.yaml``), and a fresh online buffer. ``base_model`` here only
+    supplies the architecture/spaces/tokenizer/reward config — none of its weights
+    are loaded; weights come from this run's own checkpoints.
+
+    Checkpoints live under
+    ``{save_dir}/mini_online_v1/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    Pass ``checkpoint=N`` for a specific epoch, or ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) for the learner's rolling ``ckpts/latest/policy.pt``
+    (the same file the validator reads each epoch).
+
+    NOTE: ``default_checkpoint`` is the latest saved epoch as of registration; the
+    run targets epoch 3950 (``ckpt_interval=50``). Bump this to the final saved
+    epoch once training finishes.
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=MINI_ONLINE_V1_SAVE_DIR,
+            model_name="mini_online_v1",
+            default_checkpoint=3050,
+            # Same train gin stack as online_rl.py (base model default +
+            # online_rl.gin overrides are LR-only and irrelevant at eval time).
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
 
 
 @pretrained_model()

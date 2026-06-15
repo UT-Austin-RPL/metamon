@@ -1,0 +1,11 @@
+# Fixed TaurosV0 opponent for online RL validation.
+defaults:
+  team_set: competitive
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  TaurosV0:
+    model_name: TaurosV0
