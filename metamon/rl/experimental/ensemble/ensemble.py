@@ -379,7 +379,9 @@ class HeuristicRouterEnsemblePolicy(nn.Module):
     def _flush_anchor_metrics(self) -> None:
         if not self._anchor_metrics_path:
             return
-        os.makedirs(os.path.dirname(self._anchor_metrics_path), exist_ok=True)
+        metrics_dir = os.path.dirname(self._anchor_metrics_path)
+        if metrics_dir:
+            os.makedirs(metrics_dir, exist_ok=True)
         payload = {
             "anchor_model_index": self.anchor_idx,
             "anchor_model_name": self.members[self.anchor_idx].spec.model_name,

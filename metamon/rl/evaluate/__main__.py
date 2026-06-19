@@ -38,6 +38,7 @@ def pretrained_vs_baselines(
     total_battles: int = 250,
     parallel_actors_per_baseline: int = 5,
     action_temperature: float = 1.0,
+    agent_sample: bool = True,
     async_mp_context: str = "forkserver",
     battle_backend: str = "metamon",
     log_to_wandb: bool = False,
@@ -54,6 +55,7 @@ def pretrained_vs_baselines(
     agent = pretrained_model.initialize_agent(
         checkpoint=checkpoint, log=log_to_wandb, action_temperature=action_temperature
     )
+    agent.sample_actions_val = agent_sample
     baselines = baselines or HEURISTIC_COMPOSITE_BASELINES
     agent.async_env_mp_context = async_mp_context
     # create envs that match the agent's observation/actions/rewards
@@ -97,6 +99,7 @@ def pretrained_vs_metamon(
     n_workers: int = 1,
     opponent_gpu_idx: Optional[int] = None,
     action_temperature: float = 1.0,
+    agent_sample: bool = True,
     opponent_sample: bool = True,
     eval_player_side: int = 0,
     log_to_wandb: bool = False,
@@ -149,6 +152,7 @@ def pretrained_vs_metamon(
     agent = pretrained_model.initialize_agent(
         checkpoint=checkpoint, log=log_to_wandb, action_temperature=action_temperature
     )
+    agent.sample_actions_val = agent_sample
     env_kwargs = dict(
         battle_format=battle_format,
         observation_space=pretrained_model.observation_space,
@@ -192,6 +196,7 @@ def _pretrained_on_ladder(
     checkpoint: Optional[int],
     log_to_wandb: bool,
     action_temperature: float = 1.0,
+    agent_sample: bool = True,
     team_preview_model: Optional[TeamPreviewModel] = None,
     step_preview: bool = False,
     step_preview_host: str = "127.0.0.1",
@@ -203,6 +208,7 @@ def _pretrained_on_ladder(
     agent = pretrained_model.initialize_agent(
         checkpoint=checkpoint, log=log_to_wandb, action_temperature=action_temperature
     )
+    agent.sample_actions_val = agent_sample
     agent.env_mode = "sync"
     agent.parallel_actors = 1
     agent.verbose = False  # turn off tqdm progress bar and print poke-env battle status
@@ -248,6 +254,7 @@ def pretrained_vs_local_ladder(
     checkpoint: Optional[int] = None,
     battle_backend: str = "metamon",
     action_temperature: float = 1.0,
+    agent_sample: bool = True,
     save_trajectories_to: Optional[str] = None,
     save_results_to: Optional[str] = None,
     log_to_wandb: bool = False,
@@ -276,6 +283,7 @@ def pretrained_vs_local_ladder(
         checkpoint=checkpoint,
         log_to_wandb=log_to_wandb,
         action_temperature=action_temperature,
+        agent_sample=agent_sample,
         team_preview_model=team_preview_model,
         player_username=username,
         player_avatar=avatar,
@@ -302,6 +310,7 @@ def pretrained_vs_pokeagent_ladder(
     checkpoint: Optional[int] = None,
     battle_backend: str = "metamon",
     action_temperature: float = 1.0,
+    agent_sample: bool = True,
     save_trajectories_to: Optional[str] = None,
     save_results_to: Optional[str] = None,
     log_to_wandb: bool = False,
@@ -330,6 +339,7 @@ def pretrained_vs_pokeagent_ladder(
         checkpoint=checkpoint,
         log_to_wandb=log_to_wandb,
         action_temperature=action_temperature,
+        agent_sample=agent_sample,
         team_preview_model=team_preview_model,
         player_username=username,
         player_password=password,
@@ -358,6 +368,7 @@ def pretrained_vs_challenge(
     checkpoint: Optional[int] = None,
     battle_backend: str = "metamon",
     action_temperature: float = 1.0,
+    agent_sample: bool = True,
     save_trajectories_to: Optional[str] = None,
     save_results_to: Optional[str] = None,
     log_to_wandb: bool = False,
@@ -390,6 +401,7 @@ def pretrained_vs_challenge(
         checkpoint=checkpoint,
         log_to_wandb=log_to_wandb,
         action_temperature=action_temperature,
+        agent_sample=agent_sample,
         team_preview_model=team_preview_model,
         player_username=username,
         opponent_username=opponent_username,
@@ -544,6 +556,7 @@ def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
                     "battle_backend": backend,
                     "save_trajectories_to": args.save_trajectories_to,
                     "action_temperature": args.temperature,
+                    "agent_sample": args.agent_sample,
                     "save_results_to": args.save_results_to,
                     "log_to_wandb": args.log_to_wandb,
                     "team_preview_model": team_preview_model,
@@ -731,6 +744,12 @@ def add_cli(parser):
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Sample opponent actions stochastically (default: True). Pass --no-opponent-sample for argmax.",
+    )
+    parser.add_argument(
+        "--agent_sample",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Sample the evaluated agent's actions stochastically (default: True). Pass --no-agent_sample for deterministic argmax selection.",
     )
     parser.add_argument(
         "--eval_player_side",
