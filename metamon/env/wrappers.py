@@ -1,5 +1,6 @@
 import random
 import os
+import time
 import copy
 import json
 import warnings
@@ -17,7 +18,10 @@ from poke_env import (
 from poke_env.environment import Battle
 from poke_env.player import OpenAIGymEnv, Player
 from poke_env.teambuilder import Teambuilder
-from poke_env.ps_client.server_configuration import ServerConfiguration
+from poke_env.ps_client.server_configuration import (
+    ServerConfiguration,
+    ShowdownServerConfiguration,
+)
 
 import metamon
 from metamon.config import format_for_agent
@@ -34,6 +38,10 @@ from metamon.env.metamon_player import MetamonPlayer, PokeAgentPlayer
 from metamon.backend.team_prediction.team_index import (
     load_team_files,
     resolve_format_dir,
+)
+from metamon.backend.team_prediction.team import (
+    TeamSet as PredictionTeamSet,
+    PokemonSet,
 )
 
 METAMON_TEAM_SETS = {
@@ -75,6 +83,11 @@ class TeamSet(Teambuilder):
         else:
             print(f"Found {len(self.team_files):,} teams in TeamSet")
         self._most_recent_team_file = None
+        # Normalizing a team file (correct per-gen stat defaults via
+        # team_prediction) is comparatively expensive and runs on every battle
+        # reset. Team files are static, so cache the resulting packed team per
+        # file and only pay the parse cost once per file.
+        self._packed_team_cache: dict[str, str] = {}
 
     def block_team(self, packed_team: str) -> bool:
         """
@@ -94,16 +107,46 @@ class TeamSet(Teambuilder):
     def most_recent_team_file(self) -> Optional[str]:
         return self._most_recent_team_file
 
+    # placeholder move slots emitted by `to_str()` for mons with < 4 moves
+    _SENTINEL_MOVES = (PokemonSet.NO_MOVE, PokemonSet.MISSING_MOVE)
+
+    def _read_team_file(self, file: str) -> str:
+        """Load a team file via metamon's canonical parser and re-emit a fully
+        expanded Showdown paste.
+
+        We route through ``team_prediction.TeamSet`` rather than reading the raw
+        text so that per-generation stat defaults are applied the way Showdown
+        does. In particular, an omitted ``EVs:`` line in Gen 1/2 means MAX stat
+        experience (252 per stat) and an omitted ``IVs:`` line means 31 — but
+        poke-env's parser zero-fills EVs, which silently under-stats sparse team
+        exports (e.g. L100 Tauros Speed 255 vs 318) and pushes them out of
+        distribution for models trained on explicitly-maxed sets. For
+        already-explicit teams the re-emitted paste packs identically to the raw
+        file, so this is a no-op there.
+        """
+        pred_team = PredictionTeamSet.from_showdown_file(file, self.battle_format)
+        text = pred_team.to_str()
+        # `to_str()` emits placeholder move slots (`<nomove>` / `$missing_move$`)
+        # for mons with fewer than four moves; drop them so poke-env / Showdown
+        # accept the team.
+        lines = [
+            line
+            for line in text.split("\n")
+            if not (line.startswith("- ") and line[2:].strip() in self._SENTINEL_MOVES)
+        ]
+        return "\n".join(lines)
+
     def yield_team(self) -> str:
         for attempt in range(100):
-            # read team from disk
+            # sample a team file
             file = random.choice(self.team_files)
             self._most_recent_team_file = file
-            with open(file, "r") as f:
-                team_data = f.read()
-            # check team
-            parsed = self.parse_showdown_team(team_data)
-            candidate_team = self.join_team(parsed)
+            # cached packed team (parse/normalize once per file)
+            candidate_team = self._packed_team_cache.get(file)
+            if candidate_team is None:
+                team_data = self._read_team_file(file)
+                candidate_team = self.join_team(self.parse_showdown_team(team_data))
+                self._packed_team_cache[file] = candidate_team
             if not self.block_team(candidate_team):
                 return candidate_team
             if attempt % 10 == 0:
@@ -334,8 +377,12 @@ class PokeEnvWrapper(OpenAIGymEnv):
             start_challenging=start_challenging,
         )
 
-        # Set team preview model on the agent if provided and using metamon backend
-        if team_preview_model is not None and battle_backend == "metamon":
+        # Attach the team-preview strategy (model or heuristic) to the agent when
+        # using a metamon-backed Player (MetamonPlayer / PokeAgentPlayer).
+        if team_preview_model is not None and battle_backend in (
+            "metamon",
+            "pokeagent",
+        ):
             self.agent.team_preview_model = team_preview_model
 
     @property
@@ -718,4 +765,69 @@ class PokeAgentLadder(QueueOnLocalLadder):
         assert (
             self.player_username is not None and self.player_password is not None
         ), "Username and password are required for PokéAgent laddering"
+        super().start_laddering(n_challenges)
+
+
+class ShowdownLadder(QueueOnLocalLadder):
+    """
+    Battle against the official Pokémon Showdown ladder (https://play.pokemonshowdown.com).
+
+    Identical to ``PokeAgentLadder`` except that it points at Smogon's public
+    Showdown server (``wss://sim3.psim.us/showdown/websocket``) instead of the
+    PokéAgent Challenge server. Requires a registered username and password.
+
+    Adds *bimodal action delay* on the ladder: before each decision the bot
+    usually waits ``action_delay`` seconds (default 1.5s), but with probability
+    ``long_action_delay_prob`` (default 10%) it instead waits
+    ``uniform(long_action_delay)`` (default 2.5-5.0s, never shorter than
+    ``action_delay``). Pass ``action_delay <= 0`` and ``long_action_delay_prob <= 0``
+    to disable delays entirely.
+    """
+
+    # increases time to launch opponent envs before ladder loop times out ("Agent is not challenging").
+    _INIT_RETRIES = 3000
+
+    def __init__(
+        self,
+        *args,
+        action_delay: float = 1.5,
+        long_action_delay: Optional[tuple[float, float]] = (2.5, 5.0),
+        long_action_delay_prob: float = 0.10,
+        **kwargs,
+    ):
+        self._action_delay = action_delay
+        self._long_action_delay = long_action_delay
+        self._long_action_delay_prob = long_action_delay_prob
+        super().__init__(*args, **kwargs)
+
+    @property
+    def server_configuration(self):
+        return ShowdownServerConfiguration
+
+    def _sleep_before_action(self) -> None:
+        if (
+            self._long_action_delay is not None
+            and self._long_action_delay_prob > 0
+            and random.random() < self._long_action_delay_prob
+        ):
+            low, high = self._long_action_delay
+            if high > 0:
+                delay = random.uniform(low, high)
+                if self._action_delay is not None and self._action_delay > 0:
+                    delay = max(delay, self._action_delay)
+                time.sleep(delay)
+                return
+        if self._action_delay is not None and self._action_delay > 0:
+            time.sleep(self._action_delay)
+
+    def embed_battle(self, battle: Battle):
+        # poke-env also calls embed_battle when a battle finishes; do not delay then.
+        if not battle.finished:
+            self._sleep_before_action()
+        return super().embed_battle(battle)
+
+    def handle_ladder_start(self, n_challenges: int):
+        assert (
+            self.player_username is not None and self.player_password is not None
+        ), "Username and password are required for Showdown laddering"
         super().start_laddering(n_challenges)

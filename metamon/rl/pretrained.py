@@ -21,6 +21,12 @@ from metamon.rl.experimental.ensemble import (
     EnsembleMemberSpec,
     build_heuristic_ensemble_experiment,
 )
+from metamon.rl.experimental.ensemblev2 import (
+    EnsembleV2Config,
+    build_ensemblev2_experiment,
+)
+from metamon.rl.experimental.ensemblev2.config import get_ensemblev2_preset
+from metamon.rl.experimental.ensemblev2.observation import MultiObservationSpace
 from metamon.interface import (
     ObservationSpace,
     RewardFunction,
@@ -1344,9 +1350,7 @@ class TaurosV0(PretrainedModel):
         )
 
 
-ONLINE_TAUROS_V1_SAVE_DIR = (
-    "/mnt/nfs_client/jake/metamon_scratchpad/online_tauros_v1"
-)
+ONLINE_TAUROS_V1_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/online_tauros_v1"
 
 # Sentinel checkpoint id that resolves to the learner's rolling ``latest/policy.pt``
 # instead of a saved ``policy_epoch_{N}.pt``. Lets us eval exactly what the
@@ -1420,6 +1424,253 @@ class SmallG1OnlineV0(LocalFinetunedModel):
             # online_rl.gin overrides are LR-only and irrelevant at eval time).
             train_gin_config="grouped_v2_large_isfilter.gin",
             dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
+MINI_ONLINE_G1_EXPERT_V2_SAVE_DIR = (
+    "/mnt/nfs_client/jake/metamon_scratchpad/mini_online_g1_expert_v2"
+)
+
+
+@pretrained_model()
+class SmallG1OnlineV1(LocalFinetunedModel):
+    """Online RL run ``mini_online_g1_expert_v2`` (gen1ou expert specialist).
+
+    A finetune of ``SmallG1OnlineV0``: initialized from that model's default
+    checkpoint (epoch 3050) and trained with ``metamon.rl.online_rl`` where the
+    trainee plays the ``expert`` team set while opponents play ``hl_05_26``
+    (only the trainee's eval-side trajectories are written to the buffer, so the
+    online buffer is exclusively expert games). Same architecture / spaces /
+    tokenizer / reward as ``SmallG1OnlineV0`` (``V2AGroupedV2DataAblation``); the
+    ISAdvantageFilter stack (``grouped_v2_large_isfilter.gin``) and the
+    ``online_selfplay.yaml`` offline mixture are used at train time.
+
+    Checkpoints live under
+    ``{save_dir}/mini_online_g1_expert_v2/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    ``default_checkpoint`` is pinned to the newest saved epoch as of registration
+    (the run is still training; bump this as later epochs are saved). Pass an
+    explicit ``checkpoint=N`` for a specific epoch, or ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) for the learner's rolling ``ckpts/latest/policy.pt``
+    (the same file the validator reads each epoch).
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=MINI_ONLINE_G1_EXPERT_V2_SAVE_DIR,
+            model_name="mini_online_g1_expert_v2",
+            default_checkpoint=200,
+            # Same train gin stack as the run's learn.sh (ISAdvantageFilter); the
+            # online_rl.gin LR overrides are irrelevant at eval time.
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
+@pretrained_model()
+class SmallG1OnlineV1_5(SmallG1OnlineV1):
+    """Identical to ``SmallG1OnlineV1`` (online RL run ``mini_online_g1_expert_v2``)
+    but pinned to a later training checkpoint.
+
+    Same run / architecture / spaces / tokenizer / reward / train gin as
+    ``SmallG1OnlineV1``; only ``default_checkpoint`` differs. The run has been
+    training continuously, so this points at a newer saved epoch. Bump
+    ``default_checkpoint`` as later epochs are saved, or pass ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) for the learner's rolling ``ckpts/latest/policy.pt``.
+    """
+
+    def __init__(self):
+        # LocalFinetunedModel.__init__ (skip SmallG1OnlineV1.__init__ so we can
+        # override default_checkpoint while keeping everything else identical).
+        LocalFinetunedModel.__init__(
+            self,
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=MINI_ONLINE_G1_EXPERT_V2_SAVE_DIR,
+            model_name="mini_online_g1_expert_v2",
+            default_checkpoint=400,
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+
+SMALLG1_ONLINE_V2_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/smallg1online_v2"
+
+
+@pretrained_model()
+class SmallG1OnlineV2(LocalFinetunedModel):
+    """Online RL run ``smallg1online_v2`` (gen1ou expert_curated specialist).
+
+    A finetune of ``SmallG1OnlineV1_5``: initialized from that model's default
+    checkpoint (epoch 400) and trained with ``metamon.rl.online_rl`` where the
+    trainee plays the ``expert_curated`` team set (the 50-team pruned/curated
+    deployment set) while opponents play ``hl_05_26``. The opponent pool now
+    includes ``SmallG1OnlineV1_5`` itself (checkpoint-randomized) alongside
+    ``SmallG1OnlineV0`` and the other top models. Only the trainee's eval-side
+    trajectories are written to the buffer, so the online buffer is exclusively
+    expert_curated games. Same architecture / spaces / tokenizer / reward as
+    ``SmallG1OnlineV0`` (``V2AGroupedV2DataAblation``); the ISAdvantageFilter
+    stack (``grouped_v2_large_isfilter.gin``, beta=3.0) and the
+    ``online_selfplay.yaml`` offline mixture are used at train time.
+
+    Checkpoints live under
+    ``{save_dir}/smallg1online_v2/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    ``default_checkpoint`` is pinned to the newest saved epoch as of registration
+    (the run is still training; bump this as later epochs are saved). Pass an
+    explicit ``checkpoint=N`` for a specific epoch, or ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) for the learner's rolling ``ckpts/latest/policy.pt``.
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=SMALLG1_ONLINE_V2_SAVE_DIR,
+            model_name="smallg1online_v2",
+            default_checkpoint=400,
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
+SMALLG1_ONLINE_V3_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/smallg1online_v3"
+
+
+@pretrained_model()
+class SmallG1OnlineV3(LocalFinetunedModel):
+    """Online RL run ``smallg1online_v3`` (gen1ou expert_curated specialist).
+
+    A finetune of ``SmallG1OnlineV2``: initialized from that model's default
+    checkpoint (epoch 400) and trained with ``metamon.rl.online_rl`` where the
+    trainee plays the ``expert_curated`` team set -- now pruned to 44 teams (the
+    6 Tauros-lead teams were dropped) -- while opponents play ``hl_05_26``. The
+    opponent pool adds ``SmallG1OnlineV2`` itself (checkpoint-randomized) and a
+    minimum-weight ``SyntheticRLV1``, alongside ``SmallG1OnlineV1_5`` /
+    ``SmallG1OnlineV0`` and the other top models. The trainee's (POV) exploration
+    temperature was widened to [1.0, 3.0]. Only the trainee's eval-side
+    trajectories are written to the buffer, so the online buffer is exclusively
+    expert_curated games. Same architecture / spaces / tokenizer / reward as
+    ``SmallG1OnlineV0`` (``V2AGroupedV2DataAblation``); the ISAdvantageFilter
+    stack (``grouped_v2_large_isfilter.gin``, beta=3.0) and the
+    ``online_selfplay.yaml`` offline mixture are used at train time.
+
+    Checkpoints live under
+    ``{save_dir}/smallg1online_v3/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    ``default_checkpoint`` is pinned to the newest saved epoch as of registration
+    (the run is still training; bump this as later epochs are saved). Pass an
+    explicit ``checkpoint=N`` for a specific epoch, or ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) for the learner's rolling ``ckpts/latest/policy.pt``.
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=SMALLG1_ONLINE_V3_SAVE_DIR,
+            model_name="smallg1online_v3",
+            default_checkpoint=250,
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
+MEDIUM_G1_ONLINE_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/mediumg1online"
+
+
+@pretrained_model()
+class TaurosV1(LocalPretrainedModel):
+    """Online RL run ``mediumg1online`` (gen1ou) — ~35M GroupedV2 from scratch.
+
+    Architecture: ``grouped_v2_medium.gin`` (same spaces / tokenizer / reward as
+    the SmallG1Online lineage, larger tstep encoder + transformer). No HF base
+    weights; the run was trained with ``--base_model TaurosV1 --from_scratch``.
+    Offline mix ``online_selfplay_mediumg1.yaml``; POV teams from
+    ``{hl_05_26, expert, expert_curated2}``; opponents ``hl_gen1ou_mediumg1``.
+
+    Checkpoints live under
+    ``{save_dir}/mediumg1online/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    ``default_checkpoint`` is pinned to the newest saved epoch as of registration
+    (bump as later epochs are saved). Pass ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) for the learner's rolling ``ckpts/latest/policy.pt``.
+    """
+
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir=MEDIUM_G1_ONLINE_SAVE_DIR,
+            model_name="mediumg1online",
+            model_gin_config="grouped_v2_medium.gin",
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            default_checkpoint=1400,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("GroupedObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            dataset_config="online_selfplay_mediumg1.yaml",
+            gin_overrides={
+                "MetamonGroupedTstepEncoderV2.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
+MINI_ONLINE_G9_V0_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/mini_online_g9_v0"
+
+
+@pretrained_model()
+class SmallG9OnlineV0(LocalFinetunedModel):
+    """Online RL run ``mini_online_g9_v0`` (gen9ou) from ``metamon.rl.online_rl``.
+
+    The gen9ou sibling of ``SmallG1OnlineV0``. Trained *from scratch*
+    (``--from_scratch``) on the ``V2AGroupedV2StatsAblation`` architecture
+    (GroupedV2 tstep encoder + the computed-stats ``GroupedStatsObservationSpace``),
+    the gen9ou offline mixture (``online_selfplay_gen9.yaml``), and a fresh online
+    buffer. ``base_model`` only supplies architecture/spaces/tokenizer/reward
+    config — none of its weights are loaded; weights come from this run's own
+    checkpoints.
+
+    Checkpoints live under
+    ``{save_dir}/mini_online_g9_v0/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    ``default_checkpoint`` is pinned to 2750 — the newest saved epoch as of the
+    last manual bump (the run continues training past it; bump deliberately if you
+    want a later epoch). Pass an explicit ``checkpoint=N`` for another saved
+    epoch, or ``checkpoint=-1`` (``LATEST_CHECKPOINT``) for the learner's rolling
+    ``ckpts/latest/policy.pt`` (the file the validator reads each epoch).
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2StatsAblation,
+            amago_ckpt_dir=MINI_ONLINE_G9_V0_SAVE_DIR,
+            model_name="mini_online_g9_v0",
+            default_checkpoint=2750,
+            # Same train gin stack as online_rl.py (base model default +
+            # online_rl.gin overrides are LR-only and irrelevant at eval time).
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay_gen9.yaml",
         )
 
     def get_path_to_checkpoint(self, checkpoint: int) -> str:
@@ -1677,4 +1928,106 @@ class TaurosEnsemble(KakunaEnsemble):
         )
 
 
+class EnsembleV2Model(PretrainedModel):
+    """Configurable multi-model ensemble (EnsembleV2).
+
+    Members may use DIFFERENT observation spaces and DIFFERENT action spaces. The
+    env produces one combined, namespaced observation (a :class:`MultiObservationSpace`
+    built from each member's own observation space) plus a single canonical
+    ``DefaultActionSpace`` illegal mask. The ensemble policy splits that obs per
+    member, gathers per-gamma action distributions + Q-values (remapped to canonical
+    universal action indices), and routes the action through a pluggable decider
+    (baseline: defer to the anchor).
+
+    Concrete agents are created from a :class:`EnsembleV2Config` (see
+    ``ensemblev2/presets.json`` and ``ensemblev2/register.py``). Presets may list
+    ``members`` explicitly, or use a ``same_model`` shorthand
+    (``model_name`` + ``checkpoints`` + optional ``anchor_checkpoint``) for
+    multi-checkpoint bags of one policy.
+
+    Runtime overrides (handy for tuning without editing presets):
+        - ``METAMON_ENSEMBLEV2_PRESET``: use a different preset entirely.
+        - ``METAMON_ENSEMBLEV2_DECISION``: swap the decision strategy (any name
+          from ``get_ensemble_decision_names()``, e.g. ``anchor``, ``mean_prob``,
+          ``safe_consensus``, ``majority_vote``).
+        - ``METAMON_ENSEMBLEV2_DECISION_KWARGS``: JSON dict of kwargs forwarded to
+          the decision strategy's constructor.
+    """
+
+    CONFIG: Optional[EnsembleV2Config] = None
+
+    def _resolve_config(self) -> EnsembleV2Config:
+        import dataclasses
+
+        preset_override = os.environ.get("METAMON_ENSEMBLEV2_PRESET", "").strip()
+        if preset_override:
+            config = get_ensemblev2_preset(preset_override)
+        elif self.CONFIG is not None:
+            config = self.CONFIG
+        else:
+            raise ValueError(
+                "EnsembleV2Model has no CONFIG; register a nickname or set "
+                "METAMON_ENSEMBLEV2_PRESET."
+            )
+
+        decision_override = os.environ.get("METAMON_ENSEMBLEV2_DECISION", "").strip()
+        if decision_override:
+            config = dataclasses.replace(config, decision=decision_override)
+
+        kwargs_override = os.environ.get(
+            "METAMON_ENSEMBLEV2_DECISION_KWARGS", ""
+        ).strip()
+        if kwargs_override:
+            parsed = json.loads(kwargs_override)
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    "METAMON_ENSEMBLEV2_DECISION_KWARGS must be a JSON object, "
+                    f"got {type(parsed).__name__}"
+                )
+            config = dataclasses.replace(config, decision_kwargs=parsed)
+
+        return config
+
+    def __init__(self):
+        config = self._resolve_config()
+        self._config = config
+        anchor_spec = config.members[config.anchor_index]
+        anchor_builder = get_pretrained_model(anchor_spec.model_name)
+        # The anchor's gin/config files are harmless placeholders: our
+        # initialize_agent override builds each member from its own registry
+        # entry and never uses these paths or the HF model_name.
+        PretrainedModel.__init__(
+            self,
+            model_name=f"ensemblev2-{config.name}",
+            model_gin_config=anchor_builder.model_gin_config,
+            train_gin_config=anchor_builder.train_gin_config,
+            default_checkpoint=0,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=anchor_builder.observation_space.base_obs_space,
+            tokenizer=anchor_builder.tokenizer,
+            reward_function=anchor_builder.reward_function,
+            battle_backend=anchor_builder.battle_backend,
+        )
+        # Replace the auto-tokenized single-member obs space with the real
+        # multi-member space (each member's obs space is already tokenized).
+        member_obs_spaces = [
+            get_pretrained_model(member.model_name).observation_space
+            for member in config.members
+        ]
+        self.observation_space = MultiObservationSpace(member_obs_spaces)
+
+    def initialize_agent(
+        self,
+        checkpoint: Optional[int] = None,
+        log: bool = False,
+        action_temperature: float = 1.0,
+    ):
+        return build_ensemblev2_experiment(
+            config=self._config,
+            log=log,
+            action_temperature=action_temperature,
+        )
+
+
 import metamon.rl.experimental.ensemble.register  # noqa: F401 — nickname ensemble agents
+import metamon.rl.experimental.ensemblev2.register  # noqa: F401 — nickname ensemblev2 agents

@@ -1,0 +1,54 @@
+{
+    "gen1_kakuna_tauros_smallg1": {
+        "decision": "anchor",
+        "members": [
+            {"model_name": "SmallG1OnlineV0", "checkpoint": null, "anchor": true},
+            {"model_name": "TaurosV0", "checkpoint": 62},
+            {"model_name": "Kakuna", "checkpoint": 34}
+        ]
+    },
+    "smallg1v3_ckpt_bag": {
+        "decision": "safe_anchor_gated_majority",
+        "decision_kwargs": {
+            "samples_per_member": 16,
+            "min_dissenters": 2
+        },
+        "same_model": {
+            "model_name": "SmallG1OnlineV3",
+            "checkpoints": [250, 300, 400, 500, 525],
+            "anchor_checkpoint": 300
+        }
+    },
+    "taurosv1_ckpt_bag": {
+        "decision": "safe_anchor_gated_majority",
+        "decision_kwargs": {
+            "samples_per_member": 16,
+            "min_dissenters": 2
+        },
+        "same_model": {
+            "model_name": "TaurosV1",
+            "checkpoints": [1000, 1100, 1200, 1229, 1300, 1400],
+            "anchor_checkpoint": 1400
+        }
+    },
+    "taurosv1_smallg1v3_ckpt_bag": {
+        "decision": "safe_anchor_gated_majority",
+        "decision_kwargs": {
+            "samples_per_member": 16,
+            "min_dissenters": 2
+        },
+        "members": [
+            {"model_name": "TaurosV1", "checkpoint": 1000},
+            {"model_name": "TaurosV1", "checkpoint": 1100},
+            {"model_name": "TaurosV1", "checkpoint": 1200},
+            {"model_name": "TaurosV1", "checkpoint": 1229},
+            {"model_name": "TaurosV1", "checkpoint": 1300},
+            {"model_name": "TaurosV1", "checkpoint": 1400, "anchor": true},
+            {"model_name": "SmallG1OnlineV3", "checkpoint": 250},
+            {"model_name": "SmallG1OnlineV3", "checkpoint": 300},
+            {"model_name": "SmallG1OnlineV3", "checkpoint": 400},
+            {"model_name": "SmallG1OnlineV3", "checkpoint": 500},
+            {"model_name": "SmallG1OnlineV3", "checkpoint": 525}
+        ]
+    }
+}

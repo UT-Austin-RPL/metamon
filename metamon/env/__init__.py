@@ -8,5 +8,6 @@ from metamon.env.wrappers import (
     METAMON_TEAM_SETS,
     PokeAgentServerConfiguration,
     PokeAgentLadder,
+    ShowdownLadder,
     get_metamon_teams,
 )

@@ -1,0 +1,20 @@
+# Offline mixture for the MediumG1Online generation of gen1ou online-RL runs.
+#
+# Adds the consolidated `smallg1-online` self-play subset (V0 -> V1/V1_5 -> V2 ->
+# V3 FIFO buffers, ~1.22M gen1ou trajectories; see
+# scripts/build_smallg1_online_dataset.py) to the offline mix alongside the
+# human-derived pac-* piles.
+#
+# Weights below are "within offline" (they sum to 1.0). This whole block is the
+# OFFLINE half of the training mixture; it is combined with the run's own online
+# FIFO buffer at --online_weight on the learner (e.g. --online_weight 0.50 =>
+# 50% online FIFO / 50% this offline mix). Effective share of any source =
+# (its weight here) * (1 - online_weight).
+replay_weight: 0.05
+self_play:
+  pac-base: 0.20
+  pac-exploratory: 0.20
+  pac-tauros: 0.25
+  smallg1-online: 0.30
+formats:
+  - gen1ou

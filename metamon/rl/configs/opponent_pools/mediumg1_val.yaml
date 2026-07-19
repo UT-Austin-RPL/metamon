@@ -1,0 +1,16 @@
+# Fixed SmallG1OnlineV3 opponent for the MediumG1Online validator.
+#
+# The trainee plays expert_curated (--val_team_set); the fixed opponent is
+# SmallG1OnlineV3 @ its default checkpoint ALSO drawing teams from
+# expert_curated — a specialist mirror match that tracks whether the from-scratch
+# medium run is closing the gap on the strongest SmallG1Online specialist.
+defaults:
+  team_set: expert_curated
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  SmallG1OnlineV3:
+    model_name: SmallG1OnlineV3

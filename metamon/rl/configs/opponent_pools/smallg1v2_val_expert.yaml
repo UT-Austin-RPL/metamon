@@ -1,0 +1,18 @@
+# Fixed SmallG1OnlineV2 opponent for the gen1ou expert_curated specialist
+# validator (SmallG1OnlineV3).
+#
+# The trainee plays expert_curated (set via --val_team_set); the fixed opponent
+# is SmallG1OnlineV2 (this run's starting point, @ its default ckpt 400) ALSO
+# drawing teams from expert_curated -- i.e. a true mirror match on the deployment
+# team set. This measures whether the run improves over its own initialization
+# in the exact expert_curated-vs-expert_curated matchup we care about.
+defaults:
+  team_set: expert_curated
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  SmallG1OnlineV2:
+    model_name: SmallG1OnlineV2

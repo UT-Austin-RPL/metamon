@@ -1,0 +1,12 @@
+# POV (trainee) team-set mixture for MediumG1Online collectors.
+#
+# Sampled once per AMAGO epoch on env reset via random_choice (same cadence as
+# opponent checkpoint / temperature / team_set). Uniform over the three sets —
+# equal probability per *set*, independent of how many team files each contains.
+#
+# Pass to collectors as:
+#   --train_team_set metamon/rl/configs/team_sets/mediumg1_train.yaml
+team_set:
+  - hl_05_26
+  - expert
+  - expert_curated2

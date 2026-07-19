@@ -115,6 +115,14 @@ def add_cli(parser):
         "(written to {buffer_dir}/{format}/).",
     )
     parser.add_argument(
+        "--save_results_to",
+        type=str,
+        default=None,
+        help="Optional directory (collect mode) for per-battle eval-side team/outcome "
+        "CSV logs. Each collector writes {dir}/collect_results_seed{seed}.csv with rows: "
+        "username,team_file,opponent,result,turns,battle_id. Use local disk to avoid NFS.",
+    )
+    parser.add_argument(
         "--base_model",
         type=str,
         required=True,
@@ -256,8 +264,11 @@ def add_cli(parser):
         "--train_team_set",
         type=str,
         default=DEFAULT_TRAIN_TEAM_SET,
-        help=f"Team set for collection (self-play) envs. Default: "
-        f"{DEFAULT_TRAIN_TEAM_SET}.",
+        help=f"POV team set for collection envs. Default: {DEFAULT_TRAIN_TEAM_SET}. "
+        f"Accepts a single name, a comma-separated list "
+        f"(e.g. 'hl_05_26,expert,expert_curated2' → uniform draw), or a "
+        f"path to a YAML file with a team_set value (list / scalar / "
+        f"{{weighted: ...}}). Sampled once per AMAGO epoch on env reset.",
     )
     parser.add_argument(
         "--val_team_set",
@@ -351,8 +362,12 @@ def _latest_training_state_epoch(ckpt_dir: str, run_name: str) -> int:
 def _resolve_checkpoint_path(args, pretrained) -> str:
     """Return the path to the policy weights file to load."""
     if args.prev_run_dir is not None:
-        assert args.prev_run_name is not None, "--prev_run_name required with --prev_run_dir"
-        assert args.prev_checkpoint is not None, "--prev_checkpoint required with --prev_run_dir"
+        assert (
+            args.prev_run_name is not None
+        ), "--prev_run_name required with --prev_run_dir"
+        assert (
+            args.prev_checkpoint is not None
+        ), "--prev_checkpoint required with --prev_run_dir"
         return os.path.join(
             args.prev_run_dir,
             args.prev_run_name,
@@ -530,8 +545,24 @@ def _make_collect_train_env(
     n_workers: int,
     seed: Optional[int],
     team_set_name: str = DEFAULT_TRAIN_TEAM_SET,
+    save_results_to: Optional[str] = None,
 ):
-    team_set = get_metamon_teams(battle_format, team_set_name)
+    from metamon.rl.evaluate.common import parse_team_set_config
+
+    team_set_config = parse_team_set_config(team_set_name)
+    # Probe one draw so env construction has a concrete TeamSet; the env redraws
+    # from team_set_config on every full reset (once per AMAGO epoch).
+    from metamon.rl.evaluate.common import random_choice
+
+    probe_name = str(random_choice(team_set_config))
+    team_set = get_metamon_teams(battle_format, probe_name)
+    # Per-battle eval-side team/outcome CSV. Treat --save_results_to as a
+    # directory and give each collector process its own file (keyed by seed) so
+    # concurrent appends from many collectors never interleave.
+    results_file = None
+    if save_results_to is not None:
+        os.makedirs(save_results_to, exist_ok=True)
+        results_file = os.path.join(save_results_to, f"collect_results_seed{seed}.csv")
     return partial(
         make_metamon_env,
         battle_format=battle_format,
@@ -539,11 +570,13 @@ def _make_collect_train_env(
         action_space=pretrained.action_space,
         reward_function=reward_function,
         team_set=team_set,
+        player_team_set_config=team_set_config,
         opponent_config_path=opponent_config_path,
         batched_envs=lanes,
         n_workers=n_workers,
         opponent_sample=True,
         save_trajectories_to=buffer_dir,
+        save_results_to=results_file,
         seed=seed,
     )
 
@@ -624,6 +657,7 @@ def create_online_experiment(
     opponent_config_path: str,
     val_opponent_kwargs: dict,
     buffer_dir: str,
+    save_results_to: Optional[str] = None,
     lanes: int,
     n_workers: int,
     train_team_set: str = DEFAULT_TRAIN_TEAM_SET,
@@ -650,6 +684,9 @@ def create_online_experiment(
         "MetamonPerceiverTstepEncoder.tokenizer": pretrained.observation_space.tokenizer,
         "MetamonGroupedTstepEncoderV2.tokenizer": pretrained.observation_space.tokenizer,
         "MetamonDiscrete.temperature": 1.0,
+        # Skip CPU-heavy SigmaReparam spectral init — weights are either random
+        # (from_scratch) or overwritten by latest/policy.pt / opponent ckpts.
+        "amago.nets.transformer.SigmaReparam.fast_init": True,
     }
     if pretrained.gin_overrides:
         config.update(pretrained.gin_overrides)
@@ -670,7 +707,9 @@ def create_online_experiment(
         if seq_floor_warmup_epochs is not None
         else lr_warmup_epochs
     )
-    seq_floor_warmup_steps = int(round(steps_per_epoch * grad_accum * seq_warmup_epochs))
+    seq_floor_warmup_steps = int(
+        round(steps_per_epoch * grad_accum * seq_warmup_epochs)
+    )
     try:
         gin.bind_parameter(
             "custom_agent.ISAdvantageFilter.seq_floor_warmup_steps",
@@ -704,6 +743,7 @@ def create_online_experiment(
             n_workers=n_workers,
             seed=seed,
             team_set_name=train_team_set,
+            save_results_to=save_results_to,
         )
         parallel_actors = lanes
         effective_train_timesteps = train_timesteps_per_epoch
@@ -929,6 +969,7 @@ if __name__ == "__main__":
         opponent_config_path=args.train_pool,
         val_opponent_kwargs=val_opponent_kwargs,
         buffer_dir=args.buffer_dir,
+        save_results_to=args.save_results_to,
         lanes=args.lanes,
         n_workers=args.n_workers,
         train_team_set=args.train_team_set,
@@ -961,7 +1002,9 @@ if __name__ == "__main__":
             if args.resume_epoch is not None
             else _latest_training_state_epoch(experiment.ckpt_dir, args.run_name)
         )
-        print(f"  Resuming full accelerate training state from epoch {resume_epoch} ...")
+        print(
+            f"  Resuming full accelerate training state from epoch {resume_epoch} ..."
+        )
         experiment.load_checkpoint(resume_epoch, resume_training_state=True)
         print(
             f"  Resumed at epoch {experiment.epoch}; continuing to {args.epochs} "

@@ -10,7 +10,7 @@ from huggingface_hub import hf_hub_download
 import metamon
 from metamon.config import SUPPORTED_BATTLE_FORMATS, METAMON_CACHE_DIR
 
-SELF_PLAY_SUBSETS = ["pac-base", "pac-exploratory", "pac-tauros"]
+SELF_PLAY_SUBSETS = ["pac-base", "pac-exploratory", "pac-tauros", "smallg1-online"]
 SELF_PLAY_FORMATS = [
     "gen1ou",
     "gen2ou",
@@ -22,7 +22,19 @@ SELF_PLAY_SUBSET_FORMATS = {
     "pac-base": SELF_PLAY_FORMATS,
     "pac-exploratory": SELF_PLAY_FORMATS,
     "pac-tauros": ["gen1ou"],
+    # Consolidated online-RL FIFO buffers from the SmallG1Online lineage
+    # (V0 -> V1/V1_5 -> V2 -> V3). Currently a LOCAL-only subset: the tar lives
+    # in {cache}/self-play/smallg1-online/ and download_self_play_data() returns
+    # it without a HuggingFace fetch. Publish to metamon-parsed-pile to enable
+    # remote download. Build with scripts/build_smallg1_online_dataset.py.
+    "smallg1-online": ["gen1ou"],
 }
+
+# Self-play subsets that are not (yet) published on the HuggingFace pile and are
+# only resolved from a locally-built tar in the cache. download_self_play_data()
+# short-circuits when the local tar exists; if it is missing for one of these
+# subsets we raise a clear error instead of attempting a doomed HF download.
+LOCAL_ONLY_SELF_PLAY_SUBSETS = frozenset({"smallg1-online"})
 
 # Replay-derived team sets on HF are published for OU tiers only (gen1-4ou, gen9ou).
 REPLAY_DERIVED_OU_ONLY_TEAM_SETS = frozenset(
@@ -299,6 +311,15 @@ def download_self_play_data(
             shutil.rmtree(out_path)
         else:
             os.remove(out_path)
+
+    if subset in LOCAL_ONLY_SELF_PLAY_SUBSETS:
+        raise FileNotFoundError(
+            f"Self-play subset {subset!r} is local-only (not published on "
+            f"HuggingFace) and no tar was found at {out_path}. Build it first "
+            f"with scripts/build_smallg1_online_dataset.py, or publish "
+            f"{subset}/{battle_format}.tar.lz4 to metamon-parsed-pile and remove "
+            f"{subset!r} from LOCAL_ONLY_SELF_PLAY_SUBSETS."
+        )
 
     hf_hub_download(
         cache_dir=self_play_dir,

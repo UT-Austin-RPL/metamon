@@ -40,6 +40,13 @@ from metamon.interface import (
     UniversalState,
 )
 
+from metamon.backend.team_preview.order import (
+    build_team_order,
+    order_from_lead,
+    resolve_lead_slot,
+    species_from_details,
+)
+
 from .action_adapter import DEFAULT_CHOICE, action_idx_to_choice
 from .lane import (
     AGENT_KINDS,
@@ -84,6 +91,11 @@ class VectorizedShowdownEnv(gym.Env):
         n_workers: int = 1,
         seed: Optional[int] = None,
         eval_player_side: int = 0,
+        eval_teampreview: str = "default",
+        opp_teampreview: str = "default",
+        teampreview_strategy=None,
+        teampreview_seed: Optional[int] = None,
+        player_team_set_config=None,
     ):
         if eval_player_side not in (0, 1):
             raise ValueError(f"eval_player_side must be 0 or 1; got {eval_player_side}")
@@ -93,6 +105,11 @@ class VectorizedShowdownEnv(gym.Env):
 
         self.player_team_set = player_team_set
         self.opponent_team_set = opponent_team_set
+        # Optional random_choice-compatible config (scalar / list / {weighted: ...}).
+        # When set, reset() redraws the POV team set once per epoch — same cadence
+        # as opponent checkpoint / temperature / team_set resampling.
+        self._player_team_set_config = player_team_set_config
+        self._player_team_cache: Dict[str, Any] = {}
         self.opponent = opponent
         self.batched_envs = int(batched_envs)
         self.battle_format = battle_format
@@ -138,6 +155,30 @@ class VectorizedShowdownEnv(gym.Env):
         )
 
         self._rng = random.Random(seed)
+
+        # Per-side team-preview behavior: "default" -> Showdown autoChoose (123456),
+        # "random" -> full random shuffle, "heuristic" -> teampreview_strategy.
+        valid_tp = ("default", "random", "heuristic")
+        for name, mode in (
+            ("eval_teampreview", eval_teampreview),
+            ("opp_teampreview", opp_teampreview),
+        ):
+            if mode not in valid_tp:
+                raise ValueError(f"{name} must be one of {valid_tp}; got {mode!r}")
+        self._teampreview = {
+            self.eval_side: eval_teampreview,
+            self.opp_side: opp_teampreview,
+        }
+        self._tp_strategy = teampreview_strategy
+        if (
+            eval_teampreview == "heuristic" or opp_teampreview == "heuristic"
+        ) and teampreview_strategy is None:
+            raise ValueError(
+                "teampreview_strategy is required when a side uses 'heuristic'"
+            )
+        self._tp_rng = random.Random(
+            teampreview_seed if teampreview_seed is not None else seed
+        )
 
         self.lanes: List[StreamBattleLane] = [
             StreamBattleLane(i, battle_format) for i in range(self.batched_envs)
@@ -276,6 +317,22 @@ class VectorizedShowdownEnv(gym.Env):
         self.opponent_team_set = self.opponent.current_team
         self.metamon_opponent_name = active.short_label
         self._sync_opponent_model_spaces(active.model_name)
+
+    def _sample_player_team_set(self):
+        """Draw a POV team set from ``player_team_set_config`` (cached by name)."""
+        from metamon.env import get_metamon_teams
+        from metamon.rl.evaluate.common import random_choice
+
+        name = str(random_choice(self._player_team_set_config))
+        if name not in self._player_team_cache:
+            self._player_team_cache[name] = get_metamon_teams(self.battle_format, name)
+        return self._player_team_cache[name]
+
+    def _configure_player_team_for_reset(self) -> None:
+        """Redraw POV team set once per full env reset when a config is set."""
+        if self._player_team_set_config is None:
+            return
+        self.player_team_set = self._sample_player_team_set()
 
     def _start_lane(self, i: int) -> None:
         lane = self.lanes[i]
@@ -432,9 +489,15 @@ class VectorizedShowdownEnv(gym.Env):
         """
         lane = self.lanes[i]
         kind = lane.request_kind(side)
-        if kind == KIND_TEAMPREVIEW or lane.battle(side).active_pokemon is None:
-            # Teampreview, or a state we can't safely decode yet: let Showdown
-            # auto-pick (always accepted), keeping the lockstep barrier intact.
+        if kind == KIND_TEAMPREVIEW:
+            # Re-answer team preview with this side's configured strategy
+            # (falls back to autoChoose internally), keeping lockstep intact.
+            self.proc.choose(i, side, self._teampreview_choice(i, side))
+            lane.reprompt_pending[side] = False
+            return
+        if lane.battle(side).active_pokemon is None:
+            # A state we can't safely decode yet: let Showdown auto-pick (always
+            # accepted), keeping the lockstep barrier intact.
             self.proc.choose(i, side, DEFAULT_CHOICE)
             lane.reprompt_pending[side] = False
             return
@@ -531,6 +594,55 @@ class VectorizedShowdownEnv(gym.Env):
                 )
         return obs_list
 
+    def _teampreview_choice(self, i: int, side: str) -> str:
+        """Resolve a single side's team-preview choice for lane ``i``.
+
+        Returns a raw sim-stream choice string. ``"default"`` keeps Showdown's
+        ``autoChoose`` (identity 123456). ``"random"`` / ``"heuristic"`` build a
+        full, contract-correct order (lead first, remaining slots shuffled) via
+        the shared formatter, falling back to ``DEFAULT_CHOICE`` on any problem so
+        the lockstep barrier is never broken.
+        """
+        mode = self._teampreview.get(side, "default")
+        if mode == "default":
+            return DEFAULT_CHOICE
+        lane = self.lanes[i]
+        req = lane.last_request.get(side) or {}
+        pokemon = (req.get("side") or {}).get("pokemon") or []
+        n_slots = len(pokemon)
+        if n_slots == 0:
+            return DEFAULT_CHOICE
+        max_team_size = req.get("maxTeamSize") or n_slots
+        try:
+            if mode == "random":
+                positions = order_from_lead(
+                    self._tp_rng.randint(1, n_slots),
+                    n_slots,
+                    max_team_size,
+                    rng=self._tp_rng,
+                )
+                return build_team_order(positions, slash=False)
+            # heuristic
+            our_species = [species_from_details(p.get("details", "")) for p in pokemon]
+            opp_species = [
+                p.species for p in lane.battle(side).teampreview_opponent_team
+            ]
+            lead_name, _, _ = self._tp_strategy.predict_lead(
+                our_team=our_species,
+                our_team_moves=[[] for _ in our_species],
+                our_team_abilities=["" for _ in our_species],
+                our_team_items=["" for _ in our_species],
+                opponent_team=opp_species,
+                battle_format=self.battle_format,
+            )
+            lead_slot = resolve_lead_slot(our_species, lead_name) or 1
+            positions = order_from_lead(
+                lead_slot, n_slots, max_team_size, rng=self._tp_rng
+            )
+            return build_team_order(positions, slash=False)
+        except Exception:
+            return DEFAULT_CHOICE
+
     def _advance_lanes(self, lane_indices: List[int]) -> None:
         """Auto-resolve teampreview + opponent-only cycles until each lane is
         parked at an eval-side agent decision (or ended)."""
@@ -565,9 +677,13 @@ class VectorizedShowdownEnv(gym.Env):
                 k1 = lane.request_kind(self.eval_side)
                 k2 = lane.request_kind(self.opp_side)
                 if k1 == KIND_TEAMPREVIEW:
-                    side_choices[self.eval_side] = DEFAULT_CHOICE
+                    side_choices[self.eval_side] = self._teampreview_choice(
+                        i, self.eval_side
+                    )
                 if k2 == KIND_TEAMPREVIEW:
-                    side_choices[self.opp_side] = DEFAULT_CHOICE
+                    side_choices[self.opp_side] = self._teampreview_choice(
+                        i, self.opp_side
+                    )
                 elif k2 in AGENT_KINDS:
                     prev_opp = lane.universal_state(self.opp_side)
                     self._step_opp_actions[i] = int(opp_actions[i])
@@ -613,6 +729,7 @@ class VectorizedShowdownEnv(gym.Env):
             self._rng.seed(seed)
             np.random.seed(seed)
         options = options or {}
+        self._configure_player_team_for_reset()
         self._configure_opponent_for_reset(options.get("opponent"))
         self.opponent.reset_all()
         for i in range(self.batched_envs):
@@ -1003,6 +1120,11 @@ def BattleAgainstOpponentPool(
     showdown_dist: Optional[str] = None,
     n_workers: int = 1,
     seed: Optional[int] = None,
+    eval_teampreview: str = "default",
+    opp_teampreview: str = "default",
+    teampreview_strategy=None,
+    teampreview_seed: Optional[int] = None,
+    player_team_set_config=None,
 ):
     """Factory: one shared opponent sampled from an opponent pool config.
 
@@ -1010,6 +1132,10 @@ def BattleAgainstOpponentPool(
     (pick an agent, then sample checkpoint / temperature / team set). All lanes
     share that opponent until the next ``reset()``. Pair with AMAGO
     ``force_reset_on_every=True`` for diversity between training epochs.
+
+    When ``player_team_set_config`` is set (a :func:`~metamon.rl.evaluate.common.random_choice`
+    value — scalar, list, or ``{weighted: ...}``), the POV team set is redrawn on
+    the same cadence.
     """
     from metamon.rl.pretrained import get_pretrained_model
 
@@ -1061,4 +1187,9 @@ def BattleAgainstOpponentPool(
         showdown_dist=showdown_dist,
         n_workers=n_workers,
         seed=seed,
+        eval_teampreview=eval_teampreview,
+        opp_teampreview=opp_teampreview,
+        teampreview_strategy=teampreview_strategy,
+        teampreview_seed=teampreview_seed,
+        player_team_set_config=player_team_set_config,
     )

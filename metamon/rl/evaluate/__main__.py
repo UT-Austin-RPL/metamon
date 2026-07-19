@@ -15,6 +15,7 @@ from metamon.rl.metamon_to_amago import (
     make_baseline_env,
     make_local_ladder_env,
     make_pokeagent_ladder_env,
+    make_showdown_ladder_env,
     make_challenge_env,
     make_metamon_env,
 )
@@ -108,6 +109,13 @@ def pretrained_vs_metamon(
     opponent_agent: Optional[str] = None,
     opponent_checkpoint: Optional[int] = None,
     opponent_config_path: Optional[str] = None,
+    agent_teampreview: str = "default",
+    opponent_teampreview: str = "default",
+    teampreview_rank: Optional[int] = None,
+    teampreview_seed: Optional[int] = None,
+    teampreview_w_off: Optional[float] = None,
+    teampreview_w_def: Optional[float] = None,
+    teampreview_w_lead: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Evaluate via vectorized Showdown with one shared opponent from a pool config.
 
@@ -152,6 +160,26 @@ def pretrained_vs_metamon(
         checkpoint=checkpoint, log=log_to_wandb, action_temperature=action_temperature
     )
     agent.sample_actions_val = agent_sample
+
+    teampreview_strategy = None
+    if "heuristic" in (agent_teampreview, opponent_teampreview):
+        from metamon.backend.team_preview.heuristic import HeuristicTeamPreview
+        from metamon.backend.team_prediction.usage_stats import DEFAULT_USAGE_RANK
+
+        heuristic_kwargs = dict(
+            rank=(
+                teampreview_rank if teampreview_rank is not None else DEFAULT_USAGE_RANK
+            )
+        )
+        if teampreview_w_off is not None:
+            heuristic_kwargs["w_off"] = teampreview_w_off
+        if teampreview_w_def is not None:
+            heuristic_kwargs["w_def"] = teampreview_w_def
+        if teampreview_w_lead is not None:
+            heuristic_kwargs["w_lead"] = teampreview_w_lead
+        teampreview_strategy = HeuristicTeamPreview(**heuristic_kwargs)
+        print(f"Heuristic team preview hparams: {heuristic_kwargs}")
+
     env_kwargs = dict(
         battle_format=battle_format,
         observation_space=pretrained_model.observation_space,
@@ -167,6 +195,10 @@ def pretrained_vs_metamon(
         save_results_to=save_results_to,
         opponent_gpu_idx=opponent_gpu_idx,
         seed=seed,
+        eval_teampreview=agent_teampreview,
+        opp_teampreview=opponent_teampreview,
+        teampreview_strategy=teampreview_strategy,
+        teampreview_seed=teampreview_seed,
     )
     make_env = functools.partial(make_metamon_env, **env_kwargs)
     if num_parallel == 1:
@@ -197,6 +229,7 @@ def _pretrained_on_ladder(
     action_temperature: float = 1.0,
     agent_sample: bool = True,
     team_preview_model: Optional[TeamPreviewModel] = None,
+    timesteps_per_battle: int = 1000,
     **ladder_kwargs,
 ) -> Dict[str, Any]:
     """Helper function for ladder-based evaluation."""
@@ -220,7 +253,7 @@ def _pretrained_on_ladder(
 
     results = agent.evaluate_test(
         [make_env],
-        timesteps=total_battles * 1000,
+        timesteps=total_battles * timesteps_per_battle,
         episodes=total_battles,
     )
     return results
@@ -322,6 +355,66 @@ def pretrained_vs_pokeagent_ladder(
     )
 
 
+def pretrained_vs_showdown_ladder(
+    pretrained_model: PretrainedModel,
+    username: str,
+    password: str,
+    battle_format: str,
+    team_set: metamon.env.TeamSet,
+    total_battles: int,
+    avatar: Optional[str] = None,
+    checkpoint: Optional[int] = None,
+    battle_backend: str = "metamon",
+    action_temperature: float = 1.0,
+    agent_sample: bool = True,
+    save_trajectories_to: Optional[str] = None,
+    save_results_to: Optional[str] = None,
+    log_to_wandb: bool = False,
+    team_preview_model: Optional[TeamPreviewModel] = None,
+    action_delay: float = 1.5,
+    long_action_delay_prob: float = 0.10,
+    long_action_delay_low: float = 2.5,
+    long_action_delay_high: float = 5.0,
+) -> Dict[str, Any]:
+    """Evaluate a pretrained model on the official Pokémon Showdown ladder.
+
+    Identical to ``pretrained_vs_pokeagent_ladder`` except it connects to Smogon's
+    public Showdown server (``wss://sim3.psim.us/showdown/websocket``) instead of
+    the PokéAgent Challenge server, and it adds bimodal per-decision action delay:
+    usually ``action_delay`` seconds (default 1.5s), but with probability
+    ``long_action_delay_prob`` (default 10%) a longer ``uniform(low, high)`` pause
+    (default 2.5-5.0s, never shorter than ``action_delay``). Must provide a
+    registered username and password.
+
+    Set ``action_delay <= 0`` and ``long_action_delay_prob <= 0`` to disable delays.
+
+    Will automatically queue the agent for ranked battles against any other agents
+    (or humans) that are logged into the ladder.
+    """
+    return _pretrained_on_ladder(
+        pretrained_model=pretrained_model,
+        make_ladder=make_showdown_ladder_env,
+        total_battles=total_battles,
+        checkpoint=checkpoint,
+        log_to_wandb=log_to_wandb,
+        action_temperature=action_temperature,
+        agent_sample=agent_sample,
+        team_preview_model=team_preview_model,
+        player_username=username,
+        player_password=password,
+        player_avatar=avatar,
+        player_team_set=team_set,
+        battle_backend=battle_backend,
+        battle_format=battle_format,
+        save_trajectories_to=save_trajectories_to,
+        save_results_to=save_results_to,
+        action_delay=action_delay,
+        long_action_delay=(long_action_delay_low, long_action_delay_high),
+        long_action_delay_prob=long_action_delay_prob,
+        timesteps_per_battle=2000,
+    )
+
+
 def pretrained_vs_challenge(
     pretrained_model: PretrainedModel,
     username: str,
@@ -414,6 +507,19 @@ def _get_default_eval(args, base_eval_kwargs):
             }
         )
         return pretrained_vs_pokeagent_ladder
+    elif args.eval_type == "showdown":
+        base_eval_kwargs.update(
+            {
+                "username": args.username,
+                "password": args.password,
+                "avatar": args.avatar,
+                "action_delay": args.action_delay,
+                "long_action_delay_prob": args.long_action_delay_prob,
+                "long_action_delay_low": args.long_action_delay_low,
+                "long_action_delay_high": args.long_action_delay_high,
+            }
+        )
+        return pretrained_vs_showdown_ladder
     elif args.eval_type == "challenge":
         base_eval_kwargs.update(
             {
@@ -446,6 +552,13 @@ def _get_default_eval(args, base_eval_kwargs):
                 "opponent_sample": args.opponent_sample,
                 "eval_player_side": args.eval_player_side,
                 "opponent_gpu_idx": args.opponent_gpu_idx,
+                "agent_teampreview": args.agent_teampreview,
+                "opponent_teampreview": args.opponent_teampreview,
+                "teampreview_rank": args.teampreview_rank,
+                "teampreview_seed": args.teampreview_seed,
+                "teampreview_w_off": args.teampreview_w_off,
+                "teampreview_w_def": args.teampreview_w_def,
+                "teampreview_w_lead": args.teampreview_w_lead,
             }
         )
         return pretrained_vs_metamon
@@ -454,25 +567,48 @@ def _get_default_eval(args, base_eval_kwargs):
 
 
 def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
+    if args.eval_type in ("showdown", "pokeagent") and not args.password:
+        raise ValueError(f"--password is required for --eval_type {args.eval_type}")
     pretrained_model = get_pretrained_model(args.agent)
     all_results = collections.defaultdict(list)
     backend = args.battle_backend or pretrained_model.battle_backend
 
-    # Load team preview model if checkpoint provided
+    # Resolve the websocket team-preview strategy (model or heuristic). The
+    # vectorized --eval_type metamon path ignores this and uses
+    # --agent_teampreview / --opponent_teampreview instead.
+    tp_mode = args.team_preview
+    if tp_mode is None:
+        tp_mode = "model" if args.team_preview_checkpoint is not None else "default"
+
     team_preview_model = None
-    if args.team_preview_checkpoint is not None:
+    if tp_mode == "model":
+        if args.team_preview_checkpoint is None:
+            raise ValueError("--team_preview model requires --team_preview_checkpoint")
         team_preview_model = TeamPreviewModel.load_from_checkpoint(
             checkpoint_path=args.team_preview_checkpoint,
             device="cuda" if backend == "metamon" else "cpu",
             use_argmax=args.team_preview_use_argmax,
         )
         print(f"Team preview model loaded from: {args.team_preview_checkpoint}")
+    elif tp_mode == "heuristic":
+        from metamon.backend.team_preview.heuristic import HeuristicTeamPreview
+        from metamon.backend.team_prediction.usage_stats import DEFAULT_USAGE_RANK
 
-        if backend != "metamon":
-            print(
-                "WARNING: team_preview_model only works with --battle_backend metamon. It will be ignored."
+        team_preview_model = HeuristicTeamPreview(
+            rank=(
+                args.teampreview_rank
+                if args.teampreview_rank is not None
+                else DEFAULT_USAGE_RANK
             )
-            team_preview_model = None
+        )
+        print("Heuristic team preview enabled.")
+
+    if team_preview_model is not None and backend not in ("metamon", "pokeagent"):
+        print(
+            "WARNING: team preview strategy only works with --battle_backend metamon/pokeagent. "
+            "It will be ignored."
+        )
+        team_preview_model = None
 
     # Print banner and evaluation info
     metamon.print_banner()
@@ -528,12 +664,22 @@ def add_cli(parser):
     parser.add_argument(
         "--eval_type",
         required=True,
-        choices=["heuristic", "il", "ladder", "pokeagent", "challenge", "metamon"],
+        choices=[
+            "heuristic",
+            "il",
+            "ladder",
+            "pokeagent",
+            "showdown",
+            "challenge",
+            "metamon",
+        ],
         help=(
             "Type of evaluation to perform. 'heuristic' will run against 6 "
             "heuristic baselines, 'il' will run against a BCRNN baseline, "
             "'ladder' will queue the agent for battles on your self-hosted Showdown ladder, "
             "'pokeagent' will submit the agent to the NeurIPS 2025 PokéAgent Challenge ladder, "
+            "'showdown' will queue the agent on the official Pokémon Showdown ladder "
+            "(play.pokemonshowdown.com; requires a registered username/password), "
             "'challenge' will send/accept challenges to a specific opponent by username "
             "(launch two instances with opposite --role for head-to-head), "
             "'metamon' runs vectorized Showdown self-play vs another pretrained model."
@@ -603,6 +749,42 @@ def add_cli(parser):
         help="Avatar to use for the battles.",
     )
     parser.add_argument(
+        "--action_delay",
+        type=float,
+        default=1.5,
+        help=(
+            "Default per-decision action delay (seconds) for --eval_type showdown. "
+            "Used on ~90% of decisions unless a long delay is rolled."
+        ),
+    )
+    parser.add_argument(
+        "--long_action_delay_prob",
+        type=float,
+        default=0.10,
+        help=(
+            "Probability of rolling a longer random delay instead of --action_delay "
+            "for --eval_type showdown (default 0.10 = 10%%)."
+        ),
+    )
+    parser.add_argument(
+        "--long_action_delay_low",
+        type=float,
+        default=2.5,
+        help=(
+            "Lower bound (seconds) of the long random delay for --eval_type showdown. "
+            "The rolled delay is never shorter than --action_delay."
+        ),
+    )
+    parser.add_argument(
+        "--long_action_delay_high",
+        type=float,
+        default=5.0,
+        help=(
+            "Upper bound (seconds) of the long random delay for --eval_type showdown. "
+            "Set to 0 (with --long_action_delay_prob 0) to disable long delays."
+        ),
+    )
+    parser.add_argument(
         "--team_set",
         default="competitive",
         help="Team Set. Built-in options are: "
@@ -626,7 +808,7 @@ def add_cli(parser):
         "--async_mp_context",
         type=str,
         default="forkserver",
-        help="Async environment setup method. Does not apply to `--eval_type ladder` or `--eval_type pokeagent`. Options: 'forkserver' (recommended, fast), 'fork' (fastest but unsafe with threads), 'spawn' (slowest but safest). Use 'spawn' only if others hang.",
+        help="Async environment setup method. Does not apply to the websocket ladder eval types (`ladder`, `pokeagent`, `showdown`, `challenge`). Options: 'forkserver' (recommended, fast), 'fork' (fastest but unsafe with threads), 'spawn' (slowest but safest). Use 'spawn' only if others hang.",
     )
     parser.add_argument(
         "--save_trajectories_to",
@@ -735,6 +917,69 @@ def add_cli(parser):
             "If set, use argmax for team preview lead selection instead of sampling from the distribution. "
             "Only applies when --team_preview_checkpoint is provided."
         ),
+    )
+    parser.add_argument(
+        "--team_preview",
+        type=str,
+        default=None,
+        choices=["default", "random", "heuristic", "model"],
+        help=(
+            "Team-preview strategy for the websocket paths (--eval_type "
+            "ladder/pokeagent/challenge/heuristic/il, with --battle_backend metamon). "
+            "'default'/'random' -> poke-env random shuffle; 'heuristic' -> usage-stats "
+            "lead picker; 'model' -> neural model from --team_preview_checkpoint. "
+            "Defaults to 'model' if --team_preview_checkpoint is set, else 'default'."
+        ),
+    )
+    parser.add_argument(
+        "--agent_teampreview",
+        type=str,
+        default="default",
+        choices=["default", "random", "heuristic"],
+        help=(
+            "Team-preview strategy for the EVALUATED agent in --eval_type metamon. "
+            "'default' -> Showdown autoChoose (123456)."
+        ),
+    )
+    parser.add_argument(
+        "--opponent_teampreview",
+        type=str,
+        default="default",
+        choices=["default", "random", "heuristic"],
+        help="Team-preview strategy for the opponent in --eval_type metamon.",
+    )
+    parser.add_argument(
+        "--teampreview_rank",
+        type=int,
+        default=None,
+        help=(
+            "Usage-stats rank for the heuristic team-preview (defaults to the "
+            "package default, e.g. 1500). Must be available on disk for the format."
+        ),
+    )
+    parser.add_argument(
+        "--teampreview_seed",
+        type=int,
+        default=None,
+        help="RNG seed for team-preview back-order shuffling (A/B reproducibility).",
+    )
+    parser.add_argument(
+        "--teampreview_w_off",
+        type=float,
+        default=None,
+        help="Heuristic team-preview offensive checks/counters weight (default 1.0).",
+    )
+    parser.add_argument(
+        "--teampreview_w_def",
+        type=float,
+        default=None,
+        help="Heuristic team-preview defensive checks/counters weight (default 1.0).",
+    )
+    parser.add_argument(
+        "--teampreview_w_lead",
+        type=float,
+        default=None,
+        help="Heuristic team-preview lead-move bonus weight (default 0.0).",
     )
     return parser
 

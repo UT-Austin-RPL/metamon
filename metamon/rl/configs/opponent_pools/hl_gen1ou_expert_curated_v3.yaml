@@ -1,0 +1,81 @@
+# Training opponent pool for the gen1ou expert_curated specialist run
+# (SmallG1OnlineV3).
+#
+# Same roster as hl_gen1ou_expert_curated.yaml (the SmallG1OnlineV2 pool), but
+# adds SmallG1OnlineV2 (this run's starting point) to the self-play pool at
+# top-model weight, drawing teams from hl_05_26. The trainee plays expert_curated
+# (set via --train_team_set); opponents draw teams from hl_05_26; only the
+# trainee's eval-side trajectories are written to the buffer, so the buffer is
+# exclusively expert_curated games.
+#
+# Each agent samples a checkpoint below/among its saved epochs (null = default)
+# and a temperature. num_agents duplicates pool rows -> higher sample weight.
+defaults:
+  team_set: hl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [0.5, 1.0, 1.25, 1.5, 1.75, 2.0]
+  num_agents: 1
+
+agents:
+  TaurosV0:
+    model_name: TaurosV0
+    num_agents: 2
+    # default ckpt 62; verify epochs exist on HF / adjust
+    checkpoints: "range(50, 63, 2)"
+
+  Kakuna:
+    model_name: Kakuna
+    num_agents: 2
+    checkpoints: "range(24, 35, 2)"
+
+  # Frozen self-play opponent: the original gen1ou base
+  # (SmallG1OnlineV0 @ default ckpt 3050), playing hl_05_26 (pool default).
+  # Only its default checkpoint is meaningful, so checkpoints=[null] (-> 3050).
+  SmallG1OnlineV0:
+    model_name: SmallG1OnlineV0
+    num_agents: 2
+    checkpoints: [null]
+
+  # The expert_v2 specialist (SmallG1OnlineV2's starting point). Randomize over
+  # its saved epochs for opponent diversity. Same draw weight as other top models.
+  SmallG1OnlineV1_5:
+    model_name: SmallG1OnlineV1_5
+    num_agents: 2
+    checkpoints: "range(200, 401, 50)"
+
+  # The expert_curated specialist from the previous iteration (this run's starting
+  # point). Randomize over its saved epochs (policy_epoch_{N}.pt in the
+  # smallg1online_v2 save dir; saved epochs 0-400 step 25). Same draw weight as
+  # the other top models, playing hl_05_26 (pool default).
+  SmallG1OnlineV2:
+    model_name: SmallG1OnlineV2
+    num_agents: 2
+    checkpoints: "range(200, 401, 50)"
+
+  Alakazam:
+    model_name: Alakazam
+    checkpoints: "range(2, 9, 2)"
+
+  SyntheticRLV2:
+    model_name: SyntheticRLV2
+    checkpoints: "range(36, 49, 2)"
+
+  # Minimum-weight opponent: a single pool row (num_agents: 1) at the model's
+  # default checkpoint for a small amount of extra diversity.
+  SyntheticRLV1:
+    model_name: SyntheticRLV1
+    num_agents: 1
+    checkpoints: [null]
+
+  V2ADataAblation:
+    model_name: V2AGroupedV2DataAblation
+    checkpoints: "range(74, 91, 2)"
+
+  Superkazam:
+    model_name: Superkazam
+    checkpoints: "range(38, 51, 2)"
+
+  Kadabra3:
+    model_name: Kadabra3
+    checkpoints: "range(10, 21, 2)"

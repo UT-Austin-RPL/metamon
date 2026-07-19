@@ -1,0 +1,13 @@
+# SmallG1OnlineV1 (gen1ou expert specialist, mini_online_g1_expert_v2)
+# as a fixed opponent drawing teams from expert. Used to evaluate
+# SmallG1OnlineV0 (eval side, its own --team_set) vs the expert specialist.
+defaults:
+  team_set: expert
+  battle_backend: metamon
+  checkpoints: [200]
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  SmallG1OnlineV1:
+    model_name: SmallG1OnlineV1

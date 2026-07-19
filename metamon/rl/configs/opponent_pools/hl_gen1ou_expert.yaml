@@ -1,0 +1,58 @@
+# Training opponent pool for the gen1ou expert specialist run
+# (mini_online_g1_expert_v0).
+#
+# Identical model roster to hl_gen1ou.yaml, but opponents draw teams from
+# hl_05_26 (NOT gl_05_26). The trainee plays expert (set via
+# --train_team_set on the collector); only the trainee's eval-side trajectories
+# are written to the buffer, so the buffer is exclusively expert games.
+#
+# Each agent samples a checkpoint below its default (null = default/best) and a
+# temperature. num_agents (defaults or per-agent) duplicates pool rows -> higher
+# sample weight. Verify checkpoint epochs exist on HuggingFace before long runs.
+defaults:
+  team_set: hl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [0.5, 1.0, 1.25, 1.5, 1.75, 2.0]
+  num_agents: 1
+
+agents:
+  TaurosV0:
+    model_name: TaurosV0
+    num_agents: 2
+    # default ckpt 62; verify epochs exist on HF / adjust
+    checkpoints: "range(50, 63, 2)"
+
+  Kakuna:
+    model_name: Kakuna
+    num_agents: 2
+    checkpoints: "range(24, 35, 2)"
+
+  # Frozen self-play opponent: the trainee's own starting point
+  # (SmallG1OnlineV0 @ default ckpt 3050), playing hl_05_26 (pool default).
+  # Same draw weight (num_agents) and temperatures as Kakuna. Only the default
+  # checkpoint is meaningful here, so checkpoints=[null] (-> 3050).
+  SmallG1OnlineV0:
+    model_name: SmallG1OnlineV0
+    num_agents: 2
+    checkpoints: [null]
+
+  Alakazam:
+    model_name: Alakazam
+    checkpoints: "range(2, 9, 2)"
+
+  SyntheticRLV2:
+    model_name: SyntheticRLV2
+    checkpoints: "range(36, 49, 2)"
+
+  V2ADataAblation:
+    model_name: V2AGroupedV2DataAblation
+    checkpoints: "range(74, 91, 2)"
+
+  Superkazam:
+    model_name: Superkazam
+    checkpoints: "range(38, 51, 2)"
+
+  Kadabra3:
+    model_name: Kadabra3
+    checkpoints: "range(10, 21, 2)"

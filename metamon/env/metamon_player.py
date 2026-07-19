@@ -1,5 +1,7 @@
+import random
 from typing import List, Optional
 
+import numpy as np
 import orjson
 
 from poke_env.player import Player
@@ -10,23 +12,48 @@ from metamon.config import format_for_agent
 from metamon.env.metamon_battle import MetamonBackendBattle, PokeAgentBackendBattle
 from metamon.backend.showdown_dex import Dex
 from metamon.backend.replay_parser.str_parsing import pokemon_name, move_name
+from metamon.backend.team_preview.order import order_from_lead, build_team_order
 from metamon.interface import UniversalPokemon
 
 
 class MetamonPlayer(Player):
-    """Extended Player with optional team preview prediction model."""
+    """Extended Player with an optional team-preview strategy.
 
-    def __init__(self, *args, team_preview_model=None, **kwargs):
+    A *strategy* is anything exposing ``predict_lead(...)`` and ``trained_formats``
+    (e.g. :class:`~metamon.backend.team_preview.preview.TeamPreviewModel` or
+    :class:`~metamon.backend.team_preview.heuristic.HeuristicTeamPreview`). When no
+    strategy is set we fall back to poke-env's random team preview.
+    """
+
+    def __init__(
+        self, *args, team_preview_strategy=None, team_preview_model=None, **kwargs
+    ):
         """
         Initialize MetamonPlayer.
 
         Args:
-            team_preview_model: Optional TeamPreviewModel to use for predicting leads.
-                               If None, falls back to random team preview selection.
+            team_preview_strategy: Optional object with ``predict_lead`` /
+                ``trained_formats`` used to choose the lead. If None, falls back to
+                random team preview selection.
+            team_preview_model: Backwards-compatible alias for
+                ``team_preview_strategy``.
             *args, **kwargs: Arguments passed to Player.__init__
         """
         super().__init__(*args, **kwargs)
-        self.team_preview_model = team_preview_model
+        self.team_preview_strategy = (
+            team_preview_strategy
+            if team_preview_strategy is not None
+            else team_preview_model
+        )
+
+    @property
+    def team_preview_model(self):
+        """Backwards-compatible alias for :attr:`team_preview_strategy`."""
+        return self.team_preview_strategy
+
+    @team_preview_model.setter
+    def team_preview_model(self, value):
+        self.team_preview_strategy = value
 
     def create_metamon_battle(self, battle_tag: str) -> MetamonBackendBattle:
         return MetamonBackendBattle(
@@ -182,8 +209,16 @@ class MetamonPlayer(Player):
                     "[Invalid choice] Can't move: You can only Terastallize once per battle."
                 ):
                     await self._handle_battle_request(battle, maybe_default_order=True)
+                elif split_message[2].startswith(
+                    "[Invalid choice] Can't move: You need a switch response"
+                ):
+                    await self._handle_battle_request(battle, maybe_default_order=True)
                 else:
-                    self.logger.critical("Unexpected error message: %s", split_message)
+                    self.logger.warning(
+                        "Unexpected error message (falling back to default order): %s",
+                        split_message,
+                    )
+                    await self._handle_battle_request(battle, maybe_default_order=True)
             elif split_message[1] == "turn":
                 # cut the turnlist to save memory
                 battle._mm_battle.turnlist = battle._mm_battle.turnlist[-2:]
@@ -196,8 +231,10 @@ class MetamonPlayer(Player):
         """
         Returns a teampreview order for the given battle.
 
-        If a team_preview_model is provided, uses it to predict the best lead.
-        Otherwise, falls back to random selection.
+        If a team-preview strategy is provided, uses it to predict the best lead;
+        the remaining slots are genuinely random-shuffled (matches poke-env's
+        ``random_teampreview``, keeps the back-order in-distribution). Otherwise,
+        falls back entirely to random selection.
 
         Args:
             battle: The battle in team preview
@@ -205,16 +242,16 @@ class MetamonPlayer(Player):
         Returns:
             Team order string in format "/team 3461..." where first pokemon is the lead
         """
-        if self.team_preview_model is None:
-            # fallback to random if no model provided
+        if self.team_preview_strategy is None:
+            # fallback to random if no strategy provided
             return self.random_teampreview(battle)
 
-        # Map Showdown variants (e.g. gen9oulongtimer) to the format the preview model knows.
+        # Map Showdown variants (e.g. gen9oulongtimer) to the format the strategy knows.
         agent_format = format_for_agent(self._format.replace("-", "").lower())
-        if agent_format not in self.team_preview_model.trained_formats:
+        if agent_format not in self.team_preview_strategy.trained_formats:
             self.logger.warning(
                 f"Battle format {self._format} (agent: {agent_format}) not in trained formats "
-                f"{self.team_preview_model.trained_formats}. "
+                f"{self.team_preview_strategy.trained_formats}. "
                 f"Falling back to random."
             )
             return self.random_teampreview(battle)
@@ -241,13 +278,15 @@ class MetamonPlayer(Player):
         opponent_team_names = [pokemon_name(p.species) for p in opponent_list]
 
         # team preview inference
-        predicted_lead_name, probs, sorted_team = self.team_preview_model.predict_lead(
-            our_team=our_team_names,
-            our_team_moves=our_team_moves,
-            our_team_abilities=our_team_abilities,
-            our_team_items=our_team_items,
-            opponent_team=opponent_team_names,
-            battle_format=agent_format,
+        predicted_lead_name, probs, sorted_team = (
+            self.team_preview_strategy.predict_lead(
+                our_team=our_team_names,
+                our_team_moves=our_team_moves,
+                our_team_abilities=our_team_abilities,
+                our_team_items=our_team_items,
+                opponent_team=opponent_team_names,
+                battle_format=agent_format,
+            )
         )
 
         # format team preview prediction output to showdown command
@@ -261,16 +300,22 @@ class MetamonPlayer(Player):
                 f"Could not find predicted lead {predicted_lead_name} in team, falling back to random"
             )
             return self.random_teampreview(battle)
-        members = [lead_position]
-        for i in range(1, len(team_list) + 1):
-            if i != lead_position:
-                members.append(i)
-        team_order = "/team " + "".join([str(c) for c in members])
 
-        # Log team preview with clear sorted order -> probs -> selection mapping
-        probs_np = probs.cpu().numpy()
+        # lead first, remaining slots genuinely shuffled (in-distribution back-order)
+        max_team_size = getattr(battle, "max_team_size", None) or len(team_list)
+        positions = order_from_lead(
+            lead_position, len(team_list), max_team_size, rng=random
+        )
+        team_order = build_team_order(positions, slash=True)
+
+        # Log team preview with clear sorted order -> scores -> selection mapping
+        probs_np = (
+            probs.detach().cpu().numpy()
+            if hasattr(probs, "detach")
+            else np.asarray(probs)
+        )
         candidates = ", ".join(
-            f"{name}={prob:.2f}" for name, prob in zip(sorted_team, probs_np)
+            f"{name}={score:.2f}" for name, score in zip(sorted_team, probs_np)
         )
         self.logger.warning(
             f"Team preview: [{candidates}] -> selected {predicted_lead_name}"

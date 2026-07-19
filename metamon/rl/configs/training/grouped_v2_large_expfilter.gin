@@ -1,0 +1,39 @@
+import amago.agent
+import metamon.rl.custom_agent
+
+# Variant of grouped_v2_large_isfilter.gin that swaps the custom importance-
+# sampling advantage filter (ISAdvantageFilter) for AMAGO's default exponential
+# advantage filter (exp_filter, AWR-style exp(beta * adv)). Everything else
+# matches the IS config. LR / warmup are set on the online_rl.py CLI
+# (--learning_rate, --lr_warmup_epochs), which override the gin values below.
+
+agent.Agent.reward_multiplier = 10.
+agent.MultiTaskAgent.reward_multiplier = 10.
+
+agent.Agent.tau = .008
+agent.MultiTaskAgent.tau = .008
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 4
+
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 4
+
+agent.Agent.online_coeff = 0.0
+agent.MultiTaskAgent.online_coeff = 0.0
+agent.Agent.offline_coeff = 1.0
+agent.MultiTaskAgent.offline_coeff = 1.0
+
+# Default advantage filter: exponential / advantage-weighted (non-IS).
+agent.Agent.fbc_filter_func = @amago.agent.exp_filter
+agent.MultiTaskAgent.fbc_filter_func = @amago.agent.exp_filter
+amago.agent.exp_filter.beta = 2.5
+amago.agent.exp_filter.clip_weights_low = 1e-6
+amago.agent.exp_filter.clip_weights_high = 100.
+
+MetamonAMAGOExperiment.l2_coeff = 1e-4
+MetamonAMAGOExperiment.learning_rate = 1e-4
+MetamonAMAGOExperiment.grad_clip = 1.0
+agent.Agent.critic_loss_weight = 13.5
+agent.MultiTaskAgent.critic_loss_weight = 13.5
+MetamonAMAGOExperiment.lr_warmup_steps = 5000

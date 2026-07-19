@@ -1,0 +1,16 @@
+# Fixed Kakuna opponent for the gen1ou expert specialist validator
+# (mini_online_g1_expert_v0).
+#
+# Mirrors kakuna_val.yaml, but the opponent draws teams from hl_05_26 to match
+# the training opponent distribution. The trainee plays expert (set via
+# --val_team_set), so validation measures in-distribution specialist strength.
+defaults:
+  team_set: hl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  Kakuna:
+    model_name: Kakuna

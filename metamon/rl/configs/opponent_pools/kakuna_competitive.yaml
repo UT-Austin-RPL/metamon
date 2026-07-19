@@ -1,0 +1,13 @@
+# Fixed Kakuna opponent drawing teams from the `competitive` team set.
+# Used for head-to-head evals where the trainee plays a different team set
+# (e.g. expert_curated via --team_set) against Kakuna on competitive teams.
+defaults:
+  team_set: competitive
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  Kakuna:
+    model_name: Kakuna

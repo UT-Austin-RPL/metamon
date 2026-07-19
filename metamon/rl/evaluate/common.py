@@ -265,6 +265,34 @@ def random_choice(value):
     return random.choice(expand_value_list(value))
 
 
+def parse_team_set_config(value: str):
+    """Parse a CLI/config string into a :func:`random_choice`-compatible team-set value.
+
+    Accepted forms:
+
+    * ``"name"`` — single team-set name (scalar; always drawn).
+    * ``"a,b,c"`` — comma-separated list → uniform draw over ``["a", "b", "c"]``.
+    * path to a ``.yaml`` / ``.yml`` file — loaded via :func:`load_config`. If the
+      file is a mapping with a ``team_set`` key, that value is used; otherwise the
+      whole document is the config value (list, scalar, or ``{weighted: ...}``).
+
+    Online collectors sample this once per AMAGO epoch (on env ``reset()``),
+    matching opponent checkpoint / temperature / team_set resampling.
+    """
+    stripped = value.strip()
+    if stripped.endswith((".yaml", ".yml")) and os.path.isfile(stripped):
+        raw = load_config(stripped)
+        if isinstance(raw, dict) and "team_set" in raw:
+            return raw["team_set"]
+        return raw
+    if "," in stripped:
+        names = [n.strip() for n in stripped.split(",") if n.strip()]
+        if not names:
+            raise ValueError(f"Empty team-set list from {value!r}")
+        return names if len(names) > 1 else names[0]
+    return stripped
+
+
 def _format_value_for_display(value) -> str:
     """Human-readable summary of a raw config value (for preview tables)."""
     if isinstance(value, dict) and "weighted" in value:
@@ -301,9 +329,7 @@ def merge_defaults(defaults: dict, overrides: dict) -> dict:
     return merged
 
 
-def expand_agent_pool_entries(
-    base_name: str, merged: dict
-) -> List[Tuple[str, dict]]:
+def expand_agent_pool_entries(base_name: str, merged: dict) -> List[Tuple[str, dict]]:
     """Expand one merged agent config into weighted pool rows.
 
     ``num_agents: 1`` (or omitted) yields a single ``(base_name, merged)`` row.

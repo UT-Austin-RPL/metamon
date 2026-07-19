@@ -8,6 +8,27 @@ metamon/env/vectorized/node_modules/
 # Weights & Biases
 wandb/
 
+# Large ensemble/eval logs (multi-GB JSONL) and scratch log dirs
+_ensemblev2_logs/
+_g9_logs/
+_g1_expert_logs/
+_probe_logs/
+*.jsonl
+
+# Local team sets / scratch data (kept on disk, not versioned)
+expert_teams/
+top_expert_teams/
+_smogon_scrape/html/
+_smogon_scrape/raw/
+_smogon_scrape/verified/
+
+# One-off LLM scratch / eval metric dumps at repo root (not real configs)
+/_analyze_*.py
+/_probe_*.py
+/starting_eval.json
+/ssmallg1_*.json
+/opponent_*.yaml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

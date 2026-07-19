@@ -1,0 +1,77 @@
+# Training opponent pool for MediumG1Online (gen1ou).
+#
+# Classic top-model roster plus the full SmallG1Online lineage (V0, V1_5, V2, V3)
+# as frozen self-play opponents. Opponents draw teams from hl_05_26. The trainee
+# POV team set is configured separately via --train_team_set (see
+# configs/team_sets/mediumg1_train.yaml).
+#
+# Each agent samples a checkpoint below/among its saved epochs (null = default)
+# and a temperature. num_agents duplicates pool rows -> higher sample weight.
+defaults:
+  team_set: hl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [0.5, 1.0, 1.25, 1.5, 1.75, 2.0]
+  num_agents: 1
+
+agents:
+  TaurosV0:
+    model_name: TaurosV0
+    num_agents: 2
+    # default ckpt 62; verify epochs exist on HF / adjust
+    checkpoints: "range(50, 63, 2)"
+
+  Kakuna:
+    model_name: Kakuna
+    num_agents: 2
+    checkpoints: "range(24, 35, 2)"
+
+  # Frozen self-play: original gen1ou base (default ckpt 3050 only).
+  SmallG1OnlineV0:
+    model_name: SmallG1OnlineV0
+    num_agents: 2
+    checkpoints: [null]
+
+  # expert specialist lineage (later epochs of mini_online_g1_expert_v2).
+  SmallG1OnlineV1_5:
+    model_name: SmallG1OnlineV1_5
+    num_agents: 2
+    checkpoints: "range(200, 401, 50)"
+
+  # expert_curated specialist (smallg1online_v2).
+  SmallG1OnlineV2:
+    model_name: SmallG1OnlineV2
+    num_agents: 2
+    checkpoints: "range(200, 401, 50)"
+
+  # Latest SmallG1Online specialist (smallg1online_v3; saved epochs 0-525 step 25).
+  SmallG1OnlineV3:
+    model_name: SmallG1OnlineV3
+    num_agents: 3
+    checkpoints: "range(200, 526, 50)"
+
+  Alakazam:
+    model_name: Alakazam
+    checkpoints: "range(2, 9, 2)"
+
+  SyntheticRLV2:
+    model_name: SyntheticRLV2
+    checkpoints: "range(36, 49, 2)"
+
+  # Minimum-weight opponent for a small amount of extra diversity.
+  SyntheticRLV1:
+    model_name: SyntheticRLV1
+    num_agents: 1
+    checkpoints: [null]
+
+  V2ADataAblation:
+    model_name: V2AGroupedV2DataAblation
+    checkpoints: "range(74, 91, 2)"
+
+  Superkazam:
+    model_name: Superkazam
+    checkpoints: "range(38, 51, 2)"
+
+  Kadabra3:
+    model_name: Kadabra3
+    checkpoints: "range(10, 21, 2)"

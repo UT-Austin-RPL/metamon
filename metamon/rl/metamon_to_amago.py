@@ -37,6 +37,7 @@ from metamon.env import (
     QueueOnLocalLadder,
     ChallengeByUsername,
     PokeAgentLadder,
+    ShowdownLadder,
 )
 
 try:
@@ -54,6 +55,35 @@ else:
     from amago.loading import RLData, RLDataset, Batch, MAGIC_PAD_VAL
     from amago.envs.amago_env import AMAGO_ENV_LOG_PREFIX
     from amago.nets.ff import Normalization
+
+
+# --------------------------------------------------------------------------- #
+# In-process per-lane battle-outcome bridge                                     #
+#                                                                               #
+# AMAGO's eval loop discards the env ``info`` dict (experiment.py: env.step ->  #
+# reset_hidden_state), so a policy that flushes per-battle logs inside          #
+# ``reset_hidden_state`` cannot see who won. The vectorized wrapper publishes   #
+# the most recent per-lane outcome here on ``step``; an in-process consumer     #
+# (e.g. the EnsembleV2 logger) pops it for a lane when that lane resets, which   #
+# AMAGO calls in the *same* loop iteration immediately after ``env.step``.      #
+# --------------------------------------------------------------------------- #
+_LATEST_BATTLE_OUTCOMES: dict[int, bool] = {}
+
+
+def publish_battle_outcomes(wins) -> None:
+    """Record per-lane wins (``wins`` may be a list with ``None`` for unfinished
+    lanes, or a scalar for the single-env case)."""
+    if isinstance(wins, (list, tuple)):
+        for lane, won in enumerate(wins):
+            if won is not None:
+                _LATEST_BATTLE_OUTCOMES[lane] = bool(won)
+    elif wins is not None:
+        _LATEST_BATTLE_OUTCOMES[0] = bool(wins)
+
+
+def pop_battle_outcome(lane: int):
+    """Consume and return the most recent outcome for ``lane`` (or ``None``)."""
+    return _LATEST_BATTLE_OUTCOMES.pop(lane, None)
 
 
 def _block_warnings():
@@ -188,6 +218,16 @@ def make_pokeagent_ladder_env(*args, **kwargs):
     return PSLadderAMAGOWrapper(menv)
 
 
+def make_showdown_ladder_env(*args, **kwargs):
+    """
+    Battle on the official Pokémon Showdown ladder (play.pokemonshowdown.com)!
+    """
+    _block_warnings()
+    menv = ShowdownLadder(*args, **kwargs)
+    print("Made Showdown Ladder Env")
+    return PSLadderAMAGOWrapper(menv)
+
+
 def make_challenge_env(*args, **kwargs):
     """
     Battle a specific opponent by username (head-to-head challenge mode).
@@ -314,6 +354,7 @@ class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         next_tstep, reward, terminated, truncated, info = super().step(action)
         # amago will average these stats over episodes, devices, and parallel actors.
         if "won" in info:
+            publish_battle_outcomes(info["won"])
             info[f"{AMAGO_ENV_LOG_PREFIX} Win Rate"] = info["won"]
         if "valid_action_count" in info and "invalid_action_count" in info:
             info[f"{AMAGO_ENV_LOG_PREFIX} Valid Actions"] = info[
@@ -383,6 +424,7 @@ class VectorizedMetamonAMAGOWrapper(amago.envs.AMAGOEnv):
         next_tstep, reward, terminated, truncated, info = super().step(action)
         if "won" in info:
             wins = info["won"]
+            publish_battle_outcomes(wins)
             if isinstance(wins, list):
                 # Lanes that did not finish this step report `None`. Hand
                 # AMAGO the per-battle outcomes as an array (not a pre-
@@ -429,7 +471,9 @@ def make_metamon_env(*args, **kwargs):
 
     Pass ``opponent_config`` or ``opponent_config_path`` (ladder self-play YAML).
     Each full ``reset()`` samples an agent, checkpoint, temperature, and team set.
-    Use AMAGO ``force_reset_on_every=True`` to redraw between training epochs.
+    Optional ``player_team_set_config`` (``random_choice`` value) redraws the POV
+    team set on the same cadence. Use AMAGO ``force_reset_on_every=True`` to
+    redraw between training epochs.
     """
     from metamon.env.vectorized import BattleAgainstOpponentPool, ShowdownEnv
 
@@ -682,7 +726,7 @@ class PSLadderAMAGOWrapper(MetamonAMAGOWrapper):
 
     @property
     def env_name(self):
-        return f"psladder_{self.env.env.username}"
+        return f"psladder_{self.env.player_username}"
 
 
 def unknown_token_mask(tokens, skip_prob: float = 0.5, batch_max_prob: float = 0.2):
