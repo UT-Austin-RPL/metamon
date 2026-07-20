@@ -262,6 +262,9 @@ def make_placeholder_experiment(
         log_interval=1,
         batch_size=1,
         dloader_workers=0,
+        # amago's default `traj_save_len = 1e10` is a float, which makes
+        # random.randint(*save_every) raise TypeError on env reset. Cast to int.
+        traj_save_len=int(1e10),
         log_to_wandb=log,
         wandb_project=os.environ.get("METAMON_WANDB_PROJECT"),
         wandb_entity=os.environ.get("METAMON_WANDB_ENTITY"),

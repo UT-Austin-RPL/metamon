@@ -21,6 +21,8 @@ __pycache__/
 *.sh
 !tools/
 !tools/*.sh
+!scripts/
+!scripts/*.sh
 *.csv
 *.pt
 
@@ -188,3 +190,10 @@ checks_data/
 metamon_cache
 teams/**/*.txt
 metamon/data/stats
+
+# Stray literal-~ cache dir created by a bad path expansion (do not commit)
+~/
+
+# graphify knowledge graph: commit the built graph outputs, ignore the
+# regenerable extraction cache.
+graphify-out/cache/

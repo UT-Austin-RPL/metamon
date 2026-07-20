@@ -765,7 +765,7 @@ def create_online_experiment(
         verbose=True,
         padded_sampling="none",
         dloader_workers=dloader_workers,
-        traj_save_len=1e10,
+        traj_save_len=int(1e10),
         stagger_traj_file_lengths=False,
         epochs=epochs,
         start_learning_at_epoch=0,
