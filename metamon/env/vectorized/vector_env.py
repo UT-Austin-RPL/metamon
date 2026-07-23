@@ -1026,6 +1026,8 @@ def BattleAgainstOpponentPool(
     showdown_dist: Optional[str] = None,
     n_workers: int = 1,
     seed: Optional[int] = None,
+    opponent_quota_min_games: Optional[int] = None,
+    opponent_quota_window: int = 128,
 ):
     """Factory: one shared opponent sampled from an opponent pool config.
 
@@ -1060,6 +1062,8 @@ def BattleAgainstOpponentPool(
         device=opponent_device,
         sample=opponent_sample,
         weights_path=opponent_weights_path,
+        quota_min_games=opponent_quota_min_games,
+        quota_window=opponent_quota_window,
     )
 
     env_cls = ShowdownEnv if int(batched_envs) == 1 else VectorizedShowdownEnv

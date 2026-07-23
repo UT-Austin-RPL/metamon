@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import os
 from abc import ABC, abstractmethod
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
@@ -116,6 +117,8 @@ class ConfigBatchedOpponent(BatchedOpponent):
         sample: bool = True,
         cache_size: int = 1,
         weights_path: Optional[str] = None,
+        quota_min_games: Optional[int] = None,
+        quota_window: int = 128,
     ):
         from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig
 
@@ -130,6 +133,21 @@ class ConfigBatchedOpponent(BatchedOpponent):
         # error. ``None`` disables the reader entirely (val/ladder unchanged).
         self._weights_path = weights_path
         self._weights_mtime: Optional[float] = None
+        # Quota-based diversification: a rolling window of recent ``configure()``
+        # assignments (one per env reset = ``num_lanes`` games against one shared
+        # opponent). Each agent row is guaranteed at least ``quota_min_games``
+        # games over the window — dominated, ladder-strong policies can never
+        # fall to ~0 games played (which previously triggered the cold-fallback
+        # weight spike). The surplus (window slots beyond all quotas) is sampled
+        # by the PSRO-Lite weights, so prioritization still tilts toward weaker
+        # matchups on the margin. ``quota_min_games=None`` / ``<= 0`` disables
+        # the quota (pure weighted sampling, the previous behavior).
+        self._quota_window = max(1, int(quota_window))
+        min_assignments = 0
+        if quota_min_games is not None and quota_min_games > 0 and self.num_lanes > 0:
+            min_assignments = max(1, int(math.ceil(quota_min_games / self.num_lanes)))
+        self._quota_min_assignments = min_assignments
+        self._quota_recent: "deque[str]" = deque(maxlen=self._quota_window)
         # Bound how many opponent policies stay resident on the GPU. Each cached
         # bundle holds a full policy (60-200M params) plus per-lane KV caches, so
         # an unbounded cache OOMs collectors that resample a new opponent every
@@ -203,11 +221,58 @@ class ConfigBatchedOpponent(BatchedOpponent):
             self.config.set_weights(None)
         self._weights_mtime = mtime
 
+    def _sample_with_quota(self) -> "PolicySpec":
+        """Two-phase opponent draw: guaranteed representation, then weighted surplus.
+
+        One ``configure()`` call assigns one shared opponent to all ``num_lanes``
+        lanes for one battle, so the quota is tracked in units of *assignments*
+        (``quota_min_games`` is converted to assignments via ``num_lanes``).
+
+        Over the rolling ``quota_window`` most recent assignments, every agent
+        row is guaranteed at least ``quota_min_assignments`` assignments — i.e.
+        at least ``quota_min_assignments * num_lanes`` games. Any window slots
+        beyond the union of quotas are filled by the PSRO-Lite weighted sample
+        (or uniform when no sidecar/weights), so prioritization still tilts the
+        *surplus* toward weaker matchups without ever starving a policy.
+
+        If the window is too small to satisfy every agent's quota
+        (``n_agents * min > window``), the quota is infeasible and we fall back
+        to pure weighted sampling rather than starving the surplus entirely.
+        """
+        names = [row[0] for row in self.config.agents]
+        n_agents = len(names)
+        min_a = self._quota_min_assignments
+        if min_a <= 0 or n_agents == 0:
+            return self.config.sample_opponent()
+        if n_agents * min_a > self._quota_window:
+            # Window can't hold all quotas → can't guarantee representation; fall
+            # back to weighted sampling (raise the window or lower the floor).
+            return self.config.sample_opponent()
+        # Per-agent assignment counts within the current rolling window.
+        counts: Dict[str, int] = {nm: 0 for nm in names}
+        for nm in self._quota_recent:
+            if nm in counts:
+                counts[nm] += 1
+        under = [nm for nm in names if counts[nm] < min_a]
+        if under:
+            # Pick the agent furthest below its quota (largest deficit); random
+            # tie-break so identical deficits don't lock onto one row.
+            max_deficit = max(min_a - counts[nm] for nm in under)
+            tied = [nm for nm in under if (min_a - counts[nm]) == max_deficit]
+            pick = self.config.rng.choice(tied)
+            spec = self.config.sample_opponent_for_agent(pick)
+        else:
+            # All quotas satisfied → spend the surplus on the weighted sample.
+            spec = self.config.sample_opponent()
+        self._quota_recent.append(spec.name)
+        return spec
+
     def configure(self, spec: Optional["PolicySpec"] = None) -> "PolicySpec":
         """Activate one sampled (or explicit) opponent for all lanes."""
         self._maybe_refresh_weights()
-        if spec is None:
-            spec = self.config.sample_opponent()
+        sampled = spec is None
+        if sampled:
+            spec = self._sample_with_quota()
         self.current_spec = spec
         self.current_team = self.config.team_set_for(spec.team_set)
         key = spec.unique_key

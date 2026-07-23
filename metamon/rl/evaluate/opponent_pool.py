@@ -11,7 +11,7 @@ import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
-from metamon.env import get_metamon_teams
+from metamon.env import get_metamon_team_set_or_mix
 from metamon.env.wrappers import TeamSet
 from metamon.rl.evaluate.common import (
     PolicySpec,
@@ -119,9 +119,20 @@ class OpponentPoolConfig:
             )[0]
         return sample_policy_from_merged(name, merged)
 
+    def sample_opponent_for_agent(self, name: str) -> PolicySpec:
+        """Sample checkpoint / temperature / team set for a *specific* agent row.
+
+        Used by the PSRO-Lite quota phase to guarantee a chosen agent row gets
+        played. Raises ``KeyError`` if ``name`` is not a row in ``self.agents``.
+        """
+        for nm, merged in self.agents:
+            if nm == name:
+                return sample_policy_from_merged(nm, merged)
+        raise KeyError(f"Agent {name!r} not in pool")
+
     def team_set_for(self, team_set_name: str) -> TeamSet:
         if team_set_name not in self._team_cache:
-            self._team_cache[team_set_name] = get_metamon_teams(
+            self._team_cache[team_set_name] = get_metamon_team_set_or_mix(
                 self.battle_format, team_set_name
             )
         return self._team_cache[team_set_name]

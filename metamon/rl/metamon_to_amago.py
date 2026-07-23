@@ -446,12 +446,16 @@ def make_metamon_env(*args, **kwargs):
     opponent_config_path = kwargs.pop("opponent_config_path", None)
     opponent_config = kwargs.pop("opponent_config", None)
     opponent_weights_path = kwargs.pop("opponent_weights_path", None)
+    opponent_quota_min_games = kwargs.pop("opponent_quota_min_games", None)
+    opponent_quota_window = kwargs.pop("opponent_quota_window", 128)
     _block_warnings()
     menv = BattleAgainstOpponentPool(
         *args,
         opponent_config_path=opponent_config_path,
         opponent_config=opponent_config,
         opponent_weights_path=opponent_weights_path,
+        opponent_quota_min_games=opponent_quota_min_games,
+        opponent_quota_window=opponent_quota_window,
         **kwargs,
     )
     print(

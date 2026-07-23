@@ -94,6 +94,10 @@ class PsroConfig:
     solver: str = "prioritized"  # "nash" reserved for v3
     fifo_reweight: bool = False
     buffer_trim: Optional[int] = None
+    # Cold-fallback / safety-net knobs (see compute_prioritized_weights).
+    novelty_gamma: float = 0.0
+    novelty_gamma0: float = 5.0
+    cap_ratio: Optional[float] = None
 
     @property
     def sidecar_path(self) -> str:
@@ -144,6 +148,9 @@ def compute_prioritized_weights(
     ema: float = 0.7,
     prev_weights: Optional[Dict[str, float]] = None,
     laplace_alpha: float = 1.0,
+    novelty_gamma: float = 0.0,
+    novelty_gamma0: float = 5.0,
+    cap_ratio: Optional[float] = None,
 ) -> Tuple[Dict[str, float], Dict[str, Dict[str, Any]]]:
     """Compute per-agent prioritized weights from the FIFO buffer filenames.
 
@@ -151,20 +158,33 @@ def compute_prioritized_weights(
     ``agent_names`` to a normalized weight (summing to 1), and ``diagnostics``
     maps each agent name to ``{n, win_rate, raw_weight, weight}``.
 
-    The transform (PFSP-style):
+    The transform (PFSP-style with a confidence-weighted cold fallback):
 
     .. code-block:: python
 
-        p_o        = (wins_o + α) / (n_o + 2α)        # Laplace-smoothed win rate
-        score_o    = max(0, 0.5 - p_o)               # high when learner loses
-        w_o        = score_o ** (1/τ)                # temperature; τ→∞ ⇒ uniform
-        w_o        = max(floor, w_o)                 # diversity floor
-        W          = w / sum(w)
+        p_o      = (wins_o + α) / (n_o + 2α)     # Laplace-smoothed learner win rate
+        score_o  = max(0, 0.5 - p_o)             # high when learner loses
+        conf_o   = n_o / (n_o + k)               # 0 at n=0 → 1; k = min_games
+        w_o      = (score_o ** (1/τ)) * conf_o   # cold → 0, not uniform
+        w_o     += γ / (n_o + γ0)                # decaying novelty bonus (γ>0)
+        w_o      = max(floor, w_o)               # diversity floor
+        w_o      = min(w_o, R*floor)             # optional weight-ratio cap (R)
+        W        = w / sum(w)
 
-    Agents with ``n_o < min_games`` fall back to the uniform weight. If every
-    agent is cold or all scores are zero, returns uniform weights. EMA smoothing
-    blends the new weights with ``prev_weights`` (``W_t = β·W_t + (1-β)·W_{t-1}``,
-    where ``β = ema``); ``prev_weights=None`` initializes to uniform.
+    Cold opponents (``n_o`` small) get ``conf_o ≈ 0`` so their raw weight
+    collapses to the ``floor`` rather than snapping to the uniform share — this
+    is the fix for the oscillation where a dominated opponent's game count dips
+    below ``min_games`` and its weight spikes to ``1/n_agents``. A never-played
+    opponent still gets a Laplace-neutral ``score_o = 0`` (``p_o = 0.5``), so it
+    also rests at the floor; set ``novelty_gamma > 0`` to add a small,
+    ``n``-decaying exploration bump on top of the floor for genuinely novel
+    opponents. ``cap_ratio`` (e.g. 20) hard-bounds any raw weight to ``R*floor``
+    as a safety net against solver spikes.
+
+    If every agent is cold or all raw weights are zero/``floor``-only, the
+    normalized result is uniform. EMA smoothing blends the new weights with
+    ``prev_weights`` (``W_t = β·W_t + (1-β)·W_{t-1}``, where ``β = ema``);
+    ``prev_weights=None`` initializes to uniform.
     """
     n_agents = len(agent_names)
     if n_agents == 0:
@@ -190,53 +210,37 @@ def compute_prioritized_weights(
         if result == "WIN":
             wins[agent] += 1
 
-    # Raw per-agent weights via the prioritized transform.
+    # Raw per-agent weights via the confidence-weighted prioritized transform.
+    # ``min_games`` is now a soft concentration parameter (k), not a hard gate:
+    # conf_o = n_o / (n_o + k) smoothly damps cold opponents toward the floor
+    # instead of snapping them to the uniform share (which caused dominated
+    # opponents to spike when their rolling-window count dipped below the gate).
+    k = max(float(min_games), 1e-9)
     raw: Dict[str, float] = {}
     for name in agent_names:
         n_o = n_games[name]
-        if n_o < min_games:
-            # Cold opponent: uniform fallback (resolved into the mix below).
-            raw[name] = float("nan")
-            continue
         p_o = (wins[name] + laplace_alpha) / (n_o + 2.0 * laplace_alpha)
         score = max(0.0, 0.5 - p_o)
-        if score <= 0.0:
-            # We dominate this opponent: floor keeps a non-zero diversity mass.
-            w = floor
-        else:
-            w = max(floor, score ** (1.0 / max(temp, 1e-9)))
+        conf = n_o / (n_o + k)
+        w = (score ** (1.0 / max(temp, 1e-9))) * conf
+        if novelty_gamma > 0.0:
+            # Decaying exploration bump for genuinely novel opponents; fades to
+            # 0 as games accrue. Additive on top of the score (not the floor),
+            # so a never-played opponent starts at floor + γ/γ0, not 1/n_agents.
+            w += novelty_gamma / (n_o + max(novelty_gamma0, 1e-9))
+        w = max(floor, w)
+        if cap_ratio is not None and cap_ratio > 0.0:
+            w = min(w, cap_ratio * floor)
         raw[name] = w
 
-    # If every agent is cold, return uniform.
-    if all(math.isnan(v) for v in raw.values()):
-        uniform = 1.0 / n_agents
-        weights = {name: uniform for name in agent_names}
-        diag = {
-            name: {
-                "n": n_games[name],
-                "win_rate": None,
-                "raw_weight": None,
-                "weight": uniform,
-            }
-            for name in agent_names
-        }
-        if unmatched:
-            diag["_unmatched_files"] = unmatched  # type: ignore[assignment]
-        return weights, diag
-
-    # Cold agents inherit the uniform mass (mean of the *active* agents' raw
-    # weights would bias the mix; instead give them the uniform share so they
-    # neither vanish nor dominate while we gather games).
-    active = [v for v in raw.values() if not math.isnan(v)]
-    uniform_share = 1.0 / n_agents if active else 0.0
-    w_vec = {name: (uniform_share if math.isnan(raw[name]) else raw[name]) for name in agent_names}
-
-    total = sum(w_vec.values())
-    if total <= 0.0:
+    # If every raw weight is equal (all floor → all opponents cold/dominated),
+    # normalization yields uniform; detect that explicitly to short-circuit.
+    total = sum(raw.values())
+    if total <= 0.0 or len(set(raw.values())) == 1:
         uniform = 1.0 / n_agents
         weights = {name: uniform for name in agent_names}
     else:
-        weights = {name: w_vec[name] / total for name in agent_names}
+        weights = {name: raw[name] / total for name in agent_names}
 
     # EMA smoothing with prev_weights.
     if prev_weights is not None and 0.0 < ema < 1.0:
@@ -269,7 +273,7 @@ def compute_prioritized_weights(
         diag[name] = {
             "n": n_o,
             "win_rate": win_rate,
-            "raw_weight": None if math.isnan(raw[name]) else raw[name],
+            "raw_weight": raw[name],
             "weight": weights[name],
         }
     if unmatched:
@@ -316,6 +320,9 @@ class PsroLite:
             floor=cfg.floor,
             ema=cfg.ema,
             prev_weights=self._prev_weights,
+            novelty_gamma=cfg.novelty_gamma,
+            novelty_gamma0=cfg.novelty_gamma0,
+            cap_ratio=cfg.cap_ratio,
         )
         self._prev_weights = dict(weights)
         self._last_write_ok = self._write_sidecar(weights)

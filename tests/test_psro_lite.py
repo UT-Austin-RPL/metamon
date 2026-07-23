@@ -446,3 +446,171 @@ def test_config_batched_opponent_uniform_when_no_sidecar():
     )
     opp._maybe_refresh_weights()
     assert opp.config.weights is None  # uniform fallback
+
+
+# ---------------------------------------------------------------------------
+# Cold-fallback confidence weighting (no more uniform spike for dominated
+# opponents whose rolling-window count dips below min_games)
+# ---------------------------------------------------------------------------
+
+def test_dominated_cold_opponent_stays_at_floor():
+    """A dominated opponent with n < min_games must NOT spike to 1/n_agents.
+
+    This is the regression test for the original oscillation: dominated → floor
+    → rarely sampled → n dips below min_games → cold fallback snapped weight to
+    the uniform share → spike → dominated again. The confidence-weighted fix
+    keeps cold dominated opponents at the floor.
+    """
+    agents = ["AgentA", "AgentB", "AgentC", "AgentD"]
+    with tempfile.TemporaryDirectory() as buf:
+        fmt_dir = os.path.join(buf, "gen1ou")
+        os.makedirs(fmt_dir)
+        # AgentA: dominated but cold (5 games, all learner wins → n=5 < 20).
+        _write_files(fmt_dir, {"AgentA": (5, 0)})
+        w, diag = compute_prioritized_weights(
+            buffer_dir=buf,
+            battle_format="gen1ou",
+            agent_names=agents,
+            window=0,
+            min_games=20,
+            temp=1.0,
+            floor=0.05,
+            ema=0.0,
+        )
+    # AgentA's raw weight is the floor (0.05), not 1/n_agents (0.25).
+    assert diag["AgentA"]["raw_weight"] == pytest.approx(0.05)
+    # After normalization AgentA must not exceed the uniform share.
+    assert w["AgentA"] <= 1.0 / len(agents) + 1e-9
+    assert abs(sum(w.values()) - 1.0) < 1e-9
+
+
+def test_novelty_bonus_boosts_never_played():
+    """With novelty_gamma > 0, a never-played opponent gets a small floor+ bump
+    that decays as games accrue — without snapping to the uniform share."""
+    agents = ["AgentA", "AgentB"]
+    with tempfile.TemporaryDirectory() as buf:
+        fmt_dir = os.path.join(buf, "gen1ou")
+        os.makedirs(fmt_dir)
+        _write_files(fmt_dir, {"AgentA": (0, 0)})  # never played
+        w0, diag0 = compute_prioritized_weights(
+            buffer_dir=buf, battle_format="gen1ou", agent_names=agents,
+            window=0, min_games=20, ema=0.0, floor=0.05, novelty_gamma=0.0,
+        )
+        w_g, diag_g = compute_prioritized_weights(
+            buffer_dir=buf, battle_format="gen1ou", agent_names=agents,
+            window=0, min_games=20, ema=0.0, floor=0.05, novelty_gamma=0.5,
+        )
+    # Without novelty: both cold → floor → uniform.
+    assert w0["AgentA"] == pytest.approx(0.5)
+    # With novelty: AgentA (n=0) gets floor + γ/γ0 > AgentB (n=0, same bonus).
+    # Both get the same novelty bonus here (both n=0), so still uniform — but the
+    # raw weight is above the floor. Use a one-agent-above case:
+    assert diag_g["AgentA"]["raw_weight"] > 0.05
+
+
+def test_cap_ratio_bounds_raw_weight():
+    """cap_ratio hard-bounds each raw weight to R*floor."""
+    agents = ["AgentA", "AgentB"]
+    with tempfile.TemporaryDirectory() as buf:
+        fmt_dir = os.path.join(buf, "gen1ou")
+        os.makedirs(fmt_dir)
+        # AgentB: learner loses all → max score. floor=0.05, cap R=4 → max 0.20.
+        _write_files(fmt_dir, {"AgentA": (100, 0), "AgentB": (0, 100)})
+        w, diag = compute_prioritized_weights(
+            buffer_dir=buf, battle_format="gen1ou", agent_names=agents,
+            window=0, min_games=20, ema=0.0, floor=0.05, cap_ratio=4.0,
+        )
+    assert diag["AgentB"]["raw_weight"] <= 4.0 * 0.05 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Quota-based sampling in ConfigBatchedOpponent
+# ---------------------------------------------------------------------------
+
+def _dummy_pool_multi(agents):
+    rows = [(name, {"model_name": name, "team_set": "competitive"}) for name in agents]
+    return OpponentPoolConfig(agents=rows, battle_format="gen1ou", rng=random.Random(0))
+
+
+def test_pool_sample_opponent_for_agent():
+    pool = _dummy_pool_multi(["AgentA", "AgentB"])
+    spec = pool.sample_opponent_for_agent("AgentB")
+    assert spec.name == "AgentB"
+    with pytest.raises(KeyError):
+        pool.sample_opponent_for_agent("Nope")
+
+
+def test_quota_guarantees_representation():
+    """Over a rolling window, every agent gets >= quota_min_assignments picks,
+    even when the PSRO weights try to starve the dominated ones."""
+    import torch
+
+    from metamon.env.vectorized.opponent import ConfigBatchedOpponent
+
+    agents = ["AgentA", "AgentB", "AgentC", "AgentD"]
+    pool = _dummy_pool_multi(agents)
+    opp = ConfigBatchedOpponent(
+        config=pool,
+        num_lanes=8,
+        device=torch.device("cpu"),
+        # Starve everyone but AgentA via the sidecar weights.
+        weights_path=None,
+        quota_min_games=16,  # → 2 assignments (16/8 lanes)
+        quota_window=64,
+    )
+    # Simulate the PSRO weights concentrating 97% on AgentA.
+    pool.set_weights([0.97, 0.01, 0.01, 0.01])
+    picks = Counter()
+    for _ in range(opp._quota_window):
+        spec = opp._sample_with_quota()
+        picks[spec.name] += 1
+    min_a = opp._quota_min_assignments
+    for nm in agents:
+        assert picks[nm] >= min_a, (nm, picks[nm], min_a)
+    # The surplus still lets AgentA collect extra picks (it has the high weight).
+    assert picks["AgentA"] > min_a
+
+
+def test_quota_disabled_when_min_games_zero():
+    """quota_min_games <= 0 disables the quota → pure weighted sampling."""
+    import torch
+
+    from metamon.env.vectorized.opponent import ConfigBatchedOpponent
+
+    pool = _dummy_pool_multi(["AgentA", "AgentB"])
+    opp = ConfigBatchedOpponent(
+        config=pool,
+        num_lanes=8,
+        device=torch.device("cpu"),
+        quota_min_games=0,
+        quota_window=64,
+    )
+    assert opp._quota_min_assignments == 0
+    pool.set_weights([0.99, 0.01])
+    picks = Counter(opp._sample_with_quota().name for _ in range(200))
+    # AgentB can be completely starved (no quota guarantee).
+    assert picks["AgentA"] > picks["AgentB"]
+
+
+def test_quota_infeasible_falls_back_to_weighted():
+    """If n_agents * min > window, the quota can't be satisfied → weighted sample."""
+    import torch
+
+    from metamon.env.vectorized.opponent import ConfigBatchedOpponent
+
+    agents = ["A", "B", "C", "D"]
+    pool = _dummy_pool_multi(agents)
+    # min_games=80 / 8 lanes = 10 assignments; 4 agents * 10 = 40 > window=16.
+    opp = ConfigBatchedOpponent(
+        config=pool,
+        num_lanes=8,
+        device=torch.device("cpu"),
+        quota_min_games=80,
+        quota_window=16,
+    )
+    assert opp._quota_min_assignments == 10
+    pool.set_weights([0.97, 0.01, 0.01, 0.01])
+    picks = Counter(opp._sample_with_quota().name for _ in range(200))
+    # Infeasible → falls back to weighted → dominated agents can be starved.
+    assert picks["A"] > picks["D"]
+    assert picks["D"] < 10  # well below the infeasible quota target

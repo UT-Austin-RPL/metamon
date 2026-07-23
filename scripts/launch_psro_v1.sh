@@ -16,6 +16,9 @@
 #                get boosted — Kakuna (~0.45 win rate) was being floored to uniform.
 #                The pool also includes the run's own past checkpoints
 #                (MiniOnlinePsroV0 in hl_gen1ou.yaml) as PSRO self-play opponents.
+#                --psro_quota_min_games 200 / --psro_quota_window 256 enforce a
+#                per-agent minimum-games guarantee over a rolling window so
+#                dominated, ladder-strong policies never fall to ~0 games played.
 #   validator  — reloads the learner's latest/policy.pt each epoch vs TaurosV0;
 #                unaffected by PSRO (uses its own val pool).
 #
@@ -43,6 +46,12 @@ cd "$REPO_ROOT"
 METAMON_CACHE_DIR="${METAMON_CACHE_DIR:-/home/eddie/metamon_cache}"
 METAMON_WANDB_ENTITY="${METAMON_WANDB_ENTITY:-costacosta-personal-research}"
 METAMON_WANDB_PROJECT="${METAMON_WANDB_PROJECT:-metamon}"
+# Optional weighted team-set mix spec (overrides --train_team_set when set).
+# Format: 'set_name:weight,set_name:weight,...'
+# e.g. "gl_05_26:0.75,smogon_pass2:0.15,smogon_pass2_selected:0.10" (Phase 1)
+# See docs/teamset_curriculum_proposal.md for the full phase schedule.
+TRAIN_TEAM_MIX="${TRAIN_TEAM_MIX:-}"
+VAL_TEAM_MIX="${VAL_TEAM_MIX:-}"
 export METAMON_CACHE_DIR METAMON_WANDB_ENTITY METAMON_WANDB_PROJECT
 
 # Tear down any prior session of the same name so this is idempotent.
@@ -54,6 +63,7 @@ tmux new-session -d -s "$SESSION" -n learner \
      METAMON_CACHE_DIR=$METAMON_CACHE_DIR \
      METAMON_WANDB_ENTITY=$METAMON_WANDB_ENTITY \
      METAMON_WANDB_PROJECT=$METAMON_WANDB_PROJECT \
+     TRAIN_TEAM_MIX='$TRAIN_TEAM_MIX' VAL_TEAM_MIX='$VAL_TEAM_MIX' \
    bash scripts/launch_mini_online_v1.sh learner --log \
      --prev_run_dir $PREV_SAVE_DIR --prev_run_name $PREV_RUN_NAME --prev_checkpoint $PREV_CKPT \
      --psro_weighting --psro_fifo_reweight --psro_start_epoch 0 \
@@ -65,10 +75,12 @@ tmux new-window -t "$SESSION" -n collector \
      METAMON_CACHE_DIR=$METAMON_CACHE_DIR \
      METAMON_WANDB_ENTITY=$METAMON_WANDB_ENTITY \
      METAMON_WANDB_PROJECT=$METAMON_WANDB_PROJECT \
+     TRAIN_TEAM_MIX='$TRAIN_TEAM_MIX' VAL_TEAM_MIX='$VAL_TEAM_MIX' \
    bash scripts/launch_mini_online_v1.sh collector --log \
      --prev_run_dir $PREV_SAVE_DIR --prev_run_name $PREV_RUN_NAME --prev_checkpoint $PREV_CKPT \
      --psro_weighting --psro_start_epoch 0 --psro_buffer_trim 50000 \
      --psro_temp 2.0 --psro_floor 0.01 \
+     --psro_quota_min_games "$PSRO_QUOTA_MIN_GAMES" --psro_quota_window "$PSRO_QUOTA_WINDOW" \
    2>&1 | tee $HOME/metamon_runs/psro_collector.log; echo '[collector exited]'; bash"
 
 # --- Validator (CPU-sim; reloads latest/policy.pt each epoch vs TaurosV0) -----
@@ -77,6 +89,7 @@ tmux new-window -t "$SESSION" -n validator \
      METAMON_CACHE_DIR=$METAMON_CACHE_DIR \
      METAMON_WANDB_ENTITY=$METAMON_WANDB_ENTITY \
      METAMON_WANDB_PROJECT=$METAMON_WANDB_PROJECT \
+     TRAIN_TEAM_MIX='$TRAIN_TEAM_MIX' VAL_TEAM_MIX='$VAL_TEAM_MIX' \
    bash scripts/launch_mini_online_v1.sh validator --log \
      --prev_run_dir $PREV_SAVE_DIR --prev_run_name $PREV_RUN_NAME --prev_checkpoint $PREV_CKPT \
    2>&1 | tee $HOME/metamon_runs/psro_validator.log; echo '[validator exited]'; bash"

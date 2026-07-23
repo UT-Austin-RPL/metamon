@@ -51,7 +51,7 @@ import wandb
 
 import metamon
 from metamon.data import MetamonDataset
-from metamon.env import get_metamon_teams
+from metamon.env import get_metamon_team_set_or_mix
 from metamon.interface import (
     ObservationSpace,
     UniversalPokemon,
@@ -263,11 +263,28 @@ def add_cli(parser):
         f"{DEFAULT_TRAIN_TEAM_SET}.",
     )
     parser.add_argument(
+        "--train_team_mix",
+        type=str,
+        default=None,
+        help="Weighted mix spec for collection (self-play) envs, overriding "
+        "--train_team_set when set. Format: "
+        "'set_name:weight,set_name:weight,...' "
+        "e.g. 'gl_05_26:0.45,smogon_pass2:0.35,smogon_pass2_selected:0.20'. "
+        "Weights need not sum to 1.",
+    )
+    parser.add_argument(
         "--val_team_set",
         type=str,
         default=DEFAULT_VAL_TEAM_SET,
         help=f"Team set for validation envs. Default: {DEFAULT_VAL_TEAM_SET} "
         f"(gen9ou runs typically use gl_05_26).",
+    )
+    parser.add_argument(
+        "--val_team_mix",
+        type=str,
+        default=None,
+        help="Weighted mix spec for validation envs, overriding --val_team_set "
+        "when set. Same format as --train_team_mix.",
     )
     parser.add_argument(
         "--reward_function",
@@ -404,6 +421,45 @@ def add_cli(parser):
         "--psro_start_epoch to accelerate turnover of the uniform-sampled "
         "backlog (e.g. 50000).",
     )
+    # Diversification quota: guarantees every pool agent a minimum number of
+    # games over a rolling window so dominated, ladder-strong policies never
+    # fall to ~0 games played (which previously triggered the cold-fallback
+    # weight spike). The PSRO-Lite weights then tilt the *surplus* (window
+    # slots beyond all quotas) toward weaker matchups.
+    parser.add_argument(
+        "--psro_quota_min_games",
+        type=int,
+        default=0,
+        help="Per-agent minimum games over the rolling --psro_quota_window. "
+        "0 disables the quota (pure weighted sampling). One configure() call "
+        "assigns one shared opponent to all lanes for a battle, so the quota "
+        "is enforced in units of ceil(min_games / lanes) assignments. Default "
+        "0; the launch scripts set this when PSRO is on.",
+    )
+    parser.add_argument(
+        "--psro_quota_window",
+        type=int,
+        default=128,
+        help="Rolling window (in env reset / configure() calls) over which the "
+        "per-agent quota is enforced. Must be >= n_agents * ceil(min_games / "
+        "lanes) or the quota is infeasible and falls back to weighted sampling.",
+    )
+    parser.add_argument(
+        "--psro_novelty",
+        type=float,
+        default=0.0,
+        help="Decaying novelty bonus γ added to each opponent's raw weight: "
+        "γ/(n+γ0). 0 (default) disables — the collection quota is the primary "
+        "exploration mechanism. Set >0 to give genuinely novel opponents a "
+        "small, n-decaying bump on top of the floor.",
+    )
+    parser.add_argument(
+        "--psro_cap",
+        type=float,
+        default=None,
+        help="Weight-ratio cap R: hard-bounds each raw weight to R*floor as a "
+        "safety net against solver spikes. None (default) disables.",
+    )
     return parser
 
 
@@ -517,6 +573,8 @@ def _make_psro_config(args, *, battle_format: str) -> Optional[PsroConfig]:
         solver=args.psro_solver,
         fifo_reweight=args.psro_fifo_reweight,
         buffer_trim=args.psro_buffer_trim,
+        novelty_gamma=args.psro_novelty,
+        cap_ratio=args.psro_cap,
     )
 
 
@@ -674,9 +732,16 @@ def _make_collect_train_env(
     n_workers: int,
     seed: Optional[int],
     team_set_name: str = DEFAULT_TRAIN_TEAM_SET,
+    team_mix_spec: Optional[str] = None,
     opponent_weights_path: Optional[str] = None,
+    opponent_quota_min_games: Optional[int] = None,
+    opponent_quota_window: int = 128,
 ):
-    team_set = get_metamon_teams(battle_format, team_set_name)
+    team_set = (
+        get_metamon_team_set_or_mix(battle_format, team_mix_spec)
+        if team_mix_spec
+        else get_metamon_team_set_or_mix(battle_format, team_set_name)
+    )
     return partial(
         make_metamon_env,
         battle_format=battle_format,
@@ -686,6 +751,8 @@ def _make_collect_train_env(
         team_set=team_set,
         opponent_config_path=opponent_config_path,
         opponent_weights_path=opponent_weights_path,
+        opponent_quota_min_games=opponent_quota_min_games,
+        opponent_quota_window=opponent_quota_window,
         batched_envs=lanes,
         n_workers=n_workers,
         opponent_sample=True,
@@ -751,8 +818,13 @@ def _make_val_env(
     n_workers: int,
     seed: Optional[int],
     team_set_name: str = DEFAULT_VAL_TEAM_SET,
+    team_mix_spec: Optional[str] = None,
 ):
-    team_set = get_metamon_teams(battle_format, team_set_name)
+    team_set = (
+        get_metamon_team_set_or_mix(battle_format, team_mix_spec)
+        if team_mix_spec
+        else get_metamon_team_set_or_mix(battle_format, team_set_name)
+    )
     return partial(
         make_metamon_env,
         battle_format=battle_format,
@@ -785,6 +857,8 @@ def create_online_experiment(
     n_workers: int,
     train_team_set: str = DEFAULT_TRAIN_TEAM_SET,
     val_team_set: str = DEFAULT_VAL_TEAM_SET,
+    train_team_mix: Optional[str] = None,
+    val_team_mix: Optional[str] = None,
     temp_low: float,
     temp_high: float,
     epochs: int,
@@ -804,6 +878,8 @@ def create_online_experiment(
     log: bool,
     psro_config: Optional["PsroConfig"] = None,
     opponent_weights_path: Optional[str] = None,
+    opponent_quota_min_games: Optional[int] = None,
+    opponent_quota_window: int = 128,
 ):
     config = {
         "MetamonTstepEncoder.tokenizer": pretrained.observation_space.tokenizer,
@@ -868,7 +944,10 @@ def create_online_experiment(
             n_workers=n_workers,
             seed=seed,
             team_set_name=train_team_set,
+            team_mix_spec=train_team_mix,
             opponent_weights_path=opponent_weights_path,
+            opponent_quota_min_games=opponent_quota_min_games,
+            opponent_quota_window=opponent_quota_window,
         )
         parallel_actors = lanes
         effective_train_timesteps = train_timesteps_per_epoch
@@ -899,6 +978,7 @@ def create_online_experiment(
             n_workers=n_workers,
             seed=seed,
             team_set_name=val_team_set,
+            team_mix_spec=val_team_mix,
         )
         effective_val_timesteps = val_timesteps
         effective_val_interval = val_interval
@@ -1058,6 +1138,15 @@ if __name__ == "__main__":
         if args.psro_fifo_reweight
         else None
     )
+    # Quota-based diversification: guarantee every pool agent a minimum number
+    # of games over a rolling window so dominated, ladder-strong policies never
+    # fall to ~0 games played. Meaningful for collect/both (the collector env
+    # draws opponents); no-op for learn/validate (no pool sampling). Defaults to
+    # off (0); the launch scripts enable it alongside --psro_weighting.
+    opponent_quota_min_games = (
+        args.psro_quota_min_games if args.psro_quota_min_games > 0 else None
+    )
+    opponent_quota_window = args.psro_quota_window
     if psro_config is not None:
         print(f"  PSRO-Lite: ON (start_epoch={psro_config.start_epoch}, "
               f"solver={psro_config.solver}, temp={psro_config.temp}, "
@@ -1069,6 +1158,9 @@ if __name__ == "__main__":
             print(f"  PSRO FIFO reweighting: ON (sidecar={sidecar_path})")
         if args.psro_buffer_trim is not None:
             print(f"  PSRO buffer trim: {args.psro_buffer_trim} at start epoch")
+    if opponent_quota_min_games is not None:
+        print(f"  PSRO quota: min {opponent_quota_min_games} games/agent over "
+              f"window={opponent_quota_window} resets")
 
     if args.mode == "collect":
         fifo_root = os.path.abspath(args.buffer_dir)
@@ -1127,6 +1219,8 @@ if __name__ == "__main__":
         n_workers=args.n_workers,
         train_team_set=args.train_team_set,
         val_team_set=args.val_team_set,
+        train_team_mix=args.train_team_mix,
+        val_team_mix=args.val_team_mix,
         temp_low=args.temp_low,
         temp_high=args.temp_high,
         epochs=args.epochs,
@@ -1146,6 +1240,8 @@ if __name__ == "__main__":
         log=args.log,
         psro_config=psro_config,
         opponent_weights_path=opponent_weights_path,
+        opponent_quota_min_games=opponent_quota_min_games,
+        opponent_quota_window=opponent_quota_window,
     )
 
     experiment.start()
