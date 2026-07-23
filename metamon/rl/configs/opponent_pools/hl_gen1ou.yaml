@@ -40,3 +40,16 @@ agents:
   Kadabra3:
     model_name: Kadabra3
     checkpoints: "range(10, 21, 2)"
+
+  # PSRO self-play expansion: a competitive past self from the current online
+  # RL run (mini_online_psro_v1). Registered as MiniOnlinePsroV0 in pretrained.py.
+  # Selected by TaurosV0 eval: epoch 550 scored 0.56 win rate / 110.9 return
+  # (100 battles, competitive teams) — right at the learner's current level.
+  # Epoch 0 was a first-epoch transient (0.01) and is excluded; epoch 250 (0.41)
+  # is a weaker optional add. One aggregate agent row (num_agents=1); PSRO-Lite
+  # tracks one per-agent win rate for this row. To refresh as the run saves more
+  # competitive checkpoints, bump the epoch below and relaunch the collector.
+  MiniOnlinePsroV0:
+    model_name: MiniOnlinePsroV0
+    num_agents: 1
+    checkpoints: [550]

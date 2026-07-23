@@ -1461,6 +1461,50 @@ class SmallG1OnlineV0(LocalFinetunedModel):
         return super().get_path_to_checkpoint(checkpoint)
 
 
+MINI_ONLINE_PSRO_V1_SAVE_DIR = "/home/eddie/metamon_runs/mini_online_psro_v1"
+
+
+@pretrained_model()
+class MiniOnlinePsroV0(LocalFinetunedModel):
+    """PSRO-Lite continuation run ``mini_online_psro_v1`` from ``metamon.rl.online_rl``.
+
+    Continues ``mini_online_v1`` from its epoch-700 checkpoint with PSRO-Lite
+    prioritized opponent sampling. Same from-scratch ``V2AGroupedV2DataAblation``
+    architecture as ``SmallG1OnlineV0``; ``base_model`` only supplies
+    architecture/spaces/tokenizer/reward config — weights come from this run's
+    own checkpoints.
+
+    Checkpoints live under
+    ``{save_dir}/mini_online_psro_v1/ckpts/policy_weights/policy_epoch_{N}.pt``
+    (saved every 10 epochs). Pass ``checkpoint=N`` for a specific epoch, or
+    ``checkpoint=-1`` (``LATEST_CHECKPOINT``) for the learner's rolling
+    ``ckpts/latest/policy.pt`` (the same file the validator reads each epoch).
+
+    Registered so the run's own past checkpoints can serve as PSRO self-play
+    opponents: add an entry to ``metamon/rl/configs/opponent_pools/hl_gen1ou.yaml``
+    with ``model_name: MiniOnlinePsroV0`` and a ``checkpoints`` range of
+    existing epochs. NOTE: the ``checkpoints`` range is a static snapshot parsed
+    at pool-load time — relaunch the collector to refresh the past-self set as
+    the run saves more checkpoints (the run targets epoch 3950).
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=MINI_ONLINE_PSRO_V1_SAVE_DIR,
+            model_name="mini_online_psro_v1",
+            default_checkpoint=560,
+            # Same train gin stack as SmallG1OnlineV0 / online_rl.py.
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
 @pretrained_model()
 class KakunaEnsemble(PretrainedModel):
     """
