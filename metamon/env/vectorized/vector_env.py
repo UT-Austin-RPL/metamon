@@ -117,6 +117,10 @@ class VectorizedShowdownEnv(gym.Env):
         self.metamon_action_space = eval_action_space
         self.metamon_obs_space = eval_obs_space
 
+        self.player_username = player_username or (
+            f"MMVecSD-{''.join(str(random.randint(0, 9)) for _ in range(8))}"
+        )
+
         if save_trajectories_to is not None:
             self.save_trajectories_to = os.path.join(
                 save_trajectories_to, battle_format
@@ -124,7 +128,26 @@ class VectorizedShowdownEnv(gym.Env):
             os.makedirs(self.save_trajectories_to, exist_ok=True)
         else:
             self.save_trajectories_to = None
-        self.save_results_to = save_results_to
+        if save_results_to is not None:
+            # ``save_results_to`` is a *directory* (mirroring the non-vectorized
+            # PokeEnvWrapper); we write one per-battle CSV per env instance inside
+            # ``<save_results_to>/<battle_format>/``. The CSV records both the
+            # player's and the opponent's sampled team file so per-team win rates
+            # can be recovered per policy/opponent for downstream replay weighting.
+            self.save_results_to = os.path.join(save_results_to, battle_format)
+            os.makedirs(self.save_results_to, exist_ok=True)
+            self.save_results_to = os.path.join(
+                self.save_results_to,
+                f"battle_log_{self.player_username}_{battle_format}.csv",
+            )
+            if not os.path.exists(self.save_results_to):
+                with open(self.save_results_to, "a") as f:
+                    f.write(
+                        "Player Username, Team File, Opponent Team File, "
+                        "Opponent Username, Result, Turn Count, Battle ID\n"
+                    )
+        else:
+            self.save_results_to = None
         self._saving = (
             self.save_trajectories_to is not None or self.save_results_to is not None
         )
@@ -133,10 +156,6 @@ class VectorizedShowdownEnv(gym.Env):
         ]
         self._traj_actions: List[List[int]] = [[] for _ in range(self.batched_envs)]
 
-        self.player_username = player_username or (
-            f"MMVecSD-{''.join(str(random.randint(0, 9)) for _ in range(8))}"
-        )
-
         self._rng = random.Random(seed)
 
         self.lanes: List[StreamBattleLane] = [
@@ -144,6 +163,7 @@ class VectorizedShowdownEnv(gym.Env):
         ]
         self._lane_steps = np.zeros((self.batched_envs,), dtype=np.int64)
         self._team_files: List[Optional[str]] = [None] * self.batched_envs
+        self._opp_team_files: List[Optional[str]] = [None] * self.batched_envs
         self._last_opp_obs: List[Optional[dict]] = [None] * self.batched_envs
         # Actions for the in-flight ``step`` (re-applied on trap re-prompts).
         self._step_eval_actions: Optional[np.ndarray] = None
@@ -294,6 +314,7 @@ class VectorizedShowdownEnv(gym.Env):
         p1_spec, p1_file = player_spec(f"p1-{i}", p1_team, self.battle_format)
         p2_spec, p2_file = player_spec(f"p2-{i}", p2_team, self.battle_format)
         self._team_files[i] = p1_file if self.eval_side == "p1" else p2_file
+        self._opp_team_files[i] = p2_file if self.eval_side == "p1" else p1_file
         seed = self._random_seed()
         self.proc.start_battle(i, self.battle_format, p1=p1_spec, p2=p2_spec, seed=seed)
 
@@ -786,7 +807,8 @@ class VectorizedShowdownEnv(gym.Env):
             with open(self.save_results_to, "a") as f:
                 f.write(
                     f"{self.player_username},{self._team_files[i]},"
-                    f"{opponent_name},{result},{int(self._lane_steps[i])},"
+                    f"{self._opp_team_files[i]},{opponent_name},{result},"
+                    f"{int(self._lane_steps[i])},"
                     f"{battle_id}\n"
                 )
 
@@ -990,6 +1012,7 @@ def BattleAgainstOpponentPool(
     opponent_config_path: Optional[str] = None,
     opponent_config: Optional[OpponentPoolConfig] = None,
     opponent_config_template_vars: Optional[Dict[str, str]] = None,
+    opponent_weights_path: Optional[str] = None,
     batched_envs: int = 8,
     turn_limit: int = 200,
     opponent_sample: bool = True,
@@ -1036,6 +1059,7 @@ def BattleAgainstOpponentPool(
         num_lanes=int(batched_envs),
         device=opponent_device,
         sample=opponent_sample,
+        weights_path=opponent_weights_path,
     )
 
     env_cls = ShowdownEnv if int(batched_envs) == 1 else VectorizedShowdownEnv
