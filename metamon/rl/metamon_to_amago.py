@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional, Any, Type
+from typing import Optional, Any, Type, Callable
 import os
+import math
+import random
 import warnings
 
 import gin
@@ -38,6 +40,10 @@ from metamon.env import (
     ChallengeByUsername,
     PokeAgentLadder,
 )
+
+# Retries for FIFO trajectory sampling when a file is deleted between refresh
+# and load (concurrent collector eviction / --psro_buffer_trim).
+_FIFO_SAMPLE_RETRIES = 8
 
 try:
     import amago
@@ -439,11 +445,13 @@ def make_metamon_env(*args, **kwargs):
 
     opponent_config_path = kwargs.pop("opponent_config_path", None)
     opponent_config = kwargs.pop("opponent_config", None)
+    opponent_weights_path = kwargs.pop("opponent_weights_path", None)
     _block_warnings()
     menv = BattleAgainstOpponentPool(
         *args,
         opponent_config_path=opponent_config_path,
         opponent_config=opponent_config,
+        opponent_weights_path=opponent_weights_path,
         **kwargs,
     )
     print(
@@ -1745,6 +1753,7 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         dset_max_size: int,
         dset_min_size: int = 1,
         dset_name: Optional[str] = None,
+        opponent_weight_provider: Optional["Callable[[], dict[str, float]]"] = None,
     ):
         super().__init__(
             parsed_replay_dset=parsed_replay_dset,
@@ -1753,6 +1762,12 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         )
         self.dset_max_size = dset_max_size
         self.dset_min_size = dset_min_size
+        # PSRO-Lite per-trajectory reweighting (v1). When set, ``sample_random_trajectory``
+        # draws files in proportion to the current per-opponent weight instead of
+        # uniformly. The provider reads the same ``meta_weights.json`` sidecar the
+        # env reads; files whose opponent isn't in the sidecar get a uniform fallback.
+        self._opponent_weight_provider = opponent_weight_provider
+        self._weighted_index: Optional[tuple[list[str], np.ndarray]] = None
 
     @property
     def ready_for_training(self) -> bool:
@@ -1807,12 +1822,70 @@ class MetamonFIFODataset(MetamonAMAGODataset):
                 pass
         return removed
 
+    def _rebuild_weighted_index(self) -> None:
+        """Build a ``(filepaths, weights)`` index for per-trajectory reweighting.
+
+        Called after each ``refresh_files()``. Maps each file's opponent token
+        (parsed from the filename) to the current per-agent weight from the sidecar
+        via the provider. Files whose opponent isn't in the sidecar get a uniform
+        fallback weight (``1/N``). On any error, clears the weighted index so
+        ``sample_random_trajectory`` falls back to uniform.
+        """
+        from metamon.rl.psro_lite import parse_trajectory_filename, match_agent_name
+
+        provider = self._opponent_weight_provider
+        if provider is None:
+            self._weighted_index = None
+            return
+        try:
+            weights_map = provider() or {}
+        except Exception:
+            self._weighted_index = None
+            return
+        if not weights_map:
+            self._weighted_index = None
+            return
+        agent_names = list(weights_map.keys())
+        filenames = list(self.parsed_replay_dset.filenames)
+        if not filenames:
+            self._weighted_index = None
+            return
+        file_weights = np.zeros(len(filenames), dtype=np.float64)
+        uniform = 1.0 / max(len(filenames), 1)
+        matched = 0
+        for i, fn in enumerate(filenames):
+            parsed = parse_trajectory_filename(fn)
+            if parsed is None:
+                file_weights[i] = uniform
+                continue
+            opp_label, _result = parsed
+            agent = match_agent_name(opp_label, agent_names)
+            if agent is None:
+                file_weights[i] = uniform
+                continue
+            w = float(weights_map.get(agent, 0.0))
+            if w <= 0.0 or not math.isfinite(w):
+                w = uniform
+            file_weights[i] = w
+            matched += 1
+        if matched == 0:
+            self._weighted_index = None
+            return
+        total = file_weights.sum()
+        if total <= 0.0:
+            self._weighted_index = None
+            return
+        file_weights = file_weights / total
+        self._weighted_index = (filenames, file_weights)
+
     def on_end_of_collection(self, experiment) -> dict[str, Any]:
         """Mirror ``DiskTrajDataset.on_end_of_collection`` (amago.loading).
 
         All ranks rescan/resync the file list; only ``has_edit_rights`` processes
         (the learner) evict on the main rank, then all ranks refresh again.
         Collectors set ``has_dset_edit_rights=False`` and only perform the reads.
+        Rebuilds the per-trajectory weight index after the final refresh so the
+        learner's online 40%% mixture tracks the meta-distribution every epoch.
         """
         self.parsed_replay_dset.refresh_files()
         if not self.has_edit_rights:
@@ -1824,11 +1897,41 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         experiment.accelerator.wait_for_everyone()
         self.parsed_replay_dset.refresh_files()
         new_size = len(self.parsed_replay_dset)
+        if self._opponent_weight_provider is not None:
+            self._rebuild_weighted_index()
         return {
             "FIFO Buffer Size": new_size,
             "FIFO Files Deleted": old_size - new_size,
             "FIFO Files Before Eviction": old_size,
         }
+
+    def sample_random_trajectory(self) -> RLData:
+        """Draw a trajectory, weighted by per-opponent PSRO-Lite weights when active.
+
+        Retries on ``FileNotFoundError``: the FIFO buffer is shared across the
+        collector (which appends and, with ``--psro_buffer_trim``, can evict)
+        and the learner (which samples). A file present at refresh time may be
+        deleted before a dataloader worker reads it. We re-pick rather than
+        crashing — the next ``on_end_of_collection`` refresh will drop it from
+        the index.
+        """
+        for _ in range(_FIFO_SAMPLE_RETRIES):
+            try:
+                idx = self._weighted_index
+                if idx is not None:
+                    filenames, weights = idx
+                    i = int(np.random.choice(len(filenames), p=weights))
+                    data = self.parsed_replay_dset.load_filename(filenames[i])
+                else:
+                    data = self.parsed_replay_dset.random_sample()
+                return self._process_data(data)
+            except FileNotFoundError:
+                continue
+        # All retries missed (e.g. a mass eviction wiped the indexed files
+        # between refreshes). Fall back to a fresh uniform pick over whatever
+        # the dataset currently lists — by the next epoch the index is rebuilt.
+        fn = random.choice(self.parsed_replay_dset.filenames)
+        return self._process_data(self.parsed_replay_dset.load_filename(fn))
 
     def get_description(self) -> str:
         return (
@@ -1945,6 +2048,7 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
         gin_config: Optional[dict] = None,
         gin_config_files: Optional[list[str]] = None,
         gin_extra_bindings: Optional[dict] = None,
+        psro_config: Optional["PsroConfig"] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1953,6 +2057,14 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
         self._gin_config = gin_config
         self._gin_config_files = gin_config_files
         self._gin_extra_bindings = gin_extra_bindings or {}
+        # PSRO-Lite: None ⇒ disabled (current uniform behavior). Only the
+        # collector process drives ``step()``; the learner/validator pass a
+        # ``PsroConfig`` for config symmetry but never write the sidecar.
+        self._psro: Optional["PsroLite"] = None
+        if psro_config is not None:
+            from metamon.rl.psro_lite import PsroLite
+            self._psro = PsroLite(config=psro_config)
+        self._psro_trimmed = False
 
     def _reload_gin(self) -> None:
         """Re-apply gin after env init (opponent ``initialize_agent`` clears gin).
@@ -2016,3 +2128,54 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
             super().collect_new_training_data()
         finally:
             self._reset_policy_temperature()
+        self._psro_step()
+
+    def _psro_step(self) -> None:
+        """Refresh PSRO-Lite weights + write the sidecar (collector process only).
+
+        Gated on ``self.epoch >= start_epoch``. Forces one update on the start
+        epoch itself so the sidecar exists from the first prioritized collection
+        epoch, then respects ``update_interval`` thereafter. Before the start
+        epoch nothing is written, so readers see no file and stay uniform.
+        Also performs the one-time ``--psro_buffer_trim`` eviction on the start
+        epoch to accelerate turnover of the uniform-sampled backlog.
+        """
+        psro = self._psro
+        if psro is None:
+            return
+        cfg = psro.config
+        if self.epoch < cfg.start_epoch:
+            return
+        # One-time buffer trim at the start epoch (main process only).
+        if not self._psro_trimmed and cfg.buffer_trim is not None:
+            if getattr(self.accelerator, "is_main_process", True):
+                removed = psro.trim_buffer()
+                if removed:
+                    print(
+                        f"  [psro] buffer trim: evicted {removed} files "
+                        f"→ target {cfg.buffer_trim}",
+                        flush=True,
+                    )
+            self._psro_trimmed = True
+        first = self.epoch == cfg.start_epoch
+        if not (first or self.epoch % max(cfg.update_interval, 1) == 0):
+            return
+        if not getattr(self.accelerator, "is_main_process", True):
+            return
+        weights, diag = psro.step(epoch=self.epoch)
+        # Log per-opponent diagnostics to the wandb ``psro/`` panel.
+        log_dict: dict[str, Any] = {}
+        for name in cfg.agent_names:
+            d = diag.get(name, {})
+            log_dict[f"{name}/n"] = d.get("n", 0)
+            wr = d.get("win_rate")
+            log_dict[f"{name}/win_rate"] = wr if wr is not None else 0.0
+            log_dict[f"{name}/weight"] = d.get("weight", 0.0)
+        log_dict["weight_entropy"] = diag.get("_weight_entropy", 0.0)
+        log_dict["sidecar_write_ok"] = int(
+            bool(diag.get("_sidecar_write_ok", False))
+        )
+        try:
+            self.log(log_dict, key="psro")
+        except Exception:
+            pass
