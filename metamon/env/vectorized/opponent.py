@@ -18,9 +18,11 @@ across the batch. Two implementations are provided:
 from __future__ import annotations
 
 import gc
+import json
+import os
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -113,6 +115,7 @@ class ConfigBatchedOpponent(BatchedOpponent):
         device: torch.device,
         sample: bool = True,
         cache_size: int = 1,
+        weights_path: Optional[str] = None,
     ):
         from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig
 
@@ -122,6 +125,11 @@ class ConfigBatchedOpponent(BatchedOpponent):
         self.num_lanes = int(num_lanes)
         self.device = device
         self.sample = sample
+        # PSRO-Lite sidecar: optional ``meta_weights.json`` keyed by agent row
+        # name. Re-read only when mtime changes; fall back to uniform on any
+        # error. ``None`` disables the reader entirely (val/ladder unchanged).
+        self._weights_path = weights_path
+        self._weights_mtime: Optional[float] = None
         # Bound how many opponent policies stay resident on the GPU. Each cached
         # bundle holds a full policy (60-200M params) plus per-lane KV caches, so
         # an unbounded cache OOMs collectors that resample a new opponent every
@@ -160,8 +168,44 @@ class ConfigBatchedOpponent(BatchedOpponent):
             driver.hidden_state = None
             driver.policy = None
 
+    def _maybe_refresh_weights(self) -> None:
+        """Re-read the PSRO-Lite sidecar if it changed; apply to the pool."""
+        if self._weights_path is None:
+            return
+        try:
+            mtime = os.path.getmtime(self._weights_path)
+        except OSError:
+            # No sidecar yet (e.g. before psro_start_epoch) → stay uniform.
+            self._weights_mtime = None
+            return
+        if mtime == self._weights_mtime:
+            return
+        try:
+            with open(self._weights_path, "r") as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        # Align sidecar weights (keyed by agent row name) to ``self.config.agents``
+        # rows. Missing agents and non-finite values fall back to uniform via
+        # ``set_weights`` all-zero/None handling.
+        names = [row[0] for row in self.config.agents]
+        aligned: List[float] = []
+        for name in names:
+            try:
+                aligned.append(float(raw.get(name, 0.0)))
+            except (TypeError, ValueError):
+                aligned.append(0.0)
+        try:
+            self.config.set_weights(aligned)
+        except ValueError:
+            self.config.set_weights(None)
+        self._weights_mtime = mtime
+
     def configure(self, spec: Optional["PolicySpec"] = None) -> "PolicySpec":
         """Activate one sampled (or explicit) opponent for all lanes."""
+        self._maybe_refresh_weights()
         if spec is None:
             spec = self.config.sample_opponent()
         self.current_spec = spec

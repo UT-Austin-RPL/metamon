@@ -7,6 +7,7 @@ and sampling — one shared opponent per env ``reset()``.
 
 from __future__ import annotations
 
+import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,13 +47,19 @@ def parse_opponent_pool_dict(raw: Dict[str, Any]) -> List[Tuple[str, dict]]:
 
 
 class OpponentPoolConfig:
-    """Parsed opponent pool — sample one shared opponent per env ``reset()``."""
+    """Parsed opponent pool — sample one shared opponent per env ``reset()``.
+
+    Optional ``weights`` (aligned with ``agents``) reweight the row sampling for
+    PSRO-Lite prioritized collection. ``None`` ⇒ uniform (the default, so all
+    existing call sites are unchanged).
+    """
 
     def __init__(
         self,
         agents: List[Tuple[str, dict]],
         battle_format: str,
         rng: Optional[random.Random] = None,
+        weights: Optional[List[float]] = None,
     ):
         if not agents:
             raise ValueError("OpponentPoolConfig requires at least one agent entry")
@@ -60,6 +67,8 @@ class OpponentPoolConfig:
         self.battle_format = battle_format
         self.rng = rng or random.Random()
         self._team_cache: Dict[str, TeamSet] = {}
+        self._weights: Optional[List[float]] = None
+        self.set_weights(weights)
 
     @classmethod
     def from_dict(
@@ -74,9 +83,40 @@ class OpponentPoolConfig:
             rng=rng,
         )
 
+    def set_weights(self, weights: Optional[List[float]]) -> None:
+        """Set per-row sampling weights (aligned with ``self.agents``).
+
+        ``None`` resets to uniform. Validates length and normalizes. Non-finite
+        or all-zero inputs fall back to uniform so the env never hard-fails on
+        weighting.
+        """
+        if weights is None:
+            self._weights = None
+            return
+        if len(weights) != len(self.agents):
+            raise ValueError(
+                f"weights length {len(weights)} != agents length "
+                f"{len(self.agents)}"
+            )
+        w = [float(x) for x in weights]
+        if any(not math.isfinite(x) or x < 0.0 for x in w) or sum(w) <= 0.0:
+            self._weights = None
+            return
+        total = sum(w)
+        self._weights = [x / total for x in w]
+
+    @property
+    def weights(self) -> Optional[List[float]]:
+        return None if self._weights is None else list(self._weights)
+
     def sample_opponent(self) -> PolicySpec:
         """Pick an agent, then sample checkpoint / temperature / team set."""
-        name, merged = self.rng.choice(self.agents)
+        if self._weights is None:
+            name, merged = self.rng.choice(self.agents)
+        else:
+            name, merged = self.rng.choices(
+                self.agents, weights=self._weights, k=1
+            )[0]
         return sample_policy_from_merged(name, merged)
 
     def team_set_for(self, team_set_name: str) -> TeamSet:
