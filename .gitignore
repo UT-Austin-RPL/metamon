@@ -12,8 +12,12 @@ wandb/
 _ensemblev2_logs/
 _g9_logs/
 _g1_expert_logs/
+_g1_costa_logs/
 _probe_logs/
 *.jsonl
+
+# Machine-local online RL launchers (host paths, conda, GPU ids)
+metamon/rl/launch/
 
 # Local team sets / scratch data (kept on disk, not versioned)
 expert_teams/

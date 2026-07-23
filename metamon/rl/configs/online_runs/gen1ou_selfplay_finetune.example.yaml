@@ -1,0 +1,51 @@
+# Example online RL recipe: finetune a registered gen1ou policy with self-play.
+#
+# Shared defaults for learn / collect / validate. Pass paths and mode on the CLI:
+#
+#   accelerate launch -m metamon.rl.online_rl \
+#     --run_config gen1ou_selfplay_finetune.example.yaml \
+#     --mode learn --save_dir /path/to/ckpts --buffer_dir /path/to/buffer --log
+#
+#   python -m metamon.rl.online_rl \
+#     --run_config gen1ou_selfplay_finetune.example.yaml \
+#     --mode validate --save_dir /path/to/ckpts --buffer_dir /path/to/buffer --log
+#
+#   python -m metamon.rl.online_rl \
+#     --run_config gen1ou_selfplay_finetune.example.yaml \
+#     --mode collect --save_dir /path/to/ckpts --buffer_dir /path/to/buffer \
+#     --seed 0 --log
+#
+# Keys are argparse dest names (see metamon.rl.online_rl.add_cli). CLI wins.
+
+run_name: my_gen1ou_ft
+base_model: TaurosV1
+base_checkpoint: 1400
+battle_format: gen1ou
+
+dataset_config: online_selfplay_mediumg1.yaml
+train_gin_config: grouped_v2_large_isfilter.gin
+train_pool: metamon/rl/configs/opponent_pools/hl_gen1ou_taurosv1_ft.yaml
+train_team_set: metamon/rl/configs/team_sets/mediumg1_train.yaml
+
+val_pool: metamon/rl/configs/opponent_pools/mediumg1_val.yaml
+val_team_set: expert_curated
+
+online_weight: 0.50
+online_anneal_epochs: 10
+learning_rate: 1.0e-4
+lr_warmup_epochs: 15
+batch_size_per_gpu: 14
+epochs: 3950
+steps_per_epoch: 1000
+ckpt_interval: 100
+
+# Collect defaults (override --lanes / --seed per process)
+lanes: 96
+n_workers: 1
+train_timesteps_per_epoch: 500
+temp_low: 1.0
+temp_high: 3.0
+
+# Validate defaults
+val_timesteps: 2000
+val_interval: 1

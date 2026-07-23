@@ -526,7 +526,7 @@ class MetamonDiscrete(amago.nets.policy_dists.Discrete):
         d_action: Dimension of the action space.
         temperature: Temperature for scaling logits. Default is 1.0 (no scaling).
         clip_prob_low: Clips action probabilities to this value before
-            renormalizing. Default is 0.001.
+            renormalizing. Default is 0.0001.
         clip_prob_high: Clips action probabilities to this value before
             renormalizing. Default is 0.99.
     """
@@ -534,7 +534,7 @@ class MetamonDiscrete(amago.nets.policy_dists.Discrete):
     def __init__(
         self,
         d_action: int,
-        clip_prob_low: float = 0.001,
+        clip_prob_low: float = 0.0001,
         clip_prob_high: float = 0.99,
         temperature: float = 1.0,
     ):

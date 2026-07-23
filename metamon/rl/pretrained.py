@@ -101,6 +101,15 @@ def get_pretrained_model_names():
     return sorted(ALL_PRETRAINED_MODELS.keys())
 
 
+def get_analyze_compatible_pretrained_model_names():
+    """Models that expose a single AMAGO policy suitable for ``metamon.rl.analyze``."""
+    return sorted(
+        name
+        for name, cls in ALL_PRETRAINED_MODELS.items()
+        if getattr(cls, "analyze_compatible", True)
+    )
+
+
 def get_pretrained_model(name: str):
     if name not in ALL_PRETRAINED_MODELS:
         raise ValueError(
@@ -116,6 +125,10 @@ class PretrainedModel:
     This class handles downloading pretrained model weights from HuggingFace Hub,
     configuring the model architecture using gin files, and initializing the
     evaluation experiment.
+
+    Class attributes:
+        analyze_compatible: If True (default), this entry can be listed/scored by
+            ``metamon.rl.analyze``. Ensemble routers set this False.
 
     Args:
         model_gin_config: Path to gin config file that modifies the model architecture
@@ -148,6 +161,8 @@ class PretrainedModel:
     """
 
     HF_REPO_ID = "jakegrigsby/metamon"
+    # Single-policy AMAGO agents only; ensemble routers override to False.
+    analyze_compatible: bool = True
 
     def __init__(
         self,
@@ -1637,6 +1652,58 @@ class TaurosV1(LocalPretrainedModel):
         return super().get_path_to_checkpoint(checkpoint)
 
 
+MEDIUM_G1_ONLINE_FT_SAVE_DIR = (
+    "/mnt/nfs_client/jake/metamon_scratchpad/mediumg1online_ft"
+)
+
+
+@pretrained_model()
+class TaurosV2(LocalPretrainedModel):
+    """Online RL finetune of :class:`TaurosV1` — run ``mediumg1online_ft`` (gen1ou).
+
+    Same architecture / spaces / tokenizer / reward as :class:`TaurosV1` (the
+    ``grouped_v2_medium.gin`` GroupedV2 policy). Points at the finetune run's
+    own save dir so evolving epochs and rolling ``latest/policy.pt`` are read
+    separately from the frozen parent ``mediumg1online`` epochs on
+    :class:`TaurosV1`.
+
+    Initialized from ``TaurosV1@1400`` and trained against the evolving
+    self-checkpoint pool ``hl_gen1ou_taurosv1_ft.yaml`` (which discovers this
+    entry's epochs via ``model_name: TaurosV2``).
+
+    ``default_checkpoint`` is a frozen published epoch for ladder / eval.
+    Pass ``checkpoint=N`` for another epoch, or ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) for the learner's rolling ``ckpts/latest/policy.pt``.
+    Checkpoints live under
+    ``{save_dir}/mediumg1online_ft/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    """
+
+    def __init__(self):
+        super().__init__(
+            amago_ckpt_dir=MEDIUM_G1_ONLINE_FT_SAVE_DIR,
+            model_name="mediumg1online_ft",
+            model_gin_config="grouped_v2_medium.gin",
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            default_checkpoint=800,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("GroupedObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            dataset_config="online_selfplay_mediumg1.yaml",
+            gin_overrides={
+                "MetamonGroupedTstepEncoderV2.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
 MINI_ONLINE_G9_V0_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/mini_online_g9_v0"
 
 
@@ -1686,6 +1753,8 @@ class KakunaEnsemble(PretrainedModel):
 
     Notably became the first Metamon agent to reach #1 on the Showdown leaderboard.
     """
+
+    analyze_compatible = False
 
     # these gxe scores are incorrect
     MEMBER_SPECS = [
@@ -1954,6 +2023,7 @@ class EnsembleV2Model(PretrainedModel):
           the decision strategy's constructor.
     """
 
+    analyze_compatible = False
     CONFIG: Optional[EnsembleV2Config] = None
 
     def _resolve_config(self) -> EnsembleV2Config:

@@ -6,6 +6,32 @@ come from ``--base_model`` (same registry as :mod:`metamon.rl.finetune`).
 Collects self-play trajectories into a shared FIFO buffer (``MetamonFIFODataset``)
 and trains on a mixture of online data + offline replays / self-play datasets.
 
+Recipes
+-------
+
+Tracked YAML recipes under ``metamon/rl/configs/online_runs/`` supply shared
+CLI defaults via ``--run_config``. CLI flags always win. Typical three-process
+topology (set ``save_dir`` / ``buffer_dir`` to your paths)::
+
+    # Learner (multi-GPU)
+    accelerate launch -m metamon.rl.online_rl \\
+        --run_config metamon/rl/configs/online_runs/gen1ou_selfplay_finetune.example.yaml \\
+        --mode learn --save_dir /path/to/ckpts --buffer_dir /path/to/buffer --log
+
+    # Validator
+    python -m metamon.rl.online_rl \\
+        --run_config metamon/rl/configs/online_runs/gen1ou_selfplay_finetune.example.yaml \\
+        --mode validate --save_dir /path/to/ckpts --buffer_dir /path/to/buffer --log
+
+    # Collectors (one process per seed; set --seed / CUDA_VISIBLE_DEVICES)
+    python -m metamon.rl.online_rl \\
+        --run_config metamon/rl/configs/online_runs/gen1ou_selfplay_finetune.example.yaml \\
+        --mode collect --save_dir /path/to/ckpts --buffer_dir /path/to/buffer \\
+        --seed 0 --log
+
+Machine-specific launch shells under ``metamon/rl/launch/`` are gitignored; use
+them locally or copy the recipe pattern above.
+
 Launch patterns
 ---------------
 
@@ -92,7 +118,37 @@ DEFAULT_TRAIN_TEAM_SET = "gl_05_26"
 DEFAULT_VAL_TEAM_SET = "competitive"
 
 
+ONLINE_RUN_CONFIG_DIR = os.path.join(
+    os.path.dirname(__file__), "configs", "online_runs"
+)
+
+
+def _load_run_config(path: str) -> dict:
+    """Load a flat YAML of online_rl CLI keys (dest names, not --flags)."""
+    import yaml
+
+    if not os.path.isabs(path) and not os.path.exists(path):
+        candidate = os.path.join(ONLINE_RUN_CONFIG_DIR, path)
+        if os.path.exists(candidate):
+            path = candidate
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Run config not found: {path}")
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Run config must be a mapping of CLI keys: {path}")
+    # Drop documentation-only keys
+    return {k: v for k, v in data.items() if not str(k).startswith("_")}
+
+
 def add_cli(parser):
+    parser.add_argument(
+        "--run_config",
+        type=str,
+        default=None,
+        help="YAML recipe of CLI defaults (keys = argparse dest names). "
+        "Looked up under configs/online_runs/ when relative. CLI flags win.",
+    )
     parser.add_argument(
         "--mode",
         type=str,
@@ -841,10 +897,27 @@ def create_online_experiment(
 if __name__ == "__main__":
     from argparse import ArgumentParser
 
+    # Pre-parse --run_config so YAML can satisfy required args via set_defaults.
+    pre = ArgumentParser(add_help=False)
+    pre.add_argument("--run_config", type=str, default=None)
+    pre_args, _ = pre.parse_known_args()
+
     parser = ArgumentParser(
         description="Online RL finetuning from a registered pretrained model."
     )
     add_cli(parser)
+    if pre_args.run_config:
+        cfg = _load_run_config(pre_args.run_config)
+        known = {a.dest for a in parser._actions if a.dest != "help"}
+        unknown = sorted(set(cfg) - known)
+        if unknown:
+            raise SystemExit(f"Unknown key(s) in --run_config: {', '.join(unknown)}")
+        parser.set_defaults(**{k: cfg[k] for k in cfg if k in known})
+        # argparse still errors on required=True when the flag is absent,
+        # even after set_defaults — clear required for keys the YAML supplied.
+        for action in parser._actions:
+            if action.dest in cfg:
+                action.required = False
     args = parser.parse_args()
 
     metamon.print_banner()

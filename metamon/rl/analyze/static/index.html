@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Metamon Analyze</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css?v=sprites12" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="topbar-main">
+          <div class="brand">
+            <img src="/static/metamon_text_logo.png" alt="Metamon" />
+          </div>
+          <div class="model-tray" id="modelTray"></div>
+        </div>
+        <div class="topbar-add">
+          <label class="ctl" for="modelSelect">
+            <span>Model</span>
+            <select id="modelSelect"></select>
+          </label>
+          <label class="ctl" for="ckptInput">
+            <span>Checkpoint</span>
+            <input
+              id="ckptInput"
+              type="number"
+              placeholder="Default"
+              title="Leave blank to use the model's default checkpoint"
+            />
+          </label>
+          <label class="ctl ctl-temp" for="tempInput">
+            <span>Temp <em id="tempValue">1.00</em></span>
+            <input
+              id="tempInput"
+              type="range"
+              min="0.25"
+              max="2"
+              step="0.05"
+              value="1"
+              title="Action sampling temperature (1.0 = default)"
+            />
+          </label>
+          <button class="btn btn-primary" id="loadModelBtn" type="button">
+            Add
+          </button>
+        </div>
+      </header>
+
+      <div class="main">
+        <aside class="panel">
+          <div class="panel-h">
+            <span>Replays</span>
+            <span class="status-line" id="replayCount"></span>
+          </div>
+          <div class="filters">
+            <input type="search" id="searchQ" placeholder="Search" />
+            <select id="filterResult">
+              <option value="">Result</option>
+              <option value="WIN">WIN</option>
+              <option value="LOSS">LOSS</option>
+            </select>
+            <select id="filterFormat">
+              <option value="">Format</option>
+            </select>
+          </div>
+          <div class="replay-list" id="replayList"></div>
+          <div class="pager">
+            <button class="btn" id="prevPage" type="button">Prev</button>
+            <span id="pageInfo">—</span>
+            <button class="btn" id="nextPage" type="button">Next</button>
+          </div>
+        </aside>
+
+        <section class="center" id="battleCenter">
+          <div class="empty-state" id="emptyBattle">
+            Select a replay to inspect turns and model action probabilities.
+          </div>
+          <div id="battleView" hidden>
+            <div class="battle-wrap">
+              <aside class="side side-player">
+                <div class="side-label">POV</div>
+                <div class="name" id="playerName">Player</div>
+                <div class="party" id="playerParty"></div>
+              </aside>
+
+              <div class="arena">
+                <div class="arena-top">
+                  <div class="turn-badge" id="turnBadge">TURN 0</div>
+                  <div class="cond-chips" id="conditions"></div>
+                </div>
+
+                <div class="field">
+                  <div class="fighter opp">
+                    <div class="hud" id="oppHud">
+                      <div class="hud-top">
+                        <span class="species" id="oppSpecies">—</span>
+                        <span class="status-chip" id="oppStatus" hidden></span>
+                        <span class="hp-pct" id="oppHpPct">100%</span>
+                      </div>
+                      <div class="hp" id="oppHp">
+                        <div class="bar"><span style="width: 100%"></span></div>
+                      </div>
+                    </div>
+                    <div class="sprite-wrap">
+                      <img class="sprite" id="oppSprite" alt="" />
+                    </div>
+                    <div class="will-use" id="oppWillUse" hidden></div>
+                  </div>
+
+                  <div class="fighter me">
+                    <div class="will-use" id="playerWillUse" hidden></div>
+                    <div class="sprite-wrap">
+                      <img class="sprite" id="playerSprite" alt="" />
+                    </div>
+                    <div class="hud" id="playerHud">
+                      <div class="hud-top">
+                        <span class="species" id="playerSpecies">—</span>
+                        <span class="status-chip" id="playerStatus" hidden></span>
+                        <span class="hp-pct" id="playerHpPct">100%</span>
+                      </div>
+                      <div class="hp" id="playerHp">
+                        <div class="bar"><span style="width: 100%"></span></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <aside class="side side-opp">
+                <div class="side-label">Foe</div>
+                <div class="name" id="oppName">Opponent</div>
+                <div class="party" id="oppParty"></div>
+              </aside>
+            </div>
+            <div class="scrubber">
+              <button class="btn" id="prevTurn" type="button">Prev</button>
+              <input type="range" id="turnSlider" min="0" max="0" value="0" />
+              <button class="btn" id="nextTurn" type="button">Next</button>
+            </div>
+            <div class="status-line" id="scoreStatus"></div>
+          </div>
+        </section>
+
+        <aside class="panel analysis-panel">
+          <div class="analysis" id="analysis"></div>
+        </aside>
+      </div>
+    </div>
+    <script src="/static/app.js?v=sprites12"></script>
+  </body>
+</html>

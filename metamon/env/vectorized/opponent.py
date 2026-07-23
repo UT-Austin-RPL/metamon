@@ -167,6 +167,21 @@ class ConfigBatchedOpponent(BatchedOpponent):
         self.current_spec = spec
         self.current_team = self.config.team_set_for(spec.team_set)
         key = spec.unique_key
+
+        from metamon.rl.pretrained import LATEST_CHECKPOINT
+
+        if spec.checkpoint == LATEST_CHECKPOINT and key in self._cache:
+            # The rolling ``latest/policy.pt`` is overwritten by the learner each
+            # epoch, but ``unique_key`` is constant (``..._ckpt-1_...``). Drop any
+            # cached bundle for it so the miss path below reloads fresh weights
+            # from disk. Numbered epochs are immutable and stay LRU-cached.
+            stale = self._cache.pop(key)
+            self._free_bundle(stale)
+            del stale
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         if key in self._cache:
             self._cache.move_to_end(key)
         else:

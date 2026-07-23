@@ -39,6 +39,9 @@ dependencies = [
   "amago @ git+https://github.com/UT-Austin-RPL/amago@v3.4.0",
 ]
 
+[project.optional-dependencies]
+analyze = ["fastapi", "uvicorn"]
+
 [project.urls]
 Homepage = "https://metamon.tech"
 Repository = "https://github.com/UT-Austin-RPL/metamon"

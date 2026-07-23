@@ -1,0 +1,16 @@
+# Second validator for the TaurosV1 finetune: trainee vs the frozen parent
+# TaurosV1 (@ default ckpt 1400), both on expert_curated2.
+#
+# Tracks whether the finetune is improving head-to-head against its own starting
+# point on the curated competitive team set. Pair with --val_team_set expert_curated2
+# so the trainee (POV) also draws expert_curated2 teams — a true mirror on cc2.
+defaults:
+  team_set: expert_curated2
+  battle_backend: metamon
+  checkpoints: [null]   # TaurosV1 default checkpoint (1400)
+  temperatures: [1.0]
+  num_agents: 1
+
+agents:
+  TaurosV1:
+    model_name: TaurosV1

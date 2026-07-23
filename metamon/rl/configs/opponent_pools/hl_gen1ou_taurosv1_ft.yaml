@@ -1,0 +1,105 @@
+# Training opponent pool for the TaurosV1 finetune (mediumg1online_ft, gen1ou).
+#
+# Three slices:
+#   1. STATIC (~60% row mass): the classic top-model roster + full SmallG1Online
+#      lineage, copied verbatim from hl_gen1ou_mediumg1.yaml. These never change.
+#   2. FROZEN PARENT TaurosV1 (part of the ~40% self slice): a handful of the
+#      parent mediumg1online epochs, so the finetune keeps facing its own frozen
+#      history and has a guaranteed opponent before its first self ckpt exists.
+#   3. EVOLVING SELF TaurosV2 (rest of the ~40% self slice): discover: true
+#      expands into one recency-weighted row per saved epoch of THIS finetune run
+#      (+ rolling latest/policy.pt). Grows automatically as the run saves epochs.
+#
+# Sampling is uniform over expanded rows, so mixture rates are just row-mass
+# ratios. num_agents duplicates rows -> higher weight.
+#
+# Row-mass arithmetic (retune by editing num_agents / total_num_agents):
+#   Static mass S = 2+2+2+2+2+3+1+1+1+1+1+1 = 19   (slice 1 below)
+#   Tauros mass  T = TaurosV1Parent(4) + TaurosSelf.total_num_agents(9) = 13
+#   Tauros share = T / (S + T) = 13 / 32 ~= 0.41  (target ~40%)
+# Early in the run (before the first self ckpt / latest exists) TaurosSelf yields
+# 0 rows, so the self slice is just the 4 frozen-parent rows until epochs appear.
+defaults:
+  team_set: hl_05_26
+  battle_backend: metamon
+  checkpoints: [null]
+  temperatures: [0.5, 1.0, 1.25, 1.5, 1.75, 2.0]
+  num_agents: 1
+
+agents:
+  # ---- slice 1: static roster (mass 19, ~60%) ------------------------------
+  TaurosV0:
+    model_name: TaurosV0
+    num_agents: 2
+    checkpoints: "range(50, 63, 2)"
+
+  Kakuna:
+    model_name: Kakuna
+    num_agents: 2
+    checkpoints: "range(24, 35, 2)"
+
+  SmallG1OnlineV0:
+    model_name: SmallG1OnlineV0
+    num_agents: 2
+    checkpoints: [null]
+
+  SmallG1OnlineV1_5:
+    model_name: SmallG1OnlineV1_5
+    num_agents: 2
+    checkpoints: "range(200, 401, 50)"
+
+  SmallG1OnlineV2:
+    model_name: SmallG1OnlineV2
+    num_agents: 2
+    checkpoints: "range(200, 401, 50)"
+
+  SmallG1OnlineV3:
+    model_name: SmallG1OnlineV3
+    num_agents: 3
+    checkpoints: "range(200, 526, 50)"
+
+  Alakazam:
+    model_name: Alakazam
+    checkpoints: "range(2, 9, 2)"
+
+  SyntheticRLV2:
+    model_name: SyntheticRLV2
+    checkpoints: "range(36, 49, 2)"
+
+  SyntheticRLV1:
+    model_name: SyntheticRLV1
+    num_agents: 1
+    checkpoints: [null]
+
+  V2ADataAblation:
+    model_name: V2AGroupedV2DataAblation
+    checkpoints: "range(74, 91, 2)"
+
+  Superkazam:
+    model_name: Superkazam
+    checkpoints: "range(38, 51, 2)"
+
+  Kadabra3:
+    model_name: Kadabra3
+    checkpoints: "range(10, 21, 2)"
+
+  # ---- slice 2: frozen parent TaurosV1 epochs (mass 4) ---------------------
+  # Part of the ~40% self slice. Also the early-run fallback: always present even
+  # before the finetune saves any of its own checkpoints.
+  TaurosV1Parent:
+    model_name: TaurosV1
+    num_agents: 4
+    checkpoints: [1000, 1100, 1200, 1300, 1400]
+
+  # ---- slice 3: evolving self TaurosV2 (target mass ~9) --------------------
+  # Discovers mediumg1online_ft saved epochs + rolling latest/policy.pt, weighted
+  # geometrically toward the newest (recency_rho). total_num_agents is the soft
+  # row-mass budget for this slice (>= number of discovered ckpts). Bump/cut it
+  # (or TaurosV1Parent.num_agents / static num_agents) to retune the 60/40 split.
+  TaurosSelf:
+    model_name: TaurosV2
+    checkpoints:
+      discover: true
+      include_latest: true
+      recency_rho: 1.5
+      total_num_agents: 9
