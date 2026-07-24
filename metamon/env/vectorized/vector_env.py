@@ -1059,6 +1059,8 @@ def BattleAgainstOpponentPool(
     seed: Optional[int] = None,
     opponent_quota_min_games: Optional[int] = None,
     opponent_quota_window: int = 128,
+    opponent_team_schedule=None,
+    opponent_epoch_ref=None,
 ):
     """Factory: one shared opponent sampled from an opponent pool config.
 
@@ -1076,6 +1078,8 @@ def BattleAgainstOpponentPool(
             opponent_config_path,
             battle_format=battle_format,
             template_vars=opponent_config_template_vars,
+            team_schedule=opponent_team_schedule,
+            epoch_ref=opponent_epoch_ref,
         )
     if seed is not None:
         opponent_config.rng.seed(seed)

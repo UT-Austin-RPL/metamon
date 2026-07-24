@@ -11,7 +11,7 @@ import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
-from metamon.env import get_metamon_team_set_or_mix
+from metamon.env import get_metamon_team_set_or_mix, get_metamon_team_set_from_schedule
 from metamon.env.wrappers import TeamSet
 from metamon.rl.evaluate.common import (
     PolicySpec,
@@ -60,6 +60,8 @@ class OpponentPoolConfig:
         battle_format: str,
         rng: Optional[random.Random] = None,
         weights: Optional[List[float]] = None,
+        team_schedule: Optional["TeamMixSchedule"] = None,
+        epoch_ref: Optional["EpochRef"] = None,
     ):
         if not agents:
             raise ValueError("OpponentPoolConfig requires at least one agent entry")
@@ -69,6 +71,11 @@ class OpponentPoolConfig:
         self._team_cache: Dict[str, TeamSet] = {}
         self._weights: Optional[List[float]] = None
         self.set_weights(weights)
+        # Optional schedule-aware team sets: when an agent's team_set is the
+        # marker string "@schedule", team_set_for() returns a WeightedMixedTeamSet
+        # that lazily follows this schedule + epoch_ref.
+        self._team_schedule = team_schedule
+        self._epoch_ref = epoch_ref
 
     @classmethod
     def from_dict(
@@ -76,11 +83,15 @@ class OpponentPoolConfig:
         raw: Dict[str, Any],
         battle_format: str,
         rng: Optional[random.Random] = None,
+        team_schedule=None,
+        epoch_ref=None,
     ) -> "OpponentPoolConfig":
         return cls(
             agents=parse_opponent_pool_dict(raw),
             battle_format=battle_format,
             rng=rng,
+            team_schedule=team_schedule,
+            epoch_ref=epoch_ref,
         )
 
     def set_weights(self, weights: Optional[List[float]]) -> None:
@@ -131,6 +142,17 @@ class OpponentPoolConfig:
         raise KeyError(f"Agent {name!r} not in pool")
 
     def team_set_for(self, team_set_name: str) -> TeamSet:
+        if team_set_name == "@schedule":
+            if self._team_schedule is None or self._epoch_ref is None:
+                raise ValueError(
+                    "opponent pool team_set '@schedule' requires a TeamMixSchedule "
+                    "and EpochRef (pass --train_team_schedule to online_rl)"
+                )
+            if "@schedule" not in self._team_cache:
+                self._team_cache["@schedule"] = get_metamon_team_set_from_schedule(
+                    self.battle_format, self._team_schedule, self._epoch_ref
+                )
+            return self._team_cache["@schedule"]
         if team_set_name not in self._team_cache:
             self._team_cache[team_set_name] = get_metamon_team_set_or_mix(
                 self.battle_format, team_set_name
@@ -182,6 +204,10 @@ def load_opponent_pool(
     config_path: str,
     battle_format: str,
     template_vars: Optional[Dict[str, str]] = None,
+    team_schedule=None,
+    epoch_ref=None,
 ) -> OpponentPoolConfig:
     raw = load_config(config_path, template_vars=template_vars)
-    return OpponentPoolConfig.from_dict(raw, battle_format=battle_format)
+    return OpponentPoolConfig.from_dict(
+        raw, battle_format=battle_format, team_schedule=team_schedule, epoch_ref=epoch_ref
+    )

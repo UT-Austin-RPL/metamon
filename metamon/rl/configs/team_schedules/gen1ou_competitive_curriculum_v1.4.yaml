@@ -1,0 +1,50 @@
+# Team-mix schedule v1.4 for the gen1ou online RL competitive curriculum.
+#
+# Compressed, aggressive timeline: shifts hard toward smogon teams at epoch 1260
+# (the v1.3 resume point) with a PERMANENT gl_05_26 floor so the policy never
+# forgets how to play with/against diverse non-specialized teams. The end goal is
+# a policy that is superhuman at piloting competitive/smogon teams and playing
+# against them, without falling over against diverse teams.
+#
+# gl_05_26 floor: 30% → 20% → 15% (permanent). The 60% offline data in the
+# learner's mixture is all gl-like teams, so the combined training mix always
+# retains substantial diverse-team exposure even when the collector and FIFO
+# are smogon-heavy.
+#
+# Component sets:
+#   gl_05_26              — 29,144 broad diverse teams (the "don't forget" floor).
+#   smogon_pass2          — 475 competitive-breadth teams.
+#   smogon_pass2_selected — 283 battle-validated winners (sharpening target).
+#
+# Phases:
+#   0  (done, 0-939)    — 100% broad ladder (historical).
+#   1  (done, 940-1259) — acquaint: 75/15/10 (v1.3 phase 1, historical).
+#   2  (1260-1599)      — specialize: gl drops to 30% floor; smogon_selected leads.
+#   3  (1600-1999)      — sharpen: gl floor 20%; smogon_selected majority.
+#   4  (2000-3950)      — maintain: gl floor 15% permanent; smogon_selected 65%.
+schedule:
+  - epoch: 0
+    weights:
+      gl_05_26: 1.0
+      smogon_pass2: 0.0
+      smogon_pass2_selected: 0.0
+  - epoch: 940
+    weights:
+      gl_05_26: 0.75
+      smogon_pass2: 0.15
+      smogon_pass2_selected: 0.10
+  - epoch: 1260
+    weights:
+      gl_05_26: 0.30
+      smogon_pass2: 0.30
+      smogon_pass2_selected: 0.40
+  - epoch: 1600
+    weights:
+      gl_05_26: 0.20
+      smogon_pass2: 0.25
+      smogon_pass2_selected: 0.55
+  - epoch: 2000
+    weights:
+      gl_05_26: 0.15
+      smogon_pass2: 0.20
+      smogon_pass2_selected: 0.65

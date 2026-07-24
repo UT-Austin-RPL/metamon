@@ -1,0 +1,47 @@
+# Team-mix schedule for the gen1ou online RL competitive curriculum.
+#
+# Drives WeightedMixedTeamSet weights automatically at epoch boundaries — no
+# restart needed. The collector's player team set and any opponent-pool agent
+# whose team_set is "@schedule" both follow this schedule via a shared EpochRef.
+#
+# See docs/teamset_curriculum_proposal.md for the methodology. Weights need not
+# sum to 1 (normalized per entry). All entries must share the same set of keys.
+#
+# Component sets:
+#   gl_05_26              — 29,144 broad general-ladder teams (May 2026).
+#   smogon_pass2          — 475 teams used by the strongest battlers (competitive breadth).
+#   smogon_pass2_selected — 283 battle-validated winners, win rate 0.49-0.615 (sharpening).
+#
+# Phases:
+#   0  (done, 0-939)   — 100% broad ladder.
+#   1  (940-1400)      — acquaint: both competitive sets trickle in (breadth-first).
+#   2  (1400-2000)     — broaden: gl_05_26 drops below half; smogon_pass2 leads competitive.
+#   3  (2000-2800)     — sharpen: smogon_pass2_selected overtakes smogon_pass2.
+#   4  (2800-3950)     — maintain: majority proven winners, permanent floors on
+#                        broad ladder (15%) and competitive breadth (25%).
+schedule:
+  - epoch: 0
+    weights:
+      gl_05_26: 1.0
+      smogon_pass2: 0.0
+      smogon_pass2_selected: 0.0
+  - epoch: 940
+    weights:
+      gl_05_26: 0.75
+      smogon_pass2: 0.15
+      smogon_pass2_selected: 0.10
+  - epoch: 1400
+    weights:
+      gl_05_26: 0.45
+      smogon_pass2: 0.35
+      smogon_pass2_selected: 0.20
+  - epoch: 2000
+    weights:
+      gl_05_26: 0.25
+      smogon_pass2: 0.30
+      smogon_pass2_selected: 0.45
+  - epoch: 2800
+    weights:
+      gl_05_26: 0.15
+      smogon_pass2: 0.25
+      smogon_pass2_selected: 0.60
