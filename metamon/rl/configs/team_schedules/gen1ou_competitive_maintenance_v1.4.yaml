@@ -1,0 +1,23 @@
+# Maintenance schedule for mini_online_psro_v1.4.
+#
+# v1.4 is a clean break from v1.3, bootstrapping weights from v1.3 epoch 1800
+# (the latest clean checkpoint after the gl-specialist rollback). The v1.3
+# policy already completed the competitive curriculum's bootstrap → acquaint →
+# specialize → sharpen phases (v1.3 ran epochs 1260-1800 under
+# gen1ou_competitive_curriculum_v1.4.yaml). v1.4 starts directly at the
+# maintenance mix — no curriculum phases needed.
+#
+# Permanent gl_05_26 floor (15%) + the 60% offline floor (generic-OU/gl-like)
+# = the "don't forget diverse teams" guarantee. smogon_pass2_selected (65%) is
+# the sharpening target; smogon_pass2 (20%) gives competitive breadth.
+#
+# Component sets:
+#   gl_05_26              — 29,144 broad diverse teams (the permanent floor).
+#   smogon_pass2          — 475 competitive-breadth teams.
+#   smogon_pass2_selected — 283 battle-validated winners (sharpening target).
+schedule:
+  - epoch: 0
+    weights:
+      gl_05_26: 0.15
+      smogon_pass2: 0.20
+      smogon_pass2_selected: 0.65

@@ -41,22 +41,19 @@ agents:
     model_name: Kadabra3
     checkpoints: "range(10, 21, 2)"
 
-  # PSRO self-play from the v1 run (gl-era, ~1250 effective epochs on gl
-  # teams). Pin to gl_05_26 so this mature gl-trained self plays its home
-  # composition against the learner, instead of being farmed on smogon teams
-  # under @schedule (where it misplays). A gl-specialist peer opponent.
-  MiniOnlinePsroV0:
-    model_name: MiniOnlinePsroV0
-    num_agents: 1
-    team_set: gl_05_26
-    checkpoints: [550]
-
-  # PSRO self-play from the v1.3 run (competitive/smogon curriculum). Three
-  # specialists, each pinned to the teamset where it is competent, so the league
-  # forces the learner to beat strong peers on BOTH gl and smogon compositions
-  # rather than only farming the fixed external gl-era models on @schedule.
-  # Agent names use underscore suffixes (not hyphens) so the trajectory-filename
-  # parser's longest-prefix match on '-' can't confuse them with each other.
+  # PSRO self-play from the v1.3 run (competitive/smogon curriculum).
+  #
+  # IMPORTANT: only smogon-side self-play specialists belong here. gl-pinned
+  # specialists (team_set: gl_05_26) were tried and removed: when the learner
+  # draws smogon (80% of @schedule) and the gl-pinned opponent draws gl, the
+  # result is a composition-mismatch blowout (smogon WR ~0.08). The PSRO solver
+  # scores opponents on AGGREGATE WR, so it can't distinguish this mismatch
+  # from a fixable strategic gap — it boosts the gl specialist to ~90% of
+  # sampling weight, flooding the buffer with harmful trajectories and dropping
+  # the Tauros canary ~4 points in <3h. The learner's teamset is schedule-
+  # controlled (not opponent-controlled), so there is no way to make gl
+  # specialists productive without an opponent-aware teamset-selection code
+  # change. Do NOT re-add gl-pinned past selves until that exists.
   #
   # Smogon specialist: latest smogon-trained self on the current @schedule
   # (phase 3/4: smogon-heavy). The true self-play peer on the target dist.
@@ -64,13 +61,6 @@ agents:
     model_name: MiniOnlinePsroV1_3
     num_agents: 1
     checkpoints: [1760]
-  # GL specialist: early gl-era self from this run (epoch 1140, trained almost
-  # entirely on gl_05_26), pinned to gl where it is competent.
-  MiniOnlinePsroV1_3GL:
-    model_name: MiniOnlinePsroV1_3
-    num_agents: 1
-    team_set: gl_05_26
-    checkpoints: [1140]
   # Pass2 specialist: mid-specialization self on the broad smogon_pass2 set
   # (epoch 1500, partway into the smogon curriculum).
   MiniOnlinePsroV1_3P2:
