@@ -1505,6 +1505,54 @@ class MiniOnlinePsroV0(LocalFinetunedModel):
         return super().get_path_to_checkpoint(checkpoint)
 
 
+MINI_ONLINE_PSRO_V1_3_SAVE_DIR = "/home/eddie/metamon_runs/mini_online_psro_v1.3"
+
+
+@pretrained_model()
+class MiniOnlinePsroV1_3(LocalFinetunedModel):
+    """PSRO-Lite continuation run ``mini_online_psro_v1.3`` from ``metamon.rl.online_rl``.
+
+    The v1.3 run resumes from ``mini_online_psro_v1`` and trains under the gen1ou
+    competitive curriculum (``genamon/rl/configs/team_schedules/gen1ou_competitive_curriculum_v1.4.yaml``),
+    shifting the collection mix from gl_05_26 to smogon_pass2 /
+    smogon_pass2_selected teams. Same from-scratch ``V2AGroupedV2DataAblation``
+    architecture as ``SmallG1OnlineV0``; ``base_model`` only supplies
+    architecture/spaces/tokenizer/reward config — weights come from this run's
+    own checkpoints.
+
+    Checkpoints live under
+    ``{save_dir}/mini_online_psro_v1.3/ckpts/policy_weights/policy_epoch_{N}.pt``
+    (saved every 10 epochs). Pass ``checkpoint=N`` for a specific epoch, or
+    ``checkpoint=-1`` (``LATEST_CHECKPOINT``) for the learner's rolling
+    ``ckpts/latest/policy.pt``.
+
+    Registered so the run's own past checkpoints can serve as PSRO self-play
+    opponents (specialists) in ``hl_gen1ou.yaml``: a late smogon-trained self
+    plays the current smogon-heavy ``@schedule``; early/mid gl-era selves are
+    pinned to ``gl_05_26`` / ``smogon_pass2`` team sets where they are
+    competent, giving the league gl- and smogon-specialist peers rather than
+    only the fixed external gl-era models. The ``checkpoints`` list is a static
+    snapshot parsed at pool-load time — relaunch the collector to refresh it as
+    the run saves more checkpoints (the run targets epoch 3950).
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=MINI_ONLINE_PSRO_V1_3_SAVE_DIR,
+            model_name="mini_online_psro_v1.3",
+            default_checkpoint=1760,
+            # Same train gin stack as SmallG1OnlineV0 / online_rl.py.
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
 @pretrained_model()
 class KakunaEnsemble(PretrainedModel):
     """

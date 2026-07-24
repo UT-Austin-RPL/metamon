@@ -3,7 +3,7 @@
 # num_agents (defaults or per-agent) duplicates pool rows → higher sample weight.
 # Verify checkpoint epochs exist on HuggingFace before long runs.
 defaults:
-  team_set: gl_05_26
+  team_set: "@schedule"
   battle_backend: metamon
   checkpoints: [null]
   temperatures: [1.0, 1.25, 1.5, 1.75, 2.0]
@@ -41,15 +41,40 @@ agents:
     model_name: Kadabra3
     checkpoints: "range(10, 21, 2)"
 
-  # PSRO self-play expansion: a competitive past self from the current online
-  # RL run (mini_online_psro_v1). Registered as MiniOnlinePsroV0 in pretrained.py.
-  # Selected by TaurosV0 eval: epoch 550 scored 0.56 win rate / 110.9 return
-  # (100 battles, competitive teams) — right at the learner's current level.
-  # Epoch 0 was a first-epoch transient (0.01) and is excluded; epoch 250 (0.41)
-  # is a weaker optional add. One aggregate agent row (num_agents=1); PSRO-Lite
-  # tracks one per-agent win rate for this row. To refresh as the run saves more
-  # competitive checkpoints, bump the epoch below and relaunch the collector.
+  # PSRO self-play from the v1 run (gl-era, ~1250 effective epochs on gl
+  # teams). Pin to gl_05_26 so this mature gl-trained self plays its home
+  # composition against the learner, instead of being farmed on smogon teams
+  # under @schedule (where it misplays). A gl-specialist peer opponent.
   MiniOnlinePsroV0:
     model_name: MiniOnlinePsroV0
     num_agents: 1
+    team_set: gl_05_26
     checkpoints: [550]
+
+  # PSRO self-play from the v1.3 run (competitive/smogon curriculum). Three
+  # specialists, each pinned to the teamset where it is competent, so the league
+  # forces the learner to beat strong peers on BOTH gl and smogon compositions
+  # rather than only farming the fixed external gl-era models on @schedule.
+  # Agent names use underscore suffixes (not hyphens) so the trajectory-filename
+  # parser's longest-prefix match on '-' can't confuse them with each other.
+  #
+  # Smogon specialist: latest smogon-trained self on the current @schedule
+  # (phase 3/4: smogon-heavy). The true self-play peer on the target dist.
+  MiniOnlinePsroV1_3:
+    model_name: MiniOnlinePsroV1_3
+    num_agents: 1
+    checkpoints: [1760]
+  # GL specialist: early gl-era self from this run (epoch 1140, trained almost
+  # entirely on gl_05_26), pinned to gl where it is competent.
+  MiniOnlinePsroV1_3GL:
+    model_name: MiniOnlinePsroV1_3
+    num_agents: 1
+    team_set: gl_05_26
+    checkpoints: [1140]
+  # Pass2 specialist: mid-specialization self on the broad smogon_pass2 set
+  # (epoch 1500, partway into the smogon curriculum).
+  MiniOnlinePsroV1_3P2:
+    model_name: MiniOnlinePsroV1_3
+    num_agents: 1
+    team_set: smogon_pass2
+    checkpoints: [1500]
