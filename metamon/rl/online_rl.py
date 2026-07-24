@@ -6,27 +6,27 @@ come from ``--base_model`` (same registry as :mod:`metamon.rl.finetune`).
 Collects self-play trajectories into a shared FIFO buffer (``MetamonFIFODataset``)
 and trains on a mixture of online data + offline replays / self-play datasets.
 
-Launch patterns
----------------
+Three roles that can run as one process (``--mode both``) or as separate
+processes (``--mode collect|learn|validate``) sharing a checkpoint dir + buffer:
 
-**Learner** (4 GPUs via accelerate; gradient updates only)::
-
-    accelerate launch -m metamon.rl.online_rl \\
-        --mode learn --run_name my_run --save_dir /path/to/ckpts \\
-        --base_model TaurosV0 --buffer_dir /path/to/buffer \\
-        --dataset_config online_selfplay.yaml --log
-
-**Validator** (single process; reloads ``latest/policy.pt`` each epoch)::
+**Learner** (grad updates only; writes ``ckpts/latest/policy.pt`` each epoch)::
 
     python -m metamon.rl.online_rl \\
-        --mode validate --run_name my_run --save_dir /path/to/ckpts \\
-        --base_model TaurosV0 --buffer_dir /path/to/buffer --lanes 32 --log
+        --mode learn --run_name my_run --save_dir /path/to/ckpts \\
+        --base_model TaurosV0 --buffer_dir /path/to/buffer --log
 
-**Collectors** (never run validation; placeholder val env only)::
+**Collector** (self-play rollouts into the FIFO buffer; syncs to
+``latest/policy.pt`` each epoch; writes the PSRO-Lite sidecar)::
 
     python -m metamon.rl.online_rl \\
         --mode collect --run_name my_run --save_dir /path/to/ckpts \\
         --base_model TaurosV0 --buffer_dir /path/to/buffer --lanes 256
+
+**Validator** (evaluates ``latest/policy.pt`` vs the val opponent each epoch)::
+
+    python -m metamon.rl.online_rl \\
+        --mode validate --run_name my_run --save_dir /path/to/ckpts \\
+        --base_model TaurosV0 --buffer_dir /path/to/buffer --lanes 32 --log
 
 **Single-process smoke test**::
 
@@ -35,33 +35,30 @@ Launch patterns
         --base_model TaurosV0 --buffer_dir /tmp/online_smoke/buffer --lanes 2 \\
         --epochs 1 --train_timesteps_per_epoch 5 --steps_per_epoch 2 \\
         --dset_min_size 0 --val_timesteps 10
+
+See ``.pi/skills/online-training/SKILL.md`` for the split-layout launch recipe
+and resume/recovery flow. Concerns are split across companion modules:
+
+- :mod:`metamon.rl.online_psro`  — PSRO-Lite CLI flags, config, sidecar helpers.
+- :mod:`metamon.rl.online_schedule` — team-mix schedule (epoch-driven curriculum).
+- :mod:`metamon.rl.online_envs`  — env factories, dataset builder, stat dropout,
+  resolution helpers.
 """
 
 from __future__ import annotations
 
 import os
-import copy
-import random
 from functools import partial
-from typing import Optional, Callable
+from typing import Optional
 
 import gin
 import amago
 import wandb
 
 import metamon
+from metamon.interface import get_reward_function, get_reward_function_names
 from metamon.data import MetamonDataset
-from metamon.env import get_metamon_team_set_or_mix
-from metamon.interface import (
-    ObservationSpace,
-    UniversalPokemon,
-    UniversalState,
-    get_reward_function,
-    get_reward_function_names,
-)
 from metamon.rl.dataset_config import (
-    DATASET_CONFIG_DIR,
-    build_dataset,
     flatten_config,
     load_dataset_config,
     save_dataset_config,
@@ -69,30 +66,80 @@ from metamon.rl.dataset_config import (
 from metamon.rl.metamon_to_amago import (
     MetamonFIFODataset,
     MetamonOnlineExperiment,
-    make_metamon_env,
     make_placeholder_env,
     mirror_online_experiment_gin_bindings,
 )
-from metamon.rl.psro_lite import PsroConfig, read_sidecar
 from metamon.rl.pretrained import (
     get_pretrained_model,
     get_pretrained_model_names,
 )
+from metamon.rl.psro_lite import PsroConfig
+
+# Split-out concerns.
+from metamon.rl.online_envs import (
+    DEFAULT_BATTLE_FORMAT,
+    DEFAULT_TRAIN_POOL,
+    DEFAULT_TRAIN_TEAM_SET,
+    DEFAULT_VAL_TEAM_SET,
+    ONLINE_RL_TRAIN_GIN,
+    TRAINING_CONFIG_DIR,
+    StatsDropoutObservationSpace,  # re-exported for backwards compat
+    apply_async_mode,
+    build_online_mixture_dataset,
+    latest_training_state_epoch,
+    make_collect_train_env,
+    make_val_env,
+    resolve_checkpoint_path,
+    resolve_dataset_config_path,
+    resolve_train_gin_path,
+    resolve_val_opponent_config,
+)
+from metamon.rl.online_psro import (
+    add_psro_cli_args,
+    log_psro_status,
+    make_opponent_weight_provider,
+    make_psro_config_from_args,
+    psro_sidecar_path,
+    resolve_quota,
+)
+from metamon.rl.online_schedule import (
+    ScheduleState,
+    add_schedule_cli_args,
+    log_schedule_start,
+    make_schedule_state,
+)
+
+
+def _parse_teamset_weights(spec: Optional[str]) -> Optional[dict[str, float]]:
+    """Parse a ``'set:mult,set:mult,...'`` spec into a ``{set: multiplier}`` dict.
+
+    Returns ``None`` when ``spec`` is falsy (teamset up-sampling disabled).
+    Mirrors the ``parse_team_mix_spec`` format but the numbers are multipliers
+    (not normalized sampling weights).", """
+    if not spec:
+        return None
+    out: dict[str, float] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"--fifo_teamset_weights: bad entry {part!r} (expected 'set:mult')")
+        name, _, val = part.partition(":")
+        name = name.strip()
+        try:
+            mult = float(val.strip())
+        except ValueError:
+            raise ValueError(f"--fifo_teamset_weights: bad multiplier {val!r} for {name!r}")
+        if mult <= 0.0 or mult != mult:  # NaN
+            raise ValueError(f"--fifo_teamset_weights: multiplier for {name!r} must be positive")
+        out[name] = mult
+    return out or None
 
 # W&B defaults — override via METAMON_WANDB_PROJECT / METAMON_WANDB_ENTITY env vars
 # (same env vars already used by make_placeholder_experiment for opponents).
 WANDB_PROJECT = os.environ.get("METAMON_WANDB_PROJECT", "online-metamon")
 WANDB_ENTITY = os.environ.get("METAMON_WANDB_ENTITY", "ut-austin-rpl-metamon")
-
-OPPONENT_POOL_CONFIG_DIR = os.path.join(
-    os.path.dirname(__file__), "configs", "opponent_pools"
-)
-TRAINING_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs", "training")
-ONLINE_RL_TRAIN_GIN = os.path.join(TRAINING_CONFIG_DIR, "online_rl.gin")
-DEFAULT_TRAIN_POOL = os.path.join(OPPONENT_POOL_CONFIG_DIR, "hl_gen1ou.yaml")
-DEFAULT_BATTLE_FORMAT = "gen1ou"
-DEFAULT_TRAIN_TEAM_SET = "gl_05_26"
-DEFAULT_VAL_TEAM_SET = "competitive"
 
 
 def add_cli(parser):
@@ -344,500 +391,35 @@ def add_cli(parser):
     parser.add_argument("--dloader_workers", type=int, default=10)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--log", action="store_true")
-    # PSRO-Lite: prioritized opponent sampling — all default-off (current
-    # uniform behavior identical unless explicitly enabled). See
-    # docs/psro_lite_plan.md.
+
+    # Learner FIFO teamset up-sampling: shift the online mix toward trajectories
+    # where the learner drew a specific teamset (parsed from the _ts- filename
+    # token). Aggressively up-weight under-represented compositions (e.g. smogon)
+    # so the policy trains on them more intensively. Independent of PSRO; composes
+    # multiplicatively with --psro_fifo_reweight when both are set.
     parser.add_argument(
-        "--psro_weighting",
-        action="store_true",
-        help="Enable PSRO-Lite prioritized opponent sampling at collection time "
-        "(writes meta_weights.json sidecar from the collector). No-op before "
-        "--psro_start_epoch.",
+        "--fifo_teamset_weights",
+        type=str,
+        default=None,
+        help="Up-sample online FIFO trajectories by learner teamset. Format: "
+        "'set:multiplier,set:multiplier,...' e.g. "
+        "'smogon_pass2:4.0,smogon_pass2_selected:4.0'. Files whose teamset isn't "
+        "listed (or has no _ts- token) get --fifo_teamset_default_weight. "
+        "Composes multiplicatively with --psro_fifo_reweight. Default None = disabled.",
     )
     parser.add_argument(
-        "--psro_start_epoch",
-        type=int,
-        default=0,
-        help="First epoch to write/apply PSRO-Lite weights (default 0 = always; "
-        "the live run sets 1000 for a mid-run switchover).",
-    )
-    parser.add_argument(
-        "--psro_temp",
+        "--fifo_teamset_default_weight",
         type=float,
         default=1.0,
-        help="Prioritization temperature τ; small ⇒ sharp, large ⇒ uniform.",
+        help="Weight multiplier for FIFO files whose learner teamset is not in "
+        "--fifo_teamset_weights (including pre-token / _unknown files). Default 1.0.",
     )
-    parser.add_argument(
-        "--psro_floor",
-        type=float,
-        default=0.05,
-        help="Per-opponent diversity floor (non-zero mass for every opponent).",
-    )
-    parser.add_argument(
-        "--psro_min_games",
-        type=int,
-        default=20,
-        help="Minimum games vs an opponent before weighting it (else uniform fallback).",
-    )
-    parser.add_argument(
-        "--psro_window",
-        type=int,
-        default=50000,
-        help="Number of most-recent buffer files to score (rolling window).",
-    )
-    parser.add_argument(
-        "--psro_update_interval",
-        type=int,
-        default=5,
-        help="Epochs between PSRO-Lite weight updates (one forced update on the "
-        "start epoch itself).",
-    )
-    parser.add_argument(
-        "--psro_ema",
-        type=float,
-        default=0.7,
-        help="EMA smoothing factor β for weights across updates (0=no smoothing).",
-    )
-    parser.add_argument(
-        "--psro_solver",
-        type=str,
-        default="prioritized",
-        choices=["prioritized", "nash"],
-        help="Weight solver. 'prioritized' (PFSP-style) is v1; 'nash' is reserved "
-        "for v3 (requires pool-vs-pool eval).",
-    )
-    parser.add_argument(
-        "--psro_fifo_reweight",
-        action="store_true",
-        help="Per-trajectory FIFO reweighting: the learner's online 40%% mixture "
-        "samples files in proportion to the current per-opponent weight instead "
-        "of uniformly (fixes buffer lag at a mid-run switchover).",
-    )
-    parser.add_argument(
-        "--psro_buffer_trim",
-        type=int,
-        default=None,
-        help="If set, evict the FIFO down to this many files once at "
-        "--psro_start_epoch to accelerate turnover of the uniform-sampled "
-        "backlog (e.g. 50000).",
-    )
-    # Diversification quota: guarantees every pool agent a minimum number of
-    # games over a rolling window so dominated, ladder-strong policies never
-    # fall to ~0 games played (which previously triggered the cold-fallback
-    # weight spike). The PSRO-Lite weights then tilt the *surplus* (window
-    # slots beyond all quotas) toward weaker matchups.
-    parser.add_argument(
-        "--psro_quota_min_games",
-        type=int,
-        default=0,
-        help="Per-agent minimum games over the rolling --psro_quota_window. "
-        "0 disables the quota (pure weighted sampling). One configure() call "
-        "assigns one shared opponent to all lanes for a battle, so the quota "
-        "is enforced in units of ceil(min_games / lanes) assignments. Default "
-        "0; the launch scripts set this when PSRO is on.",
-    )
-    parser.add_argument(
-        "--psro_quota_window",
-        type=int,
-        default=128,
-        help="Rolling window (in env reset / configure() calls) over which the "
-        "per-agent quota is enforced. Must be >= n_agents * ceil(min_games / "
-        "lanes) or the quota is infeasible and falls back to weighted sampling.",
-    )
-    parser.add_argument(
-        "--psro_novelty",
-        type=float,
-        default=0.0,
-        help="Decaying novelty bonus γ added to each opponent's raw weight: "
-        "γ/(n+γ0). 0 (default) disables — the collection quota is the primary "
-        "exploration mechanism. Set >0 to give genuinely novel opponents a "
-        "small, n-decaying bump on top of the floor.",
-    )
-    parser.add_argument(
-        "--psro_cap",
-        type=float,
-        default=None,
-        help="Weight-ratio cap R: hard-bounds each raw weight to R*floor as a "
-        "safety net against solver spikes. None (default) disables.",
-    )
+
+    # PSRO-Lite (default-off) + team-mix schedule (optional, required for
+    # "@schedule" opponent pools).
+    add_psro_cli_args(parser)
+    add_schedule_cli_args(parser)
     return parser
-
-
-def _resolve_dataset_config_path(path: str) -> str:
-    if os.path.isabs(path) and os.path.exists(path):
-        return path
-    candidate = os.path.join(DATASET_CONFIG_DIR, path)
-    if os.path.exists(candidate):
-        return candidate
-    if os.path.exists(path):
-        return path
-    raise FileNotFoundError(f"Dataset config not found: {path}")
-
-
-def _latest_training_state_epoch(ckpt_dir: str, run_name: str) -> int:
-    """Newest epoch with a full accelerate state under ckpts/training_states/."""
-    ts_dir = os.path.join(ckpt_dir, "training_states")
-    prefix = f"{run_name}_epoch_"
-    epochs = []
-    if os.path.isdir(ts_dir):
-        for name in os.listdir(ts_dir):
-            if name.startswith(prefix):
-                try:
-                    epochs.append(int(name[len(prefix) :]))
-                except ValueError:
-                    pass
-    if not epochs:
-        raise FileNotFoundError(
-            f"No full accelerate states found under {ts_dir} "
-            f"(expected dirs like '{prefix}<N>')."
-        )
-    return max(epochs)
-
-
-def _resolve_checkpoint_path(args, pretrained) -> str:
-    """Return the path to the policy weights file to load."""
-    if args.prev_run_dir is not None:
-        assert args.prev_run_name is not None, "--prev_run_name required with --prev_run_dir"
-        assert args.prev_checkpoint is not None, "--prev_checkpoint required with --prev_run_dir"
-        return os.path.join(
-            args.prev_run_dir,
-            args.prev_run_name,
-            "ckpts",
-            "policy_weights",
-            f"policy_epoch_{args.prev_checkpoint}.pt",
-        )
-    ckpt = args.base_checkpoint or pretrained.default_checkpoint
-    return pretrained.get_path_to_checkpoint(ckpt)
-
-
-def _resolve_train_gin_path(pretrained, train_gin_config: Optional[str]) -> str:
-    if train_gin_config is None:
-        return pretrained.train_gin_config_path
-    return os.path.join(metamon.rl.TRAINING_CONFIG_DIR, train_gin_config)
-
-
-def _resolve_val_opponent_config(
-    *,
-    val_pool_path: Optional[str],
-    val_opponent: Optional[str],
-    base_model: str,
-    battle_format: str,
-):
-    """Return kwargs for ``make_metamon_env`` opponent configuration."""
-    if val_pool_path is not None:
-        return {"opponent_config_path": val_pool_path}
-    from metamon.rl.evaluate.opponent_pool import load_simple_opponent_pool
-
-    opponent = val_opponent or base_model
-    return {
-        "opponent_config": load_simple_opponent_pool(
-            opponent_agent=opponent,
-            battle_format=battle_format,
-            team_set="competitive",
-            checkpoint=None,
-            temperature=1.0,
-        )
-    }
-
-
-def _psro_sidecar_path(buffer_dir: str, battle_format: str) -> str:
-    return os.path.join(os.path.abspath(buffer_dir), battle_format, "meta_weights.json")
-
-
-def _load_pool_agent_names(
-    opponent_config_path: str, battle_format: str
-) -> list[str]:
-    """Return the row names (``agents[i][0]``) of the training opponent pool."""
-    from metamon.rl.evaluate.opponent_pool import load_opponent_pool
-
-    pool = load_opponent_pool(opponent_config_path, battle_format=battle_format)
-    return [row[0] for row in pool.agents]
-
-
-def _make_psro_config(args, *, battle_format: str) -> Optional[PsroConfig]:
-    """Build a ``PsroConfig`` from CLI args, or ``None`` if PSRO-Lite is off."""
-    if not args.psro_weighting:
-        return None
-    agent_names = _load_pool_agent_names(args.train_pool, battle_format)
-    return PsroConfig(
-        buffer_dir=args.buffer_dir,
-        battle_format=battle_format,
-        agent_names=agent_names,
-        start_epoch=args.psro_start_epoch,
-        update_interval=args.psro_update_interval,
-        window=args.psro_window,
-        min_games=args.psro_min_games,
-        temp=args.psro_temp,
-        floor=args.psro_floor,
-        ema=args.psro_ema,
-        solver=args.psro_solver,
-        fifo_reweight=args.psro_fifo_reweight,
-        buffer_trim=args.psro_buffer_trim,
-        novelty_gamma=args.psro_novelty,
-        cap_ratio=args.psro_cap,
-    )
-
-
-def _make_opponent_weight_provider(
-    sidecar_path: str,
-):
-    """Return a callable that reads the PSRO-Lite sidecar (cached by mtime)."""
-    state = {"mtime": None, "weights": None}
-
-    def provider() -> dict[str, float]:
-        weights, mtime = read_sidecar(sidecar_path, state["mtime"])
-        if weights is not None:
-            state["weights"] = weights
-            state["mtime"] = mtime
-        return state["weights"] or {}
-
-    return provider
-
-
-class StatsDropoutObservationSpace(ObservationSpace):
-    """Online-only wrapper that randomly hides computed battle stats.
-
-    Newly collected self-play battles carry real per-Pokemon computed stats
-    (``*_stat``), but the large offline replay dataset stores them as
-    ``UniversalPokemon.MISSING_STAT`` (-1). To keep the online FIFO buffer's
-    stat distribution compatible with the offline data -- and to stop the model
-    from over-relying on a feature that is absent in most of its training data --
-    we randomly drop the computed stats from sampled online trajectories before
-    they are encoded.
-
-    The dice are rolled once per trajectory in ``reset()`` (``MetamonDataset``
-    calls ``reset()`` once and then ``state_to_obs`` per timestep), so a sampled
-    trajectory is dropped as a whole, mirroring how real data either has or
-    lacks computed stats for an entire battle.
-
-    Applied ONLY to the FIFO (online) dataset's observation space; offline data
-    and live collection / validation keep their real stats.
-    """
-
-    STAT_NAMES = ("hp", "atk", "def", "spa", "spd", "spe")
-
-    def __init__(self, base_obs_space: ObservationSpace, dropout_prob: float):
-        self.base_obs_space = base_obs_space
-        self.dropout_prob = float(dropout_prob)
-        self._drop_this_traj = False
-        super().__init__()
-
-    def reset(self):
-        self.base_obs_space.reset()
-        self._drop_this_traj = (
-            self.dropout_prob > 0.0 and random.random() < self.dropout_prob
-        )
-
-    @property
-    def gym_space(self):
-        return self.base_obs_space.gym_space
-
-    @property
-    def tokenizable(self):
-        return self.base_obs_space.tokenizable
-
-    @property
-    def tokenizer(self):
-        # delegate so downstream code that reads obs_space.tokenizer still works
-        return self.base_obs_space.tokenizer
-
-    def _drop_stats(self, pokemon: UniversalPokemon) -> None:
-        for stat in self.STAT_NAMES:
-            setattr(pokemon, f"{stat}_stat", UniversalPokemon.MISSING_STAT)
-
-    def state_to_obs(self, state: UniversalState):
-        if self._drop_this_traj:
-            state = copy.deepcopy(state)
-            self._drop_stats(state.player_active_pokemon)
-            self._drop_stats(state.opponent_active_pokemon)
-            for pokemon in state.available_switches:
-                self._drop_stats(pokemon)
-        return self.base_obs_space.state_to_obs(state)
-
-
-def build_online_mixture_dataset(
-    *,
-    pretrained,
-    buffer_dir: str,
-    dataset_config_path: str,
-    online_weight: float,
-    dset_max_size: int,
-    dset_min_size: int,
-    online_anneal_epochs: int,
-    battle_format: str,
-    reward_function,
-    stats_dropout_prob: float = 0.0,
-    opponent_weight_provider: Optional["Callable[[], dict[str, float]]"] = None,
-):
-    """Offline replay mix + FIFO buffer of online-collected trajectories."""
-    config = load_dataset_config(dataset_config_path)
-    formats = config.formats or [battle_format]
-    fifo_root = os.path.abspath(buffer_dir)
-    os.makedirs(os.path.join(fifo_root, battle_format), exist_ok=True)
-    # Offline data already has stats == -1; only the online FIFO buffer needs
-    # stat dropout to match that distribution.
-    fifo_obs_space = pretrained.observation_space
-    if stats_dropout_prob > 0.0:
-        fifo_obs_space = StatsDropoutObservationSpace(
-            base_obs_space=fifo_obs_space, dropout_prob=stats_dropout_prob
-        )
-    fifo_metamon = MetamonDataset(
-        dset_root=fifo_root,
-        observation_space=fifo_obs_space,
-        action_space=pretrained.action_space,
-        reward_function=reward_function,
-        formats=formats,
-        shuffle=True,
-        verbose=False,
-        write_index_cache=False,
-    )
-    fifo = MetamonFIFODataset(
-        parsed_replay_dset=fifo_metamon,
-        dset_max_size=dset_max_size,
-        dset_min_size=dset_min_size,
-        dset_name="Online FIFO Buffer",
-        opponent_weight_provider=opponent_weight_provider,
-    )
-    offline_weight = 1.0 - online_weight
-    if offline_weight <= 0:
-        return fifo
-    offline = build_dataset(
-        config=config,
-        obs_space=pretrained.observation_space,
-        action_space=pretrained.action_space,
-        reward_function=reward_function,
-    )
-    if online_weight <= 0:
-        return offline
-    # Always anneal online from 0 even when the FIFO is already full at startup.
-    # Without explicit initial_sampling_weights, AMAGO's legacy path sets
-    # initial_weight=final_weight for ready datasets and the ramp is a no-op.
-    return amago.loading.MixtureOfDatasets(
-        datasets=[fifo, offline],
-        sampling_weights=[online_weight, offline_weight],
-        initial_sampling_weights=[0.0, offline_weight],
-        smooth_sudden_starts=online_anneal_epochs,
-        dset_name="Online + Offline Mixture",
-    )
-
-
-def _make_collect_train_env(
-    pretrained,
-    *,
-    battle_format: str,
-    reward_function,
-    opponent_config_path: str,
-    buffer_dir: str,
-    lanes: int,
-    n_workers: int,
-    seed: Optional[int],
-    team_set_name: str = DEFAULT_TRAIN_TEAM_SET,
-    team_mix_spec: Optional[str] = None,
-    opponent_weights_path: Optional[str] = None,
-    opponent_quota_min_games: Optional[int] = None,
-    opponent_quota_window: int = 128,
-):
-    team_set = (
-        get_metamon_team_set_or_mix(battle_format, team_mix_spec)
-        if team_mix_spec
-        else get_metamon_team_set_or_mix(battle_format, team_set_name)
-    )
-    return partial(
-        make_metamon_env,
-        battle_format=battle_format,
-        observation_space=pretrained.observation_space,
-        action_space=pretrained.action_space,
-        reward_function=reward_function,
-        team_set=team_set,
-        opponent_config_path=opponent_config_path,
-        opponent_weights_path=opponent_weights_path,
-        opponent_quota_min_games=opponent_quota_min_games,
-        opponent_quota_window=opponent_quota_window,
-        batched_envs=lanes,
-        n_workers=n_workers,
-        opponent_sample=True,
-        save_trajectories_to=buffer_dir,
-        save_results_to=buffer_dir,
-        seed=seed,
-    )
-
-
-def _apply_async_mode(
-    experiment,
-    mode: str,
-    *,
-    val_timesteps: int,
-    val_interval: int,
-    epochs: int,
-    eval_during_training: bool = False,
-):
-    """Configure distributed roles (AMAGO only ships collect/learn helpers)."""
-    if mode == "collect":
-        experiment = amago.cli_utils.make_experiment_collect_only(experiment)
-        experiment.val_timesteps_per_epoch = 0
-        experiment.val_interval = None
-        return experiment
-    if mode == "learn":
-        experiment = amago.cli_utils.make_experiment_learn_only(experiment)
-        if eval_during_training and val_timesteps > 0:
-            # Keep periodic validation enabled so the learner pauses every
-            # `val_interval` epochs to evaluate the in-memory policy vs the val
-            # opponent (TaurosV0 by default) and logs win rate to wandb.
-            # always_load_latest stays False (set by make_experiment_learn_only),
-            # so val uses the current learned weights, not a reloaded snapshot.
-            experiment.val_timesteps_per_epoch = val_timesteps
-            experiment.val_interval = val_interval
-        else:
-            experiment.val_timesteps_per_epoch = 0
-            experiment.val_interval = None
-        return experiment
-    if mode == "validate":
-        experiment.start_collecting_at_epoch = float("inf")
-        experiment.train_timesteps_per_epoch = 0
-        experiment.start_learning_at_epoch = float("inf")
-        experiment.train_batches_per_epoch = 0
-        experiment.ckpt_interval = None
-        experiment.always_save_latest = False
-        experiment.always_load_latest = True
-        experiment.epochs = max(epochs, 1_000_000)
-        experiment.has_dset_edit_rights = False
-        experiment.val_timesteps_per_epoch = val_timesteps
-        experiment.val_interval = val_interval
-        experiment.init_dsets()
-        return experiment
-    return experiment
-
-
-def _make_val_env(
-    pretrained,
-    *,
-    battle_format: str,
-    reward_function,
-    val_opponent_kwargs: dict,
-    lanes: int,
-    n_workers: int,
-    seed: Optional[int],
-    team_set_name: str = DEFAULT_VAL_TEAM_SET,
-    team_mix_spec: Optional[str] = None,
-):
-    team_set = (
-        get_metamon_team_set_or_mix(battle_format, team_mix_spec)
-        if team_mix_spec
-        else get_metamon_team_set_or_mix(battle_format, team_set_name)
-    )
-    return partial(
-        make_metamon_env,
-        battle_format=battle_format,
-        observation_space=pretrained.observation_space,
-        action_space=pretrained.action_space,
-        reward_function=reward_function,
-        team_set=team_set,
-        batched_envs=lanes,
-        n_workers=n_workers,
-        opponent_sample=True,
-        seed=seed,
-        **val_opponent_kwargs,
-    )
 
 
 def create_online_experiment(
@@ -859,6 +441,7 @@ def create_online_experiment(
     val_team_set: str = DEFAULT_VAL_TEAM_SET,
     train_team_mix: Optional[str] = None,
     val_team_mix: Optional[str] = None,
+    train_team_schedule_state: Optional[ScheduleState] = None,
     temp_low: float,
     temp_high: float,
     epochs: int,
@@ -876,7 +459,7 @@ def create_online_experiment(
     dloader_workers: int,
     seed: Optional[int],
     log: bool,
-    psro_config: Optional["PsroConfig"] = None,
+    psro_config: Optional[PsroConfig] = None,
     opponent_weights_path: Optional[str] = None,
     opponent_quota_min_games: Optional[int] = None,
     opponent_quota_window: int = 128,
@@ -934,7 +517,7 @@ def create_online_experiment(
     )
 
     if collects:
-        make_train_env = _make_collect_train_env(
+        make_train_env = make_collect_train_env(
             pretrained,
             battle_format=battle_format,
             reward_function=reward_function,
@@ -945,6 +528,7 @@ def create_online_experiment(
             seed=seed,
             team_set_name=train_team_set,
             team_mix_spec=train_team_mix,
+            schedule_state=train_team_schedule_state,
             opponent_weights_path=opponent_weights_path,
             opponent_quota_min_games=opponent_quota_min_games,
             opponent_quota_window=opponent_quota_window,
@@ -969,7 +553,7 @@ def create_online_experiment(
         effective_train_timesteps = 0
 
     if runs_val and val_timesteps > 0:
-        make_val_env = _make_val_env(
+        make_val_env_fn = make_val_env(
             pretrained,
             battle_format=battle_format,
             reward_function=reward_function,
@@ -983,7 +567,7 @@ def create_online_experiment(
         effective_val_timesteps = val_timesteps
         effective_val_interval = val_interval
     else:
-        make_val_env = partial(
+        make_val_env_fn = partial(
             make_placeholder_env,
             pretrained.observation_space,
             pretrained.action_space,
@@ -991,12 +575,16 @@ def create_online_experiment(
         effective_val_timesteps = 0
         effective_val_interval = None
 
+    # The shared EpochRef (if a schedule is set) is stored on the experiment so
+    # it can bump it each collection cycle, advancing the curriculum.
+    epoch_ref = train_team_schedule_state.epoch_ref if train_team_schedule_state else None
+
     experiment = MetamonOnlineExperiment(
         run_name=run_name,
         ckpt_base_dir=save_dir,
         dataset=amago_dataset,
         make_train_env=make_train_env,
-        make_val_env=make_val_env,
+        make_val_env=make_val_env_fn,
         val_timesteps_per_epoch=effective_val_timesteps,
         env_mode="already_vectorized",
         parallel_actors=parallel_actors,
@@ -1030,11 +618,12 @@ def create_online_experiment(
         gin_config_files=gin_files,
         gin_extra_bindings=gin_extra_bindings,
         psro_config=psro_config,
+        epoch_ref=epoch_ref,
     )
     if mode == "both":
         experiment = amago.cli_utils.switch_async_mode(experiment, mode)
     else:
-        experiment = _apply_async_mode(
+        experiment = apply_async_mode(
             experiment,
             mode,
             val_timesteps=effective_val_timesteps,
@@ -1045,15 +634,15 @@ def create_online_experiment(
     return experiment
 
 
-if __name__ == "__main__":
-    from argparse import ArgumentParser
+def run_online_rl(args) -> None:
+    """Entry point: resolve config, build dataset + experiment, start training.
 
-    parser = ArgumentParser(
-        description="Online RL finetuning from a registered pretrained model."
-    )
-    add_cli(parser)
-    args = parser.parse_args()
-
+    Handles the three start modes: ``--resume_training_state`` (reload this
+    run's full accelerate state and continue), ``--from_scratch`` (random init),
+    and continuation/init (load a base or prior-run policy checkpoint). Bumps
+    the shared schedule ``EpochRef`` to the resumed epoch on resume so the
+    curriculum picks up at the right phase.
+    """
     metamon.print_banner()
     is_continuation = args.prev_run_dir is not None
     if args.from_scratch and is_continuation:
@@ -1103,14 +692,14 @@ if __name__ == "__main__":
     print()
 
     pretrained = get_pretrained_model(args.base_model)
-    train_gin_config_path = _resolve_train_gin_path(pretrained, args.train_gin_config)
+    train_gin_config_path = resolve_train_gin_path(pretrained, args.train_gin_config)
     reward_function = (
         get_reward_function(args.reward_function)
         if args.reward_function is not None
         else pretrained.reward_function
     )
 
-    dataset_config_path = _resolve_dataset_config_path(args.dataset_config)
+    dataset_config_path = resolve_dataset_config_path(args.dataset_config)
     dataset_config = load_dataset_config(dataset_config_path)
     battle_format = (
         args.battle_format
@@ -1118,49 +707,54 @@ if __name__ == "__main__":
         or DEFAULT_BATTLE_FORMAT
     )
     formats = dataset_config.formats or [battle_format]
-    val_opponent_kwargs = _resolve_val_opponent_config(
+    val_opponent_kwargs = resolve_val_opponent_config(
         val_pool_path=args.val_pool,
         val_opponent=args.val_opponent,
         base_model=args.base_model,
         battle_format=battle_format,
     )
 
-    psro_config = _make_psro_config(args, battle_format=battle_format)
+    psro_config = make_psro_config_from_args(args, battle_format=battle_format)
     # The collector writes the sidecar; both the collector env and the learner's
     # FIFO sampler read it. ``opponent_weights_path`` is only meaningful for the
     # collector env; ``opponent_weight_provider`` is only meaningful for the
     # learner's FIFO dataset. Both fall back to uniform when the sidecar is
     # absent (e.g. before psro_start_epoch).
-    sidecar_path = _psro_sidecar_path(args.buffer_dir, battle_format)
+    sidecar_path = psro_sidecar_path(args.buffer_dir, battle_format)
     opponent_weights_path = sidecar_path if args.psro_weighting else None
     opponent_weight_provider = (
-        _make_opponent_weight_provider(sidecar_path)
+        make_opponent_weight_provider(sidecar_path)
         if args.psro_fifo_reweight
         else None
     )
-    # Quota-based diversification: guarantee every pool agent a minimum number
-    # of games over a rolling window so dominated, ladder-strong policies never
-    # fall to ~0 games played. Meaningful for collect/both (the collector env
-    # draws opponents); no-op for learn/validate (no pool sampling). Defaults to
-    # off (0); the launch scripts enable it alongside --psro_weighting.
-    opponent_quota_min_games = (
-        args.psro_quota_min_games if args.psro_quota_min_games > 0 else None
+    opponent_quota_min_games, opponent_quota_window = resolve_quota(args)
+    log_psro_status(
+        psro_config,
+        sidecar_path=sidecar_path,
+        fifo_reweight=args.psro_fifo_reweight,
+        buffer_trim=args.psro_buffer_trim,
+        quota_min_games=opponent_quota_min_games,
+        quota_window=opponent_quota_window,
     )
-    opponent_quota_window = args.psro_quota_window
-    if psro_config is not None:
-        print(f"  PSRO-Lite: ON (start_epoch={psro_config.start_epoch}, "
-              f"solver={psro_config.solver}, temp={psro_config.temp}, "
-              f"floor={psro_config.floor}, min_games={psro_config.min_games}, "
-              f"window={psro_config.window}, update_interval={psro_config.update_interval}, "
-              f"ema={psro_config.ema})")
-        print(f"  PSRO agents: {psro_config.agent_names}")
-        if args.psro_fifo_reweight:
-            print(f"  PSRO FIFO reweighting: ON (sidecar={sidecar_path})")
-        if args.psro_buffer_trim is not None:
-            print(f"  PSRO buffer trim: {args.psro_buffer_trim} at start epoch")
-    if opponent_quota_min_games is not None:
-        print(f"  PSRO quota: min {opponent_quota_min_games} games/agent over "
-              f"window={opponent_quota_window} resets")
+
+    # Learner FIFO teamset up-sampling (independent of PSRO). Aggressively shifts
+    # the learner's online 40% mix toward trajectories where the learner drew the
+    # named teamsets, so the policy trains on those compositions more intensively.
+    teamset_weights = _parse_teamset_weights(args.fifo_teamset_weights)
+    if teamset_weights is not None:
+        print(f"  FIFO teamset up-sampling: {teamset_weights} "
+              f"(default={args.fifo_teamset_default_weight})")
+
+    # Team-mix schedule: required when the training pool uses "@schedule"; the
+    # collector's player team set and the pool's "@schedule" agents both follow
+    # it via a shared EpochRef (bumped each collection cycle by the experiment).
+    # Only meaningful for collect/both (the collector builds train envs); the
+    # learner and validator receive None so they don't load the YAML pointlessly.
+    schedule_state = (
+        make_schedule_state(args.train_team_schedule)
+        if args.mode in ("collect", "both")
+        else None
+    )
 
     if args.mode == "collect":
         fifo_root = os.path.abspath(args.buffer_dir)
@@ -1181,6 +775,8 @@ if __name__ == "__main__":
             dset_min_size=args.dset_min_size,
             dset_name="Online FIFO Buffer",
             opponent_weight_provider=opponent_weight_provider,
+            teamset_weights=teamset_weights,
+            default_teamset_weight=args.fifo_teamset_default_weight,
         )
     elif args.mode == "validate":
         amago_dataset = amago.loading.DoNothingDataset()
@@ -1197,6 +793,8 @@ if __name__ == "__main__":
             reward_function=reward_function,
             stats_dropout_prob=args.stats_dropout_prob,
             opponent_weight_provider=opponent_weight_provider,
+            teamset_weights=teamset_weights,
+            default_teamset_weight=args.fifo_teamset_default_weight,
         )
 
     config_save_path = os.path.join(args.save_dir, args.run_name, "dataset_config.yaml")
@@ -1221,6 +819,7 @@ if __name__ == "__main__":
         val_team_set=args.val_team_set,
         train_team_mix=args.train_team_mix,
         val_team_mix=args.val_team_mix,
+        train_team_schedule_state=schedule_state,
         temp_low=args.temp_low,
         temp_high=args.temp_high,
         epochs=args.epochs,
@@ -1246,13 +845,14 @@ if __name__ == "__main__":
 
     experiment.start()
 
+    resume_epoch = None
     if args.resume_training_state:
         # True resume of THIS run: restore model + optimizer + scheduler + RNG from a
         # full accelerate state, then continue. learn() picks up at self.epoch.
         resume_epoch = (
             args.resume_epoch
             if args.resume_epoch is not None
-            else _latest_training_state_epoch(experiment.ckpt_dir, args.run_name)
+            else latest_training_state_epoch(experiment.ckpt_dir, args.run_name)
         )
         print(f"  Resuming full accelerate training state from epoch {resume_epoch} ...")
         experiment.load_checkpoint(resume_epoch, resume_training_state=True)
@@ -1269,10 +869,29 @@ if __name__ == "__main__":
         # read_latest_policy is a no-op until then (no deadlock with dset_min_size).
         print("  From scratch: random initialization (no checkpoint loaded).")
     else:
-        ckpt_path = _resolve_checkpoint_path(args, pretrained)
+        ckpt_path = resolve_checkpoint_path(args, pretrained)
         print(f"  Loading weights from: {ckpt_path}")
         experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
+
+    # Bump the shared schedule EpochRef to the current (possibly resumed) epoch
+    # so the curriculum picks up at the right phase. The experiment bumps it
+    # again at the start of each collection cycle thereafter.
+    if schedule_state is not None:
+        start_epoch = resume_epoch if resume_epoch is not None else experiment.epoch
+        schedule_state.epoch_ref.epoch = start_epoch
+        log_schedule_start(schedule_state, resume_epoch=resume_epoch)
 
     experiment.learn()
     if args.log:
         wandb.finish()
+
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser(
+        description="Online RL finetuning from a registered pretrained model."
+    )
+    add_cli(parser)
+    args = parser.parse_args()
+    run_online_rl(args)

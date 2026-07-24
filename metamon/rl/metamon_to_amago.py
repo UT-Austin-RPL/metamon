@@ -1758,6 +1758,8 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         dset_min_size: int = 1,
         dset_name: Optional[str] = None,
         opponent_weight_provider: Optional["Callable[[], dict[str, float]]"] = None,
+        teamset_weights: Optional[dict[str, float]] = None,
+        default_teamset_weight: float = 1.0,
     ):
         super().__init__(
             parsed_replay_dset=parsed_replay_dset,
@@ -1771,6 +1773,15 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         # uniformly. The provider reads the same ``meta_weights.json`` sidecar the
         # env reads; files whose opponent isn't in the sidecar get a uniform fallback.
         self._opponent_weight_provider = opponent_weight_provider
+        # Teamset-aware FIFO up-sampling: when set, the per-file weight is multiplied
+        # by ``teamset_weights[<teamset>]`` (parsed from the ``_ts-`` filename token).
+        # Files with no ``_ts-`` token or an unlisted teamset get
+        # ``default_teamset_weight``. Use this to shift the learner's online mix
+        # toward under-represented learner-teamset trajectories (e.g. up-weight
+        # smogon battles so the policy trains on those compositions more).
+        # Composes multiplicatively with ``opponent_weight_provider`` when both set.
+        self._teamset_weights = teamset_weights
+        self._default_teamset_weight = float(default_teamset_weight)
         self._weighted_index: Optional[tuple[list[str], np.ndarray]] = None
 
     @property
@@ -1829,27 +1840,39 @@ class MetamonFIFODataset(MetamonAMAGODataset):
     def _rebuild_weighted_index(self) -> None:
         """Build a ``(filepaths, weights)`` index for per-trajectory reweighting.
 
-        Called after each ``refresh_files()``. Maps each file's opponent token
-        (parsed from the filename) to the current per-agent weight from the sidecar
-        via the provider. Files whose opponent isn't in the sidecar get a uniform
-        fallback weight (``1/N``). On any error, clears the weighted index so
-        ``sample_random_trajectory`` falls back to uniform.
+        Called after each ``refresh_files()``. The per-file weight is the product
+        of two optional factors (either or both may be disabled):
+
+        1. **Opponent weight** (``opponent_weight_provider``): maps each file's
+           opponent token (parsed from the filename) to the current per-agent
+           weight from the PSRO-Lite sidecar. Files whose opponent isn't in the
+           sidecar get a uniform fallback (``1/N``).
+        2. **Teamset weight** (``teamset_weights``): maps each file's learner
+           teamset (the ``_ts-<teamset>`` filename token) to a static up-sampling
+           multiplier. Files with no token or an unlisted teamset get
+           ``default_teamset_weight``.
+
+        When neither is set, the index is cleared and ``sample_random_trajectory``
+        falls back to uniform. On any error, the index is cleared (uniform fallback).
         """
         from metamon.rl.psro_lite import parse_trajectory_filename, match_agent_name
 
         provider = self._opponent_weight_provider
-        if provider is None:
+        ts_weights = self._teamset_weights
+        if provider is None and ts_weights is None:
             self._weighted_index = None
             return
         try:
-            weights_map = provider() or {}
+            weights_map = provider() if provider is not None else None
         except Exception:
             self._weighted_index = None
             return
-        if not weights_map:
+        # Opponent reweighting needs a non-empty sidecar to be meaningful; teamset
+        # reweighting alone is valid (base weight = uniform, then multiplied).
+        if provider is not None and not weights_map:
             self._weighted_index = None
             return
-        agent_names = list(weights_map.keys())
+        agent_names = list(weights_map.keys()) if weights_map else []
         filenames = list(self.parsed_replay_dset.filenames)
         if not filenames:
             self._weighted_index = None
@@ -1859,19 +1882,28 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         matched = 0
         for i, fn in enumerate(filenames):
             parsed = parse_trajectory_filename(fn)
-            if parsed is None:
-                file_weights[i] = uniform
-                continue
-            opp_label, _teamset, _result = parsed
-            agent = match_agent_name(opp_label, agent_names)
-            if agent is None:
-                file_weights[i] = uniform
-                continue
-            w = float(weights_map.get(agent, 0.0))
-            if w <= 0.0 or not math.isfinite(w):
+            opp_label, teamset, _result = parsed if parsed is not None else (None, None, None)
+            # Base weight: opponent weight if the provider is set, else uniform.
+            if provider is not None:
+                if parsed is None:
+                    w = uniform
+                else:
+                    agent = match_agent_name(opp_label, agent_names)
+                    if agent is None:
+                        w = uniform
+                    else:
+                        w = float(weights_map.get(agent, 0.0))
+                        if w <= 0.0 or not math.isfinite(w):
+                            w = uniform
+            else:
                 w = uniform
+            # Teamset multiplier (composes multiplicatively with opponent weight).
+            if ts_weights is not None:
+                ts_w = ts_weights.get(teamset, self._default_teamset_weight) if teamset is not None else self._default_teamset_weight
+                w *= float(ts_w)
+            if w > 0.0 and math.isfinite(w):
+                matched += 1
             file_weights[i] = w
-            matched += 1
         if matched == 0:
             self._weighted_index = None
             return
@@ -1901,7 +1933,7 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         experiment.accelerator.wait_for_everyone()
         self.parsed_replay_dset.refresh_files()
         new_size = len(self.parsed_replay_dset)
-        if self._opponent_weight_provider is not None:
+        if self._opponent_weight_provider is not None or self._teamset_weights is not None:
             self._rebuild_weighted_index()
         return {
             "FIFO Buffer Size": new_size,
@@ -2053,6 +2085,7 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
         gin_config_files: Optional[list[str]] = None,
         gin_extra_bindings: Optional[dict] = None,
         psro_config: Optional["PsroConfig"] = None,
+        epoch_ref: Optional["object"] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -2069,6 +2102,13 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
             from metamon.rl.psro_lite import PsroLite
             self._psro = PsroLite(config=psro_config)
         self._psro_trimmed = False
+        # Team-mix schedule: a shared EpochRef (from a ScheduleState) held so the
+        # experiment can bump it to ``self.epoch`` at the start of each collection
+        # cycle, advancing the curriculum for every schedule-aware team set
+        # (player + opponent pool "@schedule" agents) that references it. None ⇒
+        # no schedule (static team set / mix spec behavior). The caller sets the
+        # initial epoch (e.g. the resumed epoch) before the first collection.
+        self._epoch_ref = epoch_ref
 
     def _reload_gin(self) -> None:
         """Re-apply gin after env init (opponent ``initialize_agent`` clears gin).
@@ -2128,6 +2168,12 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
         n = self.parallel_actors
         temps = torch.empty(n, device=device).uniform_(self.temp_low, self.temp_high)
         policy_dist.temperature = temps.view(n, 1, 1, 1)
+        # Advance the shared schedule EpochRef to the current epoch before
+        # collecting so schedule-aware team sets (player + opponent pool
+        # "@schedule" agents) refresh their weights for this epoch on the next
+        # ``yield_team()``. No-op when no schedule is set.
+        if self._epoch_ref is not None:
+            self._epoch_ref.epoch = self.epoch
         try:
             super().collect_new_training_data()
         finally:
