@@ -48,6 +48,17 @@ VAL_POOL="$(resolve_pool "$VAL_POOL")"
 BATTLE_FORMAT="${BATTLE_FORMAT:-gen1ou}"
 TRAIN_TEAM_SET="${TRAIN_TEAM_SET:-gl_05_26}"
 VAL_TEAM_SET="${VAL_TEAM_SET:-competitive}"
+# Optional team-mix schedule (epoch-driven curriculum YAML) and static mix specs.
+# TRAIN_TEAM_SCHEDULE is required when the train pool uses "@schedule" agents.
+# The *_MIX vars override the single-set vars when set.
+TRAIN_TEAM_SCHEDULE="${TRAIN_TEAM_SCHEDULE:-}"
+TRAIN_TEAM_MIX="${TRAIN_TEAM_MIX:-}"
+VAL_TEAM_MIX="${VAL_TEAM_MIX:-}"
+# Learner FIFO teamset up-sampling: aggressively shift the online mix toward
+# trajectories where the learner drew a specific teamset (e.g. smogon). Empty
+# = disabled. Format: 'set:mult,set:mult,...'. See --fifo_teamset_weights.
+FIFO_TEAMSET_WEIGHTS="${FIFO_TEAMSET_WEIGHTS:-}"
+FIFO_TEAMSET_DEFAULT_WEIGHT="${FIFO_TEAMSET_DEFAULT_WEIGHT:-1.0}"
 
 # Single-GPU knobs. Defaults are conservative for a 32GB card; tune up if headroom.
 #   BATCH_PER_GPU: grad-update batch size. 14 is the proven default; the small
@@ -184,6 +195,13 @@ COMMON_ARGS=(
   --epochs "$EPOCHS"
   --dloader_workers "$DLOADER_WORKERS"
 )
+# Conditionally forward optional team-mix schedule + static mix specs (only
+# when the env var is set, so unset vars don't pass empty strings to argparse).
+[[ -n "$TRAIN_TEAM_SCHEDULE" ]] && COMMON_ARGS+=(--train_team_schedule "$TRAIN_TEAM_SCHEDULE")
+[[ -n "$TRAIN_TEAM_MIX" ]] && COMMON_ARGS+=(--train_team_mix "$TRAIN_TEAM_MIX")
+[[ -n "$VAL_TEAM_MIX" ]] && COMMON_ARGS+=(--val_team_mix "$VAL_TEAM_MIX")
+[[ -n "$FIFO_TEAMSET_WEIGHTS" ]] && COMMON_ARGS+=(--fifo_teamset_weights "$FIFO_TEAMSET_WEIGHTS")
+[[ "${FIFO_TEAMSET_DEFAULT_WEIGHT:-1.0}" != "1.0" ]] && COMMON_ARGS+=(--fifo_teamset_default_weight "$FIFO_TEAMSET_DEFAULT_WEIGHT")
 
 # After the mode, an optional leading [N_LANES] integer positional is consumed by
 # run/collector/validator; everything remaining is forwarded verbatim to
