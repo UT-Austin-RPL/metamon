@@ -134,7 +134,15 @@ $BUFFER_DIR/<format>/                        # FIFO self-play trajectories (appe
 - `RUN_NAME`, `SAVE_DIR`, `BUFFER_DIR` — defaults to
   `~/metamon_runs/$RUN_NAME` and `${SAVE_DIR}/buffer`.
 - `BASE_MODEL`, `DATASET_CONFIG`, `TRAIN_POOL`, `VAL_POOL`, `BATTLE_FORMAT`,
-  `TRAIN_TEAM_SET`, `VAL_TEAM_SET` — defaults match the registered run.
+  `TRAIN_TEAM_SET`, `VAL_TEAM_SET`, `TRAIN_TEAM_MIX`, `VAL_TEAM_MIX`,
+  `TRAIN_TEAM_SCHEDULE` — defaults match the registered run. The `*_MIX` vars
+  are optional weighted-mix specs (`'set:weight,set:weight,...'`) that override
+  the single-set vars when set. `TRAIN_TEAM_SCHEDULE` is a path to a schedule
+  YAML that shifts the collection team mix automatically at epoch boundaries
+  (no restart needed); the opponent pool follows the same schedule when its
+  `team_set` is `"@schedule"`. See `docs/teamset_curriculum_proposal.md`.
+  `launch_psro_v1.sh` accepts `RESUME=1` to resume from the latest training
+  state (instead of bootstrapping from `--prev_run_dir`).
 - `BATCH_PER_GPU`, `LANES_BOTH`, `N_WORKERS`, `STEPS_PER_EPOCH`,
   `TRAIN_TIMESTEPS_PER_EPOCH`, `DLOADER_WORKERS`, `VAL_INTERVAL`,
   `VAL_TIMESTEPS` — speed knobs; the `resume`/`learner`/`collector` subcommands
