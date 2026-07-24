@@ -1,6 +1,9 @@
 from metamon.env.wrappers import (
     TeamSet,
     PokeAgentTeamSet,
+    WeightedMixedTeamSet,
+    EpochRef,
+    TeamMixSchedule,
     PokeEnvWrapper,
     BattleAgainstBaseline,
     QueueOnLocalLadder,
@@ -9,4 +12,8 @@ from metamon.env.wrappers import (
     PokeAgentServerConfiguration,
     PokeAgentLadder,
     get_metamon_teams,
+    get_metamon_team_set_or_mix,
+    get_metamon_team_set_from_schedule,
+    parse_team_mix_spec,
+    is_team_mix_spec,
 )

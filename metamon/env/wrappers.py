@@ -3,10 +3,12 @@ import os
 import copy
 import json
 import warnings
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Type, Any, List
+from typing import Optional, Type, Any, List, Dict
 
 import numpy as np
+import yaml
 import lz4.frame
 import gymnasium as gym
 
@@ -126,6 +128,356 @@ class PokeAgentTeamSet(TeamSet):
             elif "revivalblessing" in packed_team_lower:
                 return True
         return False
+
+
+class EpochRef:
+    """Mutable shared epoch counter for schedule-aware team sets.
+
+    A tiny mutable container so the experiment loop can bump the current epoch
+    once per collection cycle and every :class:`WeightedMixedTeamSet` that holds
+    a reference to the same ``EpochRef`` sees the update lazily on its next
+    ``yield_team()`` call — no need to reach into the env tree from the
+    experiment.
+    """
+
+    __slots__ = ("epoch",)
+
+    def __init__(self, epoch: int = 0):
+        self.epoch = epoch
+
+
+class TeamMixSchedule:
+    """A time-varying team-mix schedule parsed from a YAML file.
+
+    The YAML has a top-level ``schedule`` list of entries, each with an
+    ``epoch`` boundary and a ``weights`` mapping of ``set_name -> weight``::
+
+        schedule:
+          - epoch: 0
+            weights:
+              gl_05_26: 1.0
+              smogon_pass2: 0.0
+              smogon_pass2_selected: 0.0
+          - epoch: 920
+            weights:
+              gl_05_26: 0.75
+              smogon_pass2: 0.15
+              smogon_pass2_selected: 0.10
+          ...
+
+    At runtime, :meth:`weights_for_epoch` returns the weights of the latest
+    entry whose ``epoch`` is <= the current epoch. All ``weights`` mappings must
+    share the same set of keys (the component team sets); their order is fixed
+    by the first entry.
+    """
+
+    def __init__(self, entries: List[Dict[str, Any]], *, source: str = "?"):
+        if not entries:
+            raise ValueError("TeamMixSchedule: empty schedule")
+        # Sort by epoch boundary (ascending).
+        entries = sorted(entries, key=lambda e: e["epoch"])
+        self._epochs: List[int] = [e["epoch"] for e in entries]
+        # Determine the canonical set-name order from the first entry.
+        first_weights = entries[0]["weights"]
+        self._set_names: List[str] = list(first_weights.keys())
+        # Validate all entries share the same keys, then store weight lists in
+        # canonical order.
+        self._weight_rows: List[List[float]] = []
+        for e in entries:
+            w = e["weights"]
+            if set(w.keys()) != set(self._set_names):
+                raise ValueError(
+                    f"TeamMixSchedule: entry at epoch {e['epoch']} has keys "
+                    f"{sorted(w.keys())}, expected {sorted(self._set_names)} "
+                    f"(must match the first entry)"
+                )
+            self._weight_rows.append([float(w[n]) for n in self._set_names])
+        self._source = source
+
+    # -- lookups -----------------------------------------------------------
+
+    @property
+    def set_names(self) -> List[str]:
+        """Ordered component team-set names (from the first schedule entry)."""
+        return list(self._set_names)
+
+    @property
+    def source(self) -> str:
+        return self._source
+
+    def weights_for_epoch(self, epoch: int) -> Dict[str, float]:
+        """Return the active ``{set_name: weight}`` dict for ``epoch``.
+
+        Selects the latest entry with ``entry.epoch <= epoch``. If ``epoch`` is
+        before the first boundary, the first entry is used.
+        """
+        idx = 0
+        for i, boundary in enumerate(self._epochs):
+            if boundary <= epoch:
+                idx = i
+            else:
+                break
+        row = self._weight_rows[idx]
+        return dict(zip(self._set_names, row))
+
+    def initial_weights(self) -> List[float]:
+        """Return the weights at epoch 0 (the first entry's weight row)."""
+        return list(self._weight_rows[0])
+
+    def describe(self) -> str:
+        """Human-readable one-line summary of the phase boundaries."""
+        parts = []
+        for boundary, row in zip(self._epochs, self._weight_rows):
+            w = dict(zip(self._set_names, row))
+            parts.append(f"e{boundary}: " + ",".join(f"{k}={v:.0%}" for k, v in w.items()))
+        return " | ".join(parts)
+
+    # -- construction ------------------------------------------------------
+
+    @classmethod
+    def from_yaml_file(cls, path: str) -> "TeamMixSchedule":
+        """Parse a schedule YAML file."""
+        with open(path, "r") as f:
+            raw = yaml.safe_load(f)
+        if not isinstance(raw, dict) or "schedule" not in raw:
+            raise ValueError(
+                f"TeamMixSchedule: {path!r} must have a top-level 'schedule' list"
+            )
+        entries = raw["schedule"]
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(
+                f"TeamMixSchedule: 'schedule' in {path!r} must be a non-empty list"
+            )
+        # Normalize entries: ensure 'epoch' (int) and 'weights' (dict) keys.
+        normalized = []
+        for e in entries:
+            if "epoch" not in e or "weights" not in e:
+                raise ValueError(
+                    f"TeamMixSchedule: each entry needs 'epoch' and 'weights'; "
+                    f"got {e!r} in {path!r}"
+                )
+            normalized.append(
+                {"epoch": int(e["epoch"]), "weights": dict(e["weights"])}
+            )
+        return cls(normalized, source=path)
+
+
+class WeightedMixedTeamSet(TeamSet):
+    """Sample teams from multiple underlying TeamSets with configurable weights.
+
+    Unlike a merged directory (which fixes the sampling ratio by file count and
+    wastes disk duplicating small sets), this holds N ``TeamSet`` objects and
+    picks one per battle according to ``weights``. Each underlying TeamSet then
+    does its own uniform ``yield_team()`` draw.
+
+    Used to build a curriculum mix of, e.g., a broad-ladder set
+    (``gl_05_26``) and competitive sets (``smogon_pass2`` /
+    ``smogon_pass2_selected``) without duplicating team files. The mix ratio is
+    set at construction time and can be changed on each run restart via a mix
+    spec string (see :func:`parse_team_mix_spec`), or varied automatically over
+    training epochs by attaching a :class:`TeamMixSchedule` + :class:`EpochRef`
+    (see :func:`get_metamon_team_set_from_schedule`).
+
+    Args:
+        team_sets: List of ``TeamSet`` objects to mix.
+        weights:   Per-set sampling weights (need not sum to 1; normalized
+                   internally). Must be the same length as ``team_sets``.
+        schedule:  Optional :class:`TeamMixSchedule` for epoch-driven weight
+                   updates. When set, ``yield_team`` lazily refreshes weights
+                   from the schedule whenever ``epoch_ref.epoch`` changes.
+        epoch_ref: Optional shared :class:`EpochRef`. Required when ``schedule``
+                   is set; ignored otherwise.
+    """
+
+    def __init__(
+        self,
+        team_sets: List[TeamSet],
+        weights: List[float],
+        schedule: Optional[TeamMixSchedule] = None,
+        epoch_ref: Optional[EpochRef] = None,
+    ):
+        # Deliberately skip TeamSet.__init__ (which scans a single directory).
+        # We still need Teambuilder.__init__ for poke-env's team parsing.
+        Teambuilder.__init__(self)
+        if len(team_sets) != len(weights):
+            raise ValueError("team_sets and weights must have equal length")
+        if not team_sets:
+            raise ValueError("WeightedMixedTeamSet requires at least one TeamSet")
+        total = sum(weights)
+        if total <= 0:
+            raise ValueError("Weights must sum to a positive value")
+        self.team_sets = team_sets
+        self.battle_format = team_sets[0].battle_format
+        self._most_recent_team_file = None
+        # Schedule-driven auto-update state.
+        self._schedule: Optional[TeamMixSchedule] = schedule
+        self._epoch_ref: Optional[EpochRef] = epoch_ref
+        self._last_epoch: int = -1
+        if schedule is not None:
+            if epoch_ref is None:
+                raise ValueError("epoch_ref is required when schedule is set")
+            # Validate that the schedule's set names match the provided team sets.
+            sched_names = schedule.set_names
+            if len(sched_names) != len(team_sets):
+                raise ValueError(
+                    f"Schedule has {len(sched_names)} component sets "
+                    f"({sched_names}) but {len(team_sets)} team_sets were provided"
+                )
+            self._apply_schedule_weights()  # sets self.weights + self._last_epoch
+        else:
+            self.weights = [w / total for w in weights]
+        self._log_weights()
+
+    def _log_weights(self) -> None:
+        names = [getattr(ts, "team_file_dir", "?") for ts in self.team_sets]
+        print(
+            "WeightedMixedTeamSet: "
+            + ", ".join(f"{n}={w:.0%}" for n, w in zip(names, self.weights))
+        )
+
+    def _apply_schedule_weights(self) -> None:
+        """Refresh ``self.weights`` from the schedule for ``epoch_ref.epoch``."""
+        assert self._schedule is not None and self._epoch_ref is not None
+        epoch = self._epoch_ref.epoch
+        w_dict = self._schedule.weights_for_epoch(epoch)
+        # Map schedule set names to the positional order of self.team_sets.
+        # (team_sets are constructed in schedule.set_names order, so they align.)
+        raw = [w_dict.get(name, 0.0) for name in self._schedule.set_names]
+        total = sum(raw)
+        if total <= 0:
+            raise ValueError(
+                f"TeamMixSchedule at epoch {epoch} has all-zero weights"
+            )
+        self.weights = [w / total for w in raw]
+        self._last_epoch = epoch
+
+    def set_weights(self, weights: List[float]) -> None:
+        """Manually update the sampling weights (normalized internally)."""
+        total = sum(weights)
+        if total <= 0:
+            raise ValueError("Weights must sum to a positive value")
+        self.weights = [w / total for w in weights]
+        self._log_weights()
+
+    @property
+    def most_recent_team_file(self) -> Optional[str]:
+        return self._most_recent_team_file
+
+    def yield_team(self) -> str:
+        # Lazy schedule refresh: if the shared epoch counter advanced since our
+        # last lookup, recompute weights before drawing. One int comparison per
+        # team draw — negligible cost; weight recompute only on epoch change.
+        if self._schedule is not None and self._epoch_ref is not None:
+            if self._epoch_ref.epoch != self._last_epoch:
+                self._apply_schedule_weights()
+                self._log_weights()
+        idx = random.choices(range(len(self.team_sets)), weights=self.weights)[0]
+        chosen = self.team_sets[idx]
+        team = chosen.yield_team()
+        self._most_recent_team_file = chosen.most_recent_team_file
+        return team
+
+    def block_team(self, packed_team: str) -> bool:
+        return any(ts.block_team(packed_team) for ts in self.team_sets)
+
+
+def parse_team_mix_spec(spec: str) -> List[tuple]:
+    """Parse a team-mix spec string into ``(set_name, weight)`` pairs.
+
+    Format: ``"set_name:weight,set_name:weight,..."``
+    e.g. ``"gl_05_26:0.45,smogon_pass2:0.35,smogon_pass2_selected:0.20"``.
+    Weights need not sum to 1 (normalized by the caller). Whitespace is tolerated.
+
+    Raises:
+        ValueError: on malformed entries, empty names, non-numeric weights, or
+            negative weights.
+    """
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if not parts:
+        raise ValueError(f"Empty team mix spec: {spec!r}")
+    pairs = []
+    for part in parts:
+        if ":" not in part:
+            raise ValueError(
+                f"Invalid team mix entry {part!r} in spec {spec!r}: "
+                f"expected 'set_name:weight'"
+            )
+        name, _, weight_str = part.partition(":")
+        name = name.strip()
+        weight_str = weight_str.strip()
+        if not name:
+            raise ValueError(f"Empty set name in team mix entry {part!r}")
+        try:
+            weight = float(weight_str)
+        except ValueError:
+            raise ValueError(
+                f"Invalid weight {weight_str!r} in team mix entry {part!r}"
+            )
+        if weight < 0:
+            raise ValueError(f"Negative weight in team mix entry {part!r}")
+        pairs.append((name, weight))
+    return pairs
+
+
+def is_team_mix_spec(name: str) -> bool:
+    """Return True if ``name`` looks like a team-mix spec (contains a colon).
+
+    Regular team-set names (e.g. ``gl_05_26``, ``competitive``) never contain
+    colons, so this is a safe discriminator for dispatch.
+    """
+    return ":" in name
+
+
+def get_metamon_team_mix(
+    battle_format: str, spec: str, set_type: Type[TeamSet] = TeamSet
+) -> WeightedMixedTeamSet:
+    """Build a :class:`WeightedMixedTeamSet` from a mix spec string.
+
+    Args:
+        battle_format: Passed through to each underlying TeamSet.
+        spec: Mix spec string (see :func:`parse_team_mix_spec`).
+        set_type: TeamSet subclass to use for each component (default TeamSet).
+    """
+    pairs = parse_team_mix_spec(spec)
+    team_sets = [
+        get_metamon_teams(battle_format, name, set_type) for name, _ in pairs
+    ]
+    weights = [w for _, w in pairs]
+    return WeightedMixedTeamSet(team_sets=team_sets, weights=weights)
+
+
+def get_metamon_team_set_or_mix(
+    battle_format: str, name_or_spec: str, set_type: Type[TeamSet] = TeamSet
+) -> TeamSet:
+    """Resolve a team set by name, or a weighted mix if ``name_or_spec`` is a mix spec.
+
+    Dispatches on :func:`is_team_mix_spec`: a string containing ``":"`` is
+    treated as a mix spec (see :func:`parse_team_mix_spec`); anything else is a
+    plain set name resolved via :func:`get_metamon_teams`.
+    """
+    if is_team_mix_spec(name_or_spec):
+        return get_metamon_team_mix(battle_format, name_or_spec, set_type)
+    return get_metamon_teams(battle_format, name_or_spec, set_type)
+
+
+def get_metamon_team_set_from_schedule(
+    battle_format: str, schedule: TeamMixSchedule, epoch_ref: EpochRef
+) -> WeightedMixedTeamSet:
+    """Build a schedule-aware :class:`WeightedMixedTeamSet`.
+
+    The component TeamSets are loaded in ``schedule.set_names`` order, and the
+    initial weights come from the schedule's epoch-0 entry. The returned team
+    set lazily updates its weights on each ``yield_team()`` call whenever
+    ``epoch_ref.epoch`` advances — no restart needed to shift the mix.
+    """
+    set_names = schedule.set_names
+    team_sets = [get_metamon_teams(battle_format, name) for name in set_names]
+    return WeightedMixedTeamSet(
+        team_sets=team_sets,
+        weights=schedule.initial_weights(),
+        schedule=schedule,
+        epoch_ref=epoch_ref,
+    )
 
 
 def get_metamon_teams(
