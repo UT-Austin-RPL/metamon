@@ -56,6 +56,27 @@ from .sim_process import ShowdownSimProcess, ShowdownSimProcessError, make_sim_p
 from .team_adapter import player_spec
 
 
+def _teamset_from_team_file(team_file: Optional[str]) -> Optional[str]:
+    """Recover the team-set name from a team file path.
+
+    Team files live under ``<cache>/teams/<teamset>/<format>/team_*`` (see
+    :class:`metamon.env.wrappers.TeamSet`). ``WeightedMixedTeamSet`` points
+    ``most_recent_team_file`` at the *chosen component's* file, so this returns
+    the concrete component drawn (e.g. ``gl_05_26``), not the schedule marker.
+    Returns ``None`` when the path is missing or has no ``teams`` ancestor
+    (random formats, custom layouts) so callers can omit the teamset token.
+    """
+    if not team_file:
+        return None
+    parts = team_file.replace("\\", "/").split("/")
+    for idx, part in enumerate(parts):
+        if part == "teams" and idx + 1 < len(parts):
+            candidate = parts[idx + 1]
+            if candidate and candidate != "teams":
+                return candidate
+    return None
+
+
 class VectorizedShowdownEnv(gym.Env):
     """N-lane Showdown env with a batched in-the-loop NN opponent."""
 
@@ -787,11 +808,21 @@ class VectorizedShowdownEnv(gym.Env):
         battle_id = "".join(str(random.randint(0, 9)) for _ in range(10))
         timestamp = datetime.now().strftime("%m-%d-%Y-%H:%M:%S")
         opponent_name = self.metamon_opponent_name
+        # Concrete team set the learner (player) drew for this lane, recovered
+        # from the team file path (``.../teams/<teamset>/<format>/team_*``).
+        # WeightedMixedTeamSet sets ``most_recent_team_file`` to the chosen
+        # component's file, so this is the actual component drawn, not the
+        # schedule marker. Emitted as a ``_ts-{teamset}`` filename token so the
+        # PSRO-Lite solver can break win rates down per learner team set.
+        # ``None`` (random formats / missing) omits the token for back-compat.
+        learner_teamset = _teamset_from_team_file(self._team_files[i])
+        ts_token = f"_ts-{learner_teamset}" if learner_teamset else ""
 
         if self.save_trajectories_to is not None:
             filename = (
                 f"metamon-{self.metamon_battle_format}-{battle_id}_Unrated_"
-                f"{self.player_username}_vs_{opponent_name}_{timestamp}_{result}.json.lz4"
+                f"{self.player_username}_vs_{opponent_name}_{timestamp}"
+                f"{ts_token}_{result}.json.lz4"
             )
             output_json = {
                 "states": [s.to_dict() for s in self._traj_states[i]],

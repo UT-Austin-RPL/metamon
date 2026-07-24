@@ -1862,7 +1862,7 @@ class MetamonFIFODataset(MetamonAMAGODataset):
             if parsed is None:
                 file_weights[i] = uniform
                 continue
-            opp_label, _result = parsed
+            opp_label, _teamset, _result = parsed
             agent = match_agent_name(opp_label, agent_names)
             if agent is None:
                 file_weights[i] = uniform
@@ -2175,6 +2175,17 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
             wr = d.get("win_rate")
             log_dict[f"{name}/win_rate"] = wr if wr is not None else 0.0
             log_dict[f"{name}/weight"] = d.get("weight", 0.0)
+            # Per learner-teamset win-rate curves (``psro/<agent>/<teamset>/...``).
+            # Diagnostic only; the solver weights use the overall aggregate. The
+            # teamset is the concrete set the learner drew for each battle
+            # (recorded in the trajectory filename by the collector);
+            # ``_unknown`` groups pre-token / random-format files.
+            for ts_name, ts_d in (d.get("per_teamset") or {}).items():
+                log_dict[f"{name}/{ts_name}/n"] = ts_d.get("n", 0)
+                ts_wr = ts_d.get("win_rate")
+                log_dict[f"{name}/{ts_name}/win_rate"] = (
+                    ts_wr if ts_wr is not None else 0.0
+                )
         log_dict["weight_entropy"] = diag.get("_weight_entropy", 0.0)
         log_dict["sidecar_write_ok"] = int(
             bool(diag.get("_sidecar_write_ok", False))

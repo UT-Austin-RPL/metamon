@@ -32,28 +32,55 @@ from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig
 # ---------------------------------------------------------------------------
 
 
-def _make_filename(fmt, opp_label, result, player="MMVecSD-12345678", bid="1234567890"):
+def _make_filename(
+    fmt, opp_label, result, player="MMVecSD-12345678", bid="1234567890", teamset=None
+):
+    ts_token = f"_ts-{teamset}" if teamset else ""
     return (
         f"metamon-{fmt}-{bid}_Unrated_{player}_vs_{opp_label}_"
-        f"01-02-2025-03:04:05_{result}.json.lz4"
+        f"01-02-2025-03:04:05{ts_token}_{result}.json.lz4"
     )
 
 
 def test_parse_trajectory_filename_basic():
     fn = _make_filename("gen1ou", "TaurosV0-ckpt40-gl_05_26", "WIN")
-    assert parse_trajectory_filename(fn) == ("TaurosV0-ckpt40-gl_05_26", "WIN")
+    assert parse_trajectory_filename(fn) == ("TaurosV0-ckpt40-gl_05_26", None, "WIN")
 
 
 def test_parse_trajectory_filename_loss():
     fn = _make_filename("gen1ou", "TaurosV0", "LOSS")
-    assert parse_trajectory_filename(fn) == ("TaurosV0", "LOSS")
+    assert parse_trajectory_filename(fn) == ("TaurosV0", None, "LOSS")
 
 
 def test_parse_trajectory_filename_underscore_teamset():
     """Team sets like ``gl_05_26`` contain underscores — the regex must not split
     on them (it anchors on the fixed-shape timestamp)."""
     fn = _make_filename("gen1ou", "SomeAgent-ckpt5-t2.0-gl_05_26", "WIN")
-    assert parse_trajectory_filename(fn) == ("SomeAgent-ckpt5-t2.0-gl_05_26", "WIN")
+    assert parse_trajectory_filename(fn) == ("SomeAgent-ckpt5-t2.0-gl_05_26", None, "WIN")
+
+
+def test_parse_trajectory_filename_teamset_token():
+    """``_ts-{teamset}`` records the concrete learner team set drawn."""
+    fn = _make_filename(
+        "gen1ou", "TaurosV0-1-ckpt54-t1.25-@schedule", "WIN", teamset="gl_05_26"
+    )
+    assert parse_trajectory_filename(fn) == (
+        "TaurosV0-1-ckpt54-t1.25-@schedule",
+        "gl_05_26",
+        "WIN",
+    )
+
+
+def test_parse_trajectory_filename_teamset_underscore():
+    fn = _make_filename(
+        "gen1ou", "Alakazam-ckpt4-t1.5-@schedule", "LOSS",
+        teamset="smogon_pass2_selected",
+    )
+    assert parse_trajectory_filename(fn) == (
+        "Alakazam-ckpt4-t1.5-@schedule",
+        "smogon_pass2_selected",
+        "LOSS",
+    )
 
 
 def test_parse_trajectory_filename_non_metamon_returns_none():
@@ -66,7 +93,7 @@ def test_parse_trajectory_filename_json_no_lz4():
         f"metamon-gen1ou-1234567890_Unrated_MMVecSD-1_vs_OppA_"
         f"01-02-2025-03:04:05_WIN.json"
     )
-    assert parse_trajectory_filename(fn) == ("OppA", "WIN")
+    assert parse_trajectory_filename(fn) == ("OppA", None, "WIN")
 
 
 def test_match_agent_name_exact():
@@ -278,6 +305,58 @@ def test_diagnostics_report_counts_and_winrates():
         )
     assert diag["AgentA"]["n"] == 100
     assert diag["AgentA"]["win_rate"] == pytest.approx(0.3)
+    # No _ts- token in these files → one ``_unknown`` bucket matching the total.
+    assert diag["AgentA"]["per_teamset"] == {
+        "_unknown": {"n": 100, "win_rate": pytest.approx(0.3)}
+    }
+
+
+def test_diagnostics_per_teamset_breakdown():
+    """``_ts-{teamset}`` filenames split win rates per learner team set."""
+    agents = ["AgentA"]
+    with tempfile.TemporaryDirectory() as buf:
+        fmt_dir = os.path.join(buf, "gen1ou")
+        os.makedirs(fmt_dir)
+        # 20 W / 80 L vs AgentA on gl_05_26; 60 W / 40 L on smogon_pass2_selected;
+        # plus one old untagged file → _unknown bucket.
+        for _ in range(20):
+            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "WIN", teamset="gl_05_26",
+                                bid="".join(random.choices("0123456789", k=10)))
+            open(os.path.join(fmt_dir, fn), "wb").close()
+        for _ in range(80):
+            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "LOSS", teamset="gl_05_26",
+                                bid="".join(random.choices("0123456789", k=10)))
+            open(os.path.join(fmt_dir, fn), "wb").close()
+        for _ in range(60):
+            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "WIN",
+                                teamset="smogon_pass2_selected",
+                                bid="".join(random.choices("0123456789", k=10)))
+            open(os.path.join(fmt_dir, fn), "wb").close()
+        for _ in range(40):
+            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "LOSS",
+                                teamset="smogon_pass2_selected",
+                                bid="".join(random.choices("0123456789", k=10)))
+            open(os.path.join(fmt_dir, fn), "wb").close()
+        open(os.path.join(fmt_dir, _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "WIN")), "wb").close()
+        _, diag = compute_prioritized_weights(
+            buffer_dir=buf,
+            battle_format="gen1ou",
+            agent_names=agents,
+            window=0,
+            min_games=20,
+            ema=0.0,
+        )
+    ag = diag["AgentA"]
+    # Overall aggregates across all teamsets (incl. the 1 unknown WIN).
+    assert ag["n"] == 201
+    assert ag["win_rate"] == pytest.approx(81 / 201)
+    pts = ag["per_teamset"]
+    assert pts["gl_05_26"]["n"] == 100
+    assert pts["gl_05_26"]["win_rate"] == pytest.approx(0.2)
+    assert pts["smogon_pass2_selected"]["n"] == 100
+    assert pts["smogon_pass2_selected"]["win_rate"] == pytest.approx(0.6)
+    assert pts["_unknown"]["n"] == 1
+    assert pts["_unknown"]["win_rate"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------

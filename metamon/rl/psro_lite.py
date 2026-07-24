@@ -32,25 +32,39 @@ from typing import Any, Dict, List, Optional, Tuple
 # itself contain ``-`` and ``_``, e.g. ``TaurosV0-ckpt40-t2.0-gl_05_26``) and
 # ``{ts}`` is ``MM-DD-YYYY-HH:MM:SS``. The timestamp's fixed shape lets a
 # non-greedy capture of the opponent token terminate unambiguously.
+#
+# An optional ``_ts-{teamset}`` token may appear between the timestamp and the
+# result; it records the concrete team set the *learner* (player) drew for that
+# battle (e.g. ``gl_05_26``, ``smogon_pass2_selected``). It is emitted by
+# ``VectorizedShowdownEnv._save_lane_outcome`` when the player's team file is
+# known, so PSRO win rates can be broken down per team set. Old files (and
+# random-team formats) omit it; ``parse_trajectory_filename`` returns ``None``
+# for the teamset in that case.
 _TRAJ_FILENAME_RE = re.compile(
     r"_vs_(?P<opponent>.+?)_"
-    r"(?P<ts>\d{2}-\d{2}-\d{4}-\d{2}:\d{2}:\d{2})_"
+    r"(?P<ts>\d{2}-\d{2}-\d{4}-\d{2}:\d{2}:\d{2})"
+    r"(?:_ts-(?P<teamset>[A-Za-z0-9_.]+))?_"
     r"(?P<result>WIN|LOSS)"
     r"\.json(?:\.lz4)?$"
 )
 
 
-def parse_trajectory_filename(filename: str) -> Optional[Tuple[str, str]]:
-    """Return ``(opponent_short_label, result)`` from a trajectory filename.
+def parse_trajectory_filename(
+    filename: str,
+) -> Optional[Tuple[str, Optional[str], str]]:
+    """Return ``(opponent_short_label, teamset, result)`` from a trajectory filename.
 
-    ``result`` is ``"WIN"`` or ``"LOSS"``. Returns ``None`` if the filename does
-    not match the metamon collection format (e.g. human replay filenames).
+    ``result`` is ``"WIN"`` or ``"LOSS"``. ``teamset`` is the concrete team set
+    the learner drew for that battle (e.g. ``"gl_05_26"``), or ``None`` when the
+    filename carries no ``_ts-{teamset}`` token (old files, random formats).
+    Returns ``None`` entirely if the filename does not match the metamon
+    collection format (e.g. human replay filenames).
     """
     base = os.path.basename(filename)
     m = _TRAJ_FILENAME_RE.search(base)
     if m is None:
         return None
-    return m.group("opponent"), m.group("result")
+    return m.group("opponent"), m.group("teamset"), m.group("result")
 
 
 def match_agent_name(short_label: str, agent_names: List[str]) -> Optional[str]:
@@ -193,15 +207,19 @@ def compute_prioritized_weights(
     fmt_dir = os.path.join(os.path.abspath(buffer_dir), battle_format)
     files = _scan_recent_files(fmt_dir, window)
 
-    # Aggregate per-agent counts / wins.
+    # Aggregate per-agent counts / wins (overall + per learner team set).
     n_games: Dict[str, int] = {name: 0 for name in agent_names}
     wins: Dict[str, int] = {name: 0 for name in agent_names}
+    # per_teamset[agent][teamset] = [n, wins] — teamset None buckets as "_unknown".
+    per_teamset: Dict[str, Dict[str, List[int]]] = {
+        name: {} for name in agent_names
+    }
     unmatched = 0
     for _, path in files:
         parsed = parse_trajectory_filename(path)
         if parsed is None:
             continue
-        opp_label, result = parsed
+        opp_label, teamset, result = parsed
         agent = match_agent_name(opp_label, agent_names)
         if agent is None:
             unmatched += 1
@@ -209,6 +227,11 @@ def compute_prioritized_weights(
         n_games[agent] += 1
         if result == "WIN":
             wins[agent] += 1
+        ts_key = teamset if teamset is not None else "_unknown"
+        bucket = per_teamset[agent].setdefault(ts_key, [0, 0])
+        bucket[0] += 1
+        if result == "WIN":
+            bucket[1] += 1
 
     # Raw per-agent weights via the confidence-weighted prioritized transform.
     # ``min_games`` is now a soft concentration parameter (k), not a hard gate:
@@ -270,11 +293,21 @@ def compute_prioritized_weights(
             win_rate = wins[name] / n_o
         else:
             win_rate = None
+        # Per learner-teamset win rates — diagnostic only (the solver weights
+        # use the overall aggregate above). ``_unknown`` groups files written
+        # before the ``_ts-`` filename token existed (or random-team formats).
+        ts_diag: Dict[str, Dict[str, Any]] = {}
+        for ts_key, (ts_n, ts_w) in per_teamset[name].items():
+            ts_diag[ts_key] = {
+                "n": ts_n,
+                "win_rate": (ts_w / ts_n) if ts_n > 0 else None,
+            }
         diag[name] = {
             "n": n_o,
             "win_rate": win_rate,
             "raw_weight": raw[name],
             "weight": weights[name],
+            "per_teamset": ts_diag,
         }
     if unmatched:
         diag["_unmatched_files"] = unmatched  # type: ignore[assignment]
