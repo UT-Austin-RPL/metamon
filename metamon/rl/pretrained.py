@@ -1553,6 +1553,55 @@ class MiniOnlinePsroV1_3(LocalFinetunedModel):
         return super().get_path_to_checkpoint(checkpoint)
 
 
+MINI_ONLINE_PSRO_V1_4_SAVE_DIR = "/home/eddie/metamon_runs/mini_online_psro_v1.4"
+
+
+@pretrained_model()
+class MiniOnlinePsroV1_4(LocalFinetunedModel):
+    """PSRO-Lite continuation run ``mini_online_psro_v1.4`` from ``metamon.rl.online_rl``.
+
+    v1.4 is a clean break from v1.3: it bootstraps policy WEIGHTS from
+    ``mini_online_psro_v1.3`` epoch 1800 via ``--prev_run_dir`` but starts a
+    FRESH training state (optimizer / scheduler / PopArt / RNG reset, epoch
+    counter at 0) and trains under the gen1ou maintenance schedule
+    (``gen1ou_competitive_maintenance_v1.4.yaml``; 15/20/65 gl/pass2/selected
+    from epoch 0). Same from-scratch ``V2AGroupedV2DataAblation`` architecture
+    as ``SmallG1OnlineV0``; ``base_model`` only supplies architecture /
+    spaces / tokenizer / reward config — weights come from this run's own
+    checkpoints.
+
+    Checkpoints live under
+    ``{save_dir}/mini_online_psro_v1.4/ckpts/policy_weights/policy_epoch_{N}.pt``
+    (saved every 10 epochs). Pass ``checkpoint=N`` for a specific epoch, or
+    ``checkpoint=-1`` (``LATEST_CHECKPOINT``) for the learner's rolling
+    ``ckpts/latest/policy.pt`` (the same file the validator reads each epoch).
+
+    ``default_checkpoint`` is pinned to a frozen named checkpoint (bump it as
+    the run advances) so evaluations default to a stable snapshot rather than
+    the learner's rolling ``latest/policy.pt``. Pass ``checkpoint=-1``
+    (``LATEST_CHECKPOINT``) explicitly to opt into hot-loading the live
+    ``latest/policy.pt`` (the same file the validator reads each epoch).
+    For PSRO self-play pool use, specify explicit checkpoints in the pool YAML
+    (the ``checkpoints`` list is parsed at pool-load time).
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2DataAblation,
+            amago_ckpt_dir=MINI_ONLINE_PSRO_V1_4_SAVE_DIR,
+            model_name="mini_online_psro_v1.4",
+            default_checkpoint=740,
+            # Same train gin stack as SmallG1OnlineV0 / online_rl.py.
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
 @pretrained_model()
 class KakunaEnsemble(PretrainedModel):
     """

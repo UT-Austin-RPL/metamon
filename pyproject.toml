@@ -12,7 +12,7 @@ authors = [
 ]
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -23,7 +23,13 @@ classifiers = [
 keywords = ["pokemon", "reinforcement-learning", "machine-learning"]
 dependencies = [
   "gymnasium>=0.26,<=0.29.1",
-  "torch>=2.6",
+  # torch is pinned to a major.minor band that matches the installed
+  # flash-attn prebuild wheel (flash_attn-2.8.3+cu130torch2.13). A loose
+  # "torch>=2.6" lets uv sync bump torch across ABI breaks and silently break
+  # flash-attn for any new process (the running training survives only because
+  # it loaded the old torch before the bump). Keep this <2.14 until a matching
+  # flash-attn wheel for a newer torch is installed.
+  "torch>=2.13,<2.14",
   "numpy",
   "gin-config",
   "wandb",
@@ -37,6 +43,12 @@ dependencies = [
   "ratarmountcore",
   "poke-env @ git+https://github.com/UT-Austin-RPL/poke-env.git",
   "amago @ git+https://github.com/UT-Austin-RPL/amago@v3.4.0",
+  # flash-attn: amago's transformer policy requires FlashAttention 2, but
+  # flash-attn ships source-only on PyPI (a 30+ min CUDA build). We pin a
+  # prebuilt wheel matched to the pinned torch above (2.8.3+cu130torch2.13).
+  # A bare `uv pip install` of the wheel gets pruned by the next `uv sync`,
+  # so it must be declared here as a direct URL dependency to survive syncs.
+  "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3+cu130torch2.13-cp312-cp312-linux_x86_64.whl",
 ]
 
 [project.urls]
