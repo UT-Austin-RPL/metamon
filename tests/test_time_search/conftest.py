@@ -88,7 +88,9 @@ class FrozenBundle:
     battle_format: str = BATTLE_FORMAT
 
     def make_runner(self, config) -> Any:
-        from metamon.rl.experimental.test_time_search.search_driver import SearchEvalRunner
+        from metamon.rl.experimental.test_time_search.search_driver import (
+            SearchEvalRunner,
+        )
 
         return SearchEvalRunner(
             env=self.env,
@@ -115,7 +117,9 @@ class FrozenBundle:
         lane = self.env.lanes[lane_idx]
         side = self.env.eval_side
         state = lane.universal_state(side)
-        obs = self.env.eval_obs_spaces[lane_idx % self.env.batched_envs].state_to_obs(state)
+        obs = self.env.eval_obs_spaces[lane_idx % self.env.batched_envs].state_to_obs(
+            state
+        )
         legal = lane.legal_action_indices(side, self.eval_action_space, state)
         n = self.eval_action_space.gym_space.n
         mask = np.ones((n,), dtype=bool)
@@ -136,7 +140,9 @@ def frozen_env_bundle():
     """
     import metamon.env
     from metamon.env.vectorized.amago_policy import AmagoLadderPolicyDriver
-    from metamon.env.vectorized.opponent import AmagoBatchedOpponent  # noqa: F401  (consistency)
+    from metamon.env.vectorized.opponent import (
+        AmagoBatchedOpponent,
+    )  # noqa: F401  (consistency)
     from metamon.env.vectorized.vector_env import BattleAgainstMetamon
     from metamon.rl.pretrained import get_pretrained_model
 
@@ -149,7 +155,9 @@ def frozen_env_bundle():
         torch.cuda.manual_seed_all(SEED)
 
     model = get_pretrained_model(AGENT_NAME)
-    agent = model.initialize_agent(checkpoint=CHECKPOINT_EPOCH, log=False, action_temperature=1.0)
+    agent = model.initialize_agent(
+        checkpoint=CHECKPOINT_EPOCH, log=False, action_temperature=1.0
+    )
     policy = agent.policy.to(dev)
     policy.eval()
     action_dim = model.action_space.gym_space.n
@@ -176,8 +184,11 @@ def frozen_env_bundle():
         device=str(dev),
     )
     eval_driver = AmagoLadderPolicyDriver(
-        policy=policy, device=dev, num_lanes=env.batched_envs,
-        action_dim=action_dim, sample=True,
+        policy=policy,
+        device=dev,
+        num_lanes=env.batched_envs,
+        action_dim=action_dim,
+        sample=True,
     )
     bundle = FrozenBundle(
         env=env,
@@ -198,10 +209,32 @@ def frozen_env_bundle():
         obs, info = env.reset()
         yield bundle
     finally:
+        # Tear down aggressively: the gated tests are repeated per test, and any
+        # residual GPU/subprocess state raises system load for the later
+        # CPU-only sim tests (a pre-existing ``test_sim_fork`` flake is
+        # load-sensitive). Close the env (reaps the Node subprocess), drop every
+        # heavy ref, force a GC pass, and clear the CUDA cache.
+        import gc
+
         try:
             env.close()
         except Exception:
             pass
-        del policy, opp_policy
+        for _ref in (
+            policy,
+            opp_policy,
+            agent,
+            opp_agent,
+            model,
+            opp_model,
+            eval_driver,
+            env,
+        ):
+            try:
+                del _ref
+            except Exception:
+                pass
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()

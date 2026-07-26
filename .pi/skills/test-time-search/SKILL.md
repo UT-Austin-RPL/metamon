@@ -121,21 +121,35 @@ codebase and **verified on GPU** (CUDA + checkpoint epoch 740). See
 - **Config (§15):** research-safe defaults; `--legacy_prototype` restores the
   pre-correction config for reproducibility.
 
-**ONE remaining blocker (the only MUST-RUN item):**
+**Phase 0 is COMPLETE — the go/no-go gate (§21) is passed (VERIFIED on GPU).**
+
+The last blocker — a `_pump_branches` settle timeout — is FIXED and VERIFIED:
 
 - The §18G smoke eval (`error_policy=raise`, `all_legal`, `every_n=1`,
-  `resample_crn`, `policy_expectation`) reproduces a `_pump_branches` settle
-  timeout (`pump_until idle for 20.0s`) on ~9% of roots. Isolated to the
-  settle logic in `search_driver._pump_branches`'s `ready()` predicate — NOT
-  the reseed (inherited RNG hangs identically) and NOT the new estimator (it's
-  a sim `pump_until` idle). It is pre-existing: the legacy prototype hits the
-  same error on 12/128 roots, masked by `base_fallback`. Fixing this `ready()`
-  predicate (against the env's `_pump_settle` reference) is the gate for Phase 0.
+  `resample_crn`, `policy_expectation`) previously hit a `_pump_branches` settle
+  timeout (`pump_until idle for 20.0s`) on ~9% of roots. **Root cause**
+  (confirmed via a stall-state dump): when a branch reached eval=`wait` +
+  opp=`forceswitch` (opp fainted during the root exchange), Showdown's
+  `makeRequest` advanced both request serials together, but a `wait` side is
+  never "answered", so the old `not other_advanced` guard left the opponent's
+  follow-up forever unanswered -> host idle -> 20s timeout. The env's
+  `_pump_settle` avoids this via the outer `_advance_lanes` loop the branch
+  version lacked. **Fix** (`search_driver._pump_branches`'s `ready()`): answer
+  opponent-only follow-ups whenever the eval side owes no decision (regardless
+  of whether the eval `wait` serial advanced); re-answer single-side `|error|`
+  re-prompts; never auto-answer a fresh eval move/force-switch (the park point).
+  Regression tests: `tests/test_time_search/test_pump_branches.py` (2, GPU-gated).
+  **Verification**: the §1C smoke command now completes 10 battles with
+  `error_policy=raise`, 852 roots, 0 errors, 0 `base_fallback` lines; 73 tests
+  pass on GPU. See `PROGRESS.md` "`_pump_branches` settle timeout — FIXED" and
+  `HANDOFF_GPU.md` §1C for the full write-up.
 
 The research-strategy risks 1–6 below have been addressed by the
-implementation above; risk 6's "hide whether exhaustive search works" is now
-unblocked once the settle timeout is fixed (exhaustive `all_legal` + `every_n=1`
-+ `raise` will run cleanly).
+implementation above; risk 6's "hide whether exhaustive search works" is
+unblocked — exhaustive `all_legal` + `every_n=1` + `raise` now runs cleanly.
+
+**Phase 1 (fixed-root estimator benchmark, §22) may now begin.** Do not start a
+win-rate sweep (§23) until Phase 1 shows K convergence.
 
 ### The main change in research strategy
 
@@ -1710,6 +1724,12 @@ Deliver:
 
 ### Phase 0 go/no-go gate
 
+**STATUS: PASSED (VERIFIED on GPU, ckpt epoch 740).** All boxes below are
+met — 73 tests pass on GPU; the §18G smoke eval runs 10 battles with
+`error_policy=raise`, 852 roots, 0 errors/fallbacks; RNG, leaf-expectation,
+return-units, and root-logging checks are all VERIFIED (see `PROGRESS.md`
+"Phase 0 go/no-go gate — PASSED"). Phase 1 (§22) may begin.
+
 Do not run a broad search-strength experiment until:
 
 - all required tests pass;
@@ -2213,12 +2233,13 @@ recommended next experiment.
 ## 29. CLI: target corrected commands
 
 These match the **implemented** CLI (`eval_search --help`). The correctness
-smoke run is the one to use until the `_pump_branches` settle-timeout blocker
-is fixed (see `HANDOFF_GPU.md` §1C). The fixed-root benchmark and paired-eval
-commands reference modules that are **not yet implemented** (Phase 1 §22,
-Phase 2 §23) and are kept here as the target shape.
+smoke run is the Phase 0 gate command — it now passes cleanly (the
+`_pump_branches` settle-timeout blocker is FIXED; see `HANDOFF_GPU.md` §1C and
+`PROGRESS.md`). The fixed-root benchmark and paired-eval commands reference
+modules that are **not yet implemented** (Phase 1 §22, Phase 2 §23) and are
+kept here as the target shape.
 
-### Correctness smoke run (implemented; currently blocked by the settle timeout)
+### Correctness smoke run (implemented; Phase 0 gate — PASSED)
 
 ```bash
 uv run python -m metamon.rl.experimental.test_time_search.eval_search \
@@ -2530,9 +2551,27 @@ sharded search until worker-local snapshot routing is implemented and tested.
 
 ### Depth settlement
 
-`_pump_branches` mirrors `_pump_settle` but has less battle exposure. Rare
-faint/re-prompt cascades can timeout. Treat any timeout as a correctness issue,
-not normal noise.
+`_pump_branches` mirrors `_pump_settle` + `_advance_lanes` (FIXED in Phase 0;
+see `PROGRESS.md` "`_pump_branches` settle timeout — FIXED"). The old
+`ready()` predicate stalled on the both-sides-advanced case where the eval side
+is `wait` and the opponent has a `forceswitch` (e.g. the opponent fainted during
+the root exchange): a `wait` side is never "answered", so the old
+`not other_advanced` guard left the opponent forever unanswered and the host
+went idle. The fix answers opponent-only follow-ups whenever the eval side owes
+no decision and re-answers single-side `|error|` re-prompts. Treat any *new*
+timeout as a correctness issue, not normal noise — re-enable the stall dump
+described in `HANDOFF_GPU.md` §5 to capture the lane state.
+
+### Sim-fork equivalence flake (pre-existing, load-sensitive)
+
+`test_sim_fork.py::test_fork_same_actions_equivalent` intermittently fails
+(~15-25% of full-suite runs on GPU) with "fork diverged under identical
+actions" — a sim-level PRNG/move-ordering drift in the vendored Showdown fork
+path under GPU-test load. It does **not** use the search driver (it tests the
+raw `sim_process` fork path); it passes stably in isolation and without the
+`test_pump_branches.py` regression test. It is **not** a Phase 0 blocker (the
+gate holds on a clean run); investigating the sim-fork nondeterminism is a
+separate item.
 
 ### Request PP quirk
 

@@ -1057,13 +1057,41 @@ class SearchEvalRunner:
         return actions
 
     def _pump_branches(self, br: _Branches) -> None:
-        """Pump until every active branch parks at its next eval-side decision or ends."""
+        """Pump until every active branch parks at its next eval-side decision or ends.
+
+        Settles the root/rollout turn by auto-answering the same follow-ups the
+        live env's ``_pump_settle`` + ``_advance_lanes`` resolve:
+
+        * **opponent-only follow-ups** -- e.g. the opponent fainted and must
+          switch while the eval side waits. This includes the both-sides-advanced
+          case where the eval side is ``wait``: Showdown's ``makeRequest`` advances
+          both serials together, but a ``wait`` side is never "answered", so the
+          old ``not other_advanced`` guard left ``answered[eval]`` stuck below the
+          eval serial and the opponent's follow-up was never answered -> the host
+          went idle and ``pump_until`` timed out (skill §35).
+        * **single-side ``|error|`` re-prompts** -- e.g. a revealed trap that
+          invalidates a switch, re-answered with a uniform-legal rollout action
+          (mirrors ``_pump_settle``'s reprompt + error-retry cases).
+
+        A fresh eval-side move/force-switch decision is *never* auto-answered:
+        that is where the rollout parks (the leaf for depth 0, the next rollout
+        step for depth>0). The branch version also re-answers an eval
+        ``|error|``-with-no-new-request stall because, unlike the live env, there
+        is no outer ``step`` loop to re-apply the committed eval action.
+        """
         proc = self.env.proc
         eval_side = self.env.eval_side
         opp_side = self.env.opp_side
+        answerable = ("move", "forceswitch", "teampreview")
         answered = {
             i: {s: br.lanes[i].request_serial[s] for s in (eval_side, opp_side)}
             for i in range(len(br.lanes))
+        }
+        # Tracks the request serial we already re-answered for an |error| that
+        # arrived *without* a fresh request (serial unchanged), so we repair it
+        # at most once per serial (mirrors _pump_settle's err_handled).
+        err_handled = {
+            i: {s: -1 for s in (eval_side, opp_side)} for i in range(len(br.lanes))
         }
 
         def ready() -> bool:
@@ -1073,24 +1101,50 @@ class SearchEvalRunner:
                 lane = br.lanes[i]
                 if lane.ended:
                     continue
-                parked = lane.decision_ready() and (
-                    lane.needs_agent_decision(eval_side)
-                    or not lane.needs_agent_decision(opp_side)
-                )
-                if parked:
+                eval_needs = lane.needs_agent_decision(eval_side)
+                opp_needs = lane.needs_agent_decision(opp_side)
+                # Park at the eval side's next decision (the leaf / next rollout
+                # step), or once the lane is fully settled (neither side owes a
+                # decision). Requires decision_ready so the cycle is synchronized.
+                if lane.decision_ready() and (eval_needs or not opp_needs):
                     continue
-                done = False
-                for s in (eval_side, opp_side):
-                    other = opp_side if s == eval_side else eval_side
-                    advanced = lane.request_serial[s] > answered[i][s]
-                    other_advanced = lane.request_serial[other] > answered[i][other]
+                # Otherwise auto-resolve follow-ups so the turn can advance.
+                for s in (opp_side, eval_side):
+                    adv = lane.request_serial[s] > answered[i][s]
+                    choose = False
                     if (
-                        advanced
-                        and not other_advanced
+                        adv
+                        and lane.reprompt_pending[s]
                         and lane._side_ready(s)
-                        and lane.request_kind(s)
-                        in ("move", "forceswitch", "teampreview")
+                        and lane.request_kind(s) in answerable
                     ):
+                        # |error| re-prompt whose fresh request has arrived.
+                        # Re-answer the opponent; a fresh eval re-prompt is the
+                        # eval side's next decision -> park (do not re-answer).
+                        choose = s == opp_side
+                    elif (
+                        not adv
+                        and lane.error[s]
+                        and err_handled[i][s] != lane.request_serial[s]
+                    ):
+                        # |error| with no new request yet: the host is blocked
+                        # waiting for a valid choice -> re-answer to unblock.
+                        choose = True
+                        err_handled[i][s] = lane.request_serial[s]
+                    elif (
+                        adv
+                        and not lane.reprompt_pending[s]
+                        and lane._side_ready(s)
+                        and lane.request_kind(s) in answerable
+                        and s == opp_side
+                        and not eval_needs
+                    ):
+                        # Opponent-only follow-up while the eval side waits
+                        # (e.g. opp fainted -> forceswitch). Answer it regardless
+                        # of whether the eval side's ``wait`` serial advanced --
+                        # the old ``not other_advanced`` guard stalled here.
+                        choose = True
+                    if choose:
                         if s == opp_side:
                             a = self._sample_single(
                                 br, i, opp_side, self.opponent_policy, is_eval=False
@@ -1107,6 +1161,12 @@ class SearchEvalRunner:
                             )
                         entries.append((lane.lane_id, s, ch))
                         answered[i][s] = lane.request_serial[s]
+                        lane.reprompt_pending[s] = False
+                # Re-check park: an eval re-prompt (case above) may have made the
+                # lane decision_ready with eval owing a decision.
+                if lane.decision_ready() and (eval_needs or not opp_needs):
+                    continue
+                done = False
             if entries:
                 proc.choose_batch(entries)
             return done
