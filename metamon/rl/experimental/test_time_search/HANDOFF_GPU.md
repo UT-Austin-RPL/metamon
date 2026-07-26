@@ -149,11 +149,18 @@ convergence.
 
 ## 4. What is explicitly NOT in this handoff (later phases)
 
-- Phase 1 fixed-root benchmark (`benchmark_roots.py`, `root_dataset.py`) — skill §22.
+- ~~Phase 1 fixed-root benchmark (`benchmark_roots.py`, `root_dataset.py`) —
+  skill §22.~~ **NOW IMPLEMENTED + PILOTED** (see `PROGRESS.md` "Phase 1").
+  `search_driver.py` gained `_rollout_core` (extracted from `search_root`, no
+  behavior change) + `estimate_root` (per-action + per-branch Q, no
+  improvement/selection); `benchmark_roots.py` derives every lower-K from one
+  high-K run per (root, depth) via prefix/block averaging (per-`k` seed is
+  K-independent). 99 tests pass on GPU (73 Phase 0 + 25 CPU + 1 GPU benchmark
+  smoke). A K_ref=256 pilot runs the §22 go/no-go gate.
 - Phase 2 paired/mirrored evaluation (`paired_eval.py`) — skill §23.
 - Opponent-model matrix, compute scaling, selective search, belief search — §24+.
 
-Do not start these until the gate above is passed.
+Do not start Phase 2 (§23) until the Phase 1 gate (§22) shows K convergence.
 
 ## 5. If a gated test regresses
 

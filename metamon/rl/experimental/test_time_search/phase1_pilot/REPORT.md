@@ -1,0 +1,246 @@
+# Test-Time Search — Phase 1 Fixed-Root Estimator Benchmark
+
+- roots: 40
+- K_ref: 256
+- derived K: [4, 16, 64]
+- depths: [0, 1]
+- chance mode: resample_crn
+- verdict: **PASS** (5/5 criteria)
+
+## K-convergence (top-1 agreement with high-K reference)
+
+| leaf | D | K | n | top1_agree | block_top1 | regret_mean | MAE | spearman | se_ratio |
+|---|---|---|---|---|---|---|---|---|---|
+| policy_expectation | 0 | 4 | 40 | 0.725 | 0.777 | 123.3 | 270.8 | 0.838 | 0.991 |
+| policy_expectation | 0 | 16 | 40 | 0.900 | 0.898 | 17.1 | 123.5 | 0.934 | 0.982 |
+| policy_expectation | 0 | 64 | 40 | 1.000 | 0.988 | 0.0 | 50.4 | 0.980 | 0.897 |
+| policy_expectation | 1 | 4 | 40 | 0.525 | 0.666 | 240.1 | 459.3 | 0.711 | 0.994 |
+| policy_expectation | 1 | 16 | 40 | 0.750 | 0.798 | 81.7 | 243.6 | 0.876 | 0.990 |
+| policy_expectation | 1 | 64 | 40 | 0.875 | 0.912 | 11.4 | 96.8 | 0.960 | 0.927 |
+
+Reference self-stability (split-half top-1 agreement):
+- D=0: 1.000 (n=40)
+- D=1: 0.925 (n=40)
+
+## Go/no-go assessment
+
+```json
+{
+  "verdict": "PASS",
+  "passed": 5,
+  "total": 5,
+  "criteria": {
+    "reference_stable_d0": {
+      "value": 1.0,
+      "pass": true
+    },
+    "top1_agreement_rises_with_K_D0": {
+      "values": [
+        [
+          4,
+          0.725
+        ],
+        [
+          16,
+          0.9
+        ],
+        [
+          64,
+          1.0
+        ]
+      ],
+      "monotone": true,
+      "improved": true,
+      "pass": true
+    },
+    "regret_falls_with_K_D0": {
+      "values": [
+        [
+          4,
+          123.25154147082057
+        ],
+        [
+          16,
+          17.107834408721192
+        ],
+        [
+          64,
+          0.0
+        ]
+      ],
+      "pass": true
+    },
+    "se_calibrated_D0": {
+      "pass": true
+    },
+    "configs_present": {
+      "pass": true
+    }
+  },
+  "note": "PASS = the rollout estimator converges in the expected direction as K grows (skill \u00a722 gate). A non-PASS means stop and debug the estimator, not that search is useless."
+}
+```
+
+## Aggregate per-cell metrics
+
+```json
+{
+  "policy_expectation:D0:K4": {
+    "n": 40,
+    "top1_agree": 0.725,
+    "block_top1_agree": 0.77734375,
+    "regret_mean": 123.25154147082057,
+    "regret_p90": 420.9240974272528,
+    "mae_mean": 270.8229738235771,
+    "spearman_mean": 0.8375252549467117,
+    "kendall_mean": 0.7551587301587301,
+    "se_ratio_mean": 0.9909478918754988,
+    "theo_se_mean": 332.7814896809292,
+    "block_std_mean": 328.4122038652751,
+    "by_entropy": {
+      "low": 0.7567567567567568,
+      "medium": 0.3333333333333333
+    },
+    "by_top2_gap": {
+      "large": 0.78125,
+      "small": 1.0,
+      "medium": 0.42857142857142855
+    },
+    "by_phase": {
+      "early": 0.725
+    }
+  },
+  "policy_expectation:D0:K16": {
+    "n": 40,
+    "top1_agree": 0.9,
+    "block_top1_agree": 0.8984375,
+    "regret_mean": 17.107834408721192,
+    "regret_p90": 6.488924769060487,
+    "mae_mean": 123.46013633504549,
+    "spearman_mean": 0.9341323978038545,
+    "kendall_mean": 0.8753968253968255,
+    "se_ratio_mean": 0.9823217973511924,
+    "theo_se_mean": 166.3907448404646,
+    "block_std_mean": 160.215634855511,
+    "by_entropy": {
+      "low": 0.918918918918919,
+      "medium": 0.6666666666666666
+    },
+    "by_top2_gap": {
+      "large": 0.9375,
+      "small": 1.0,
+      "medium": 0.7142857142857143
+    },
+    "by_phase": {
+      "early": 0.9
+    }
+  },
+  "policy_expectation:D0:K64": {
+    "n": 40,
+    "top1_agree": 1.0,
+    "block_top1_agree": 0.9875,
+    "regret_mean": 0.0,
+    "regret_p90": 0.0,
+    "mae_mean": 50.415499874674595,
+    "spearman_mean": 0.9798338135052702,
+    "kendall_mean": 0.9450396825396826,
+    "se_ratio_mean": 0.8968560785403594,
+    "theo_se_mean": 83.1953724202323,
+    "block_std_mean": 71.79571735876355,
+    "by_entropy": {
+      "low": 1.0,
+      "medium": 1.0
+    },
+    "by_top2_gap": {
+      "large": 1.0,
+      "small": 1.0,
+      "medium": 1.0
+    },
+    "by_phase": {
+      "early": 1.0
+    }
+  },
+  "policy_expectation:D1:K4": {
+    "n": 40,
+    "top1_agree": 0.525,
+    "block_top1_agree": 0.66640625,
+    "regret_mean": 240.09232627353384,
+    "regret_p90": 649.212617301041,
+    "mae_mean": 459.26276938312895,
+    "spearman_mean": 0.7113408790347288,
+    "kendall_mean": 0.5959126984126983,
+    "se_ratio_mean": 0.993622367633499,
+    "theo_se_mean": 554.8457191677476,
+    "block_std_mean": 552.5164089490164,
+    "by_entropy": {
+      "low": 0.5405405405405406,
+      "medium": 0.3333333333333333
+    },
+    "by_top2_gap": {
+      "large": 0.5,
+      "small": 1.0,
+      "medium": 0.5714285714285714
+    },
+    "by_phase": {
+      "early": 0.525
+    }
+  },
+  "policy_expectation:D1:K16": {
+    "n": 40,
+    "top1_agree": 0.75,
+    "block_top1_agree": 0.7984375,
+    "regret_mean": 81.68931419989376,
+    "regret_p90": 374.22321227714747,
+    "mae_mean": 243.62823792936524,
+    "spearman_mean": 0.875814817258667,
+    "kendall_mean": 0.7850793650793652,
+    "se_ratio_mean": 0.9901476165678101,
+    "theo_se_mean": 277.4228595838738,
+    "block_std_mean": 274.9176437807805,
+    "by_entropy": {
+      "low": 0.7567567567567568,
+      "medium": 0.6666666666666666
+    },
+    "by_top2_gap": {
+      "large": 0.75,
+      "small": 1.0,
+      "medium": 0.7142857142857143
+    },
+    "by_phase": {
+      "early": 0.75
+    }
+  },
+  "policy_expectation:D1:K64": {
+    "n": 40,
+    "top1_agree": 0.875,
+    "block_top1_agree": 0.9125,
+    "regret_mean": 11.362207321498044,
+    "regret_p90": 19.641954185379376,
+    "mae_mean": 96.81701779942595,
+    "spearman_mean": 0.9603100039814606,
+    "kendall_mean": 0.8976190476190476,
+    "se_ratio_mean": 0.9272399045018499,
+    "theo_se_mean": 138.7114297919369,
+    "block_std_mean": 129.00412973861205,
+    "by_entropy": {
+      "low": 0.8648648648648649,
+      "medium": 1.0
+    },
+    "by_top2_gap": {
+      "large": 0.875,
+      "small": 1.0,
+      "medium": 0.8571428571428571
+    },
+    "by_phase": {
+      "early": 0.875
+    }
+  },
+  "_reference_stability": {
+    "split_half_top1_d0": 1.0,
+    "split_half_top1_d1": 0.925,
+    "n_d0": 40,
+    "n_d1": 40
+  },
+  "_n_roots": 40
+}
+``

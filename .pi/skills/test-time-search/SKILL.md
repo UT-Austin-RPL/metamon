@@ -148,8 +148,18 @@ The research-strategy risks 1–6 below have been addressed by the
 implementation above; risk 6's "hide whether exhaustive search works" is
 unblocked — exhaustive `all_legal` + `every_n=1` + `raise` now runs cleanly.
 
-**Phase 1 (fixed-root estimator benchmark, §22) may now begin.** Do not start a
-win-rate sweep (§23) until Phase 1 shows K convergence.
+**Phase 1 (fixed-root estimator benchmark, §22) is IMPLEMENTED and the §22
+go/no-go gate is PASSED on GPU** (ckpt 740; K_ref=256, derived K={4,16,64},
+D={0,1}, 40 roots, ~28.7 min, verdict PASS 5/5). D=0 top-1 agreement with the
+high-K reference rises monotonically 0.725→0.900→1.000 as K grows; regret falls
+123→17→0; SE calibration `se_ratio`≈0.99 (block spread matches `std/sqrt(K)`,
+confirming i.i.d. CRN reseeding); reference split-half stability = 1.000. D=1
+adds variance not information at this scale (0.525→0.875 vs D=0's
+0.725→1.000). See `PROGRESS.md` "Phase 1" for the full table + honest
+limitations (early-phase-only corpus, self-play opponent, 40 roots) and the
+next steps (span phases/mid-late + opponent-model matrix before any win-rate
+sweep). Do not start a win-rate sweep (§23) until Phase 1 spans the §22
+stratification space and the root-critic-only vs D=0/D=1 comparison is in.
 
 ### The main change in research strategy
 
@@ -1291,8 +1301,13 @@ metamon/rl/experimental/test_time_search/
 ├── config.py
 ├── improvement.py
 ├── branch_state.py
-├── search_driver.py
+├── search_driver.py          # search_root + _rollout_core + estimate_root (Phase 1)
 ├── eval_search.py
+├── rng.py                    # Phase 0: deterministic keyed CRN seed bank
+├── root_dataset.py           # Phase 1: fixed-root manifest + stratification features
+├── benchmark_roots.py        # Phase 1: K/depth convergence benchmark + go/no-go
+├── PROGRESS.md
+├── HANDOFF_GPU.md
 └── __init__.py
 ```
 
@@ -1311,7 +1326,9 @@ metamon/env/vectorized/battle_host.js
 metamon/env/vectorized/sim_process.py
 ```
 
-Recommended additional files, subject to repository style:
+Recommended additional files, subject to repository style
+(**all now implemented** — Phase 0 rng/leaf/return/improvement/cleanup tests
++ Phase 1 `root_dataset.py` / `benchmark_roots.py` / `test_root_benchmark.py`):
 
 ```text
 tests/test_time_search/
@@ -1743,6 +1760,19 @@ Do not run a broad search-strength experiment until:
 ---
 
 ## 22. Phase 1: fixed-root estimator benchmark
+
+**STATUS: IMPLEMENTED; §22 go/no-go gate PASSED on GPU** (ckpt 740; K_ref=256,
+derived K={4,16,64}, D={0,1}, 40 roots). `benchmark_roots.py` + `root_dataset.py`
++ `SearchEvalRunner.estimate_root` are built (99 tests pass). The benchmark
+derives every lower-K from one high-K run per (root, depth) via prefix/block
+averaging (the per-`k` branch seed is K-independent — `rng.py`), so the §22
+K-sweep costs ~2 rollouts/root instead of ~10. The pilot's D=0 top-1 agreement
+rises 0.725→0.900→1.000 and SE calibration `se_ratio`≈0.99 (i.i.d. confirmed).
+**Remaining before a win-rate sweep (§23):** span the full §22 stratification
+space (the pilot is early-phase-only / 40 roots / self-play opponent), add the
+`root_critic_only` vs D=0/D=1 head-to-head to the gate table, and ideally scale
+toward ~500 roots. See `PROGRESS.md` "Phase 1" for the full results + the
+honest limitations. The spec below is the original plan (kept as the target).
 
 The next scientific question is not yet “does search win more games?” It is:
 
@@ -2270,21 +2300,29 @@ Actual flag names: `--search_ablation` (not `--search_improvement_operator`),
 `--magnet_alpha`, `--legacy_prototype` (restores the pre-correction prototype
 defaults). Run `eval_search --help` for the full list.
 
-### Fixed-root benchmark (NOT YET IMPLEMENTED — Phase 1, §22)
+### Fixed-root benchmark (IMPLEMENTED — Phase 1, §22)
+
+The benchmark runs **in-battle** (no separate manifest required): it drives the
+env with the baseline policy and, at each settled eval-side decision, runs the
+estimator grid (`root_critic_only` + D=0/D=1 at `K_ref`) at the *same* trunk
+state via `SearchEvalRunner.estimate_root`, derives every lower-K from the one
+high-K run by prefix/block averaging (the per-`k` branch seed is K-independent —
+`rng.py`), and writes `root_results.jsonl` + `root_manifest.jsonl` +
+`summary.json` + `run_manifest.json` + `REPORT.md`. Actual flag names:
 
 ```bash
 uv run python -m metamon.rl.experimental.test_time_search.benchmark_roots \
-  --agent MiniOnlinePsroV1_4 \
-  --checkpoint 740 \
-  --root_manifest /path/to/dev_roots.jsonl \
-  --rollouts_per_action 4 16 64 256 \
-  --search_depth 0 1 \
-  --root_candidate_mode all_legal \
-  --search_chance_mode resample_crn \
-  --leaf_value_mode policy_expectation \
-  --search_value_normalization false \
-  --output_dir /path/to/tts_root_benchmark
+  --agent MiniOnlinePsroV1_4 --checkpoint 740 --format gen1ou --team_set competitive \
+  --num_parallel 2 --seed 42 --search_seed 0 \
+  --k_ref 256 --derived_ks 4 16 64 --depths 0 1 \
+  --max_roots 40 --max_battles 40 --output_dir /tmp/tts_phase1_pilot
+#   optional: --include_inherited_rng (future-chance oracle diagnostic, D=0)
+#             --store_branch_matrices (keep per-branch R (A,K); verbose)
 ```
+
+The high-K reference is the full-`K_ref` mean per (root, depth); convergence is
+judged by whether K={4,16,64} prefix/block estimates move toward it (skill §22
+gate). See `PROGRESS.md` "Phase 1" for the pilot result + go/no-go verdict.
 
 ### Paired evaluation (NOT YET IMPLEMENTED — Phase 2, §23)
 
@@ -2565,13 +2603,18 @@ described in `HANDOFF_GPU.md` §5 to capture the lane state.
 ### Sim-fork equivalence flake (pre-existing, load-sensitive)
 
 `test_sim_fork.py::test_fork_same_actions_equivalent` intermittently fails
-(~15-25% of full-suite runs on GPU) with "fork diverged under identical
-actions" — a sim-level PRNG/move-ordering drift in the vendored Showdown fork
-path under GPU-test load. It does **not** use the search driver (it tests the
-raw `sim_process` fork path); it passes stably in isolation and without the
-`test_pump_branches.py` regression test. It is **not** a Phase 0 blocker (the
-gate holds on a clean run); investigating the sim-fork nondeterminism is a
-separate item.
+(~15-25% of full-suite runs on GPU; higher under concurrent GPU load such as a
+background benchmark run) with "fork diverged under identical actions" — a
+sim-level PRNG/move-ordering drift in the vendored Showdown fork path under
+GPU-test load. It does **not** use the search driver (it tests the raw
+`sim_process` fork path); it passes stably in isolation. It is **not** a Phase 0
+or Phase 1 blocker: the full suite is a clean **99 passed** on GPU with no
+concurrent load (73 Phase 0 + 25 CPU Phase 1 + 1 GPU benchmark smoke); a flaked
+run is re-run. The flake is load-sensitive and worsens with each additional
+`frozen_env_bundle` consumer in the suite (`test_pump_branches.py`, then the
+Phase 1 `test_root_benchmark.py` GPU smoke) — but it is the *same* pre-existing
+sim-fork nondeterminism, not a regression from the search/benchmark code.
+Investigating the sim-fork PRNG drift is a separate item.
 
 ### Request PP quirk
 

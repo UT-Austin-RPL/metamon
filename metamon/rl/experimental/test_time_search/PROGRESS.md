@@ -179,6 +179,7 @@ fixed:
 ```
 61 passed, 13 skipped in ~47s   (CPU: the 13 skips are the gated tests)
 73 passed in ~21s               (GPU: the 13 gated tests now pass on CUDA + ckpt)
+99 passed in ~35s               (GPU: after Phase 1 — 73 Phase 0 + 25 CPU + 1 GPU benchmark smoke)
 ```
 
 The `13 skipped` on CPU become `13 passed` on GPU (`test_policy_state_fork.py`
@@ -244,17 +245,133 @@ limitations").
 
 ## DEFERRED (later research phases, not correctness)
 
-- Phase 1 fixed-root benchmark (`benchmark_roots.py`, `root_dataset.py`) — §22.
 - Phase 2 paired/mirrored evaluation (`paired_eval.py`) — §23.
 - Phase 3+ opponent-model matrix, compute scaling, selective search, belief — §24+.
-- `root_critic_only` head-to-head vs D=0/D=1 — a Phase 1 experiment, not a fix.
+- `root_critic_only` head-to-head vs D=0/D=1 — a Phase 1 experiment (now
+  implemented in `benchmark_roots.py`; results below).
+
+## Phase 1: fixed-root estimator benchmark (skill §22) — IMPLEMENTED + PILOTED
+
+The Phase 1 infrastructure is built and a GPU pilot run is complete
+(`benchmark_roots.py`, `root_dataset.py`; ckpt epoch 740). The scientific
+approach:
+
+- **One high-K run per root, derive every lower-K from it.** For each fixed
+  root the estimator runs once at `K_ref` (the reference) for each depth, and
+  the per-branch return matrix `R (A, K_ref)` is captured. Lower-K estimates
+  are derived by prefix/block averaging. This is valid because the per-rollout-
+  index `k` branch seed is **K-independent** (`rng.RootSeedBank` keys on
+  `(root, k)`, not on `K`): the first `k` rollouts of a K=256 run are identical
+  to a K=4 run's 4 rollouts at the same root. So `Q_K'(a)=mean(R[a,:K'])` is
+  exactly what a standalone K' run produces with those chance streams, and
+  non-overlapping blocks of size `K'` give an independent sample of the K'
+  estimator's sampling distribution (block means) — enough for top-action
+  agreement, rank correlation, simple regret, and SE calibration as K grows,
+  without re-running the simulator per K.
+- **Refactor (no behavior change).** `search_driver.search_root`'s validated
+  rollout block was extracted into `_rollout_core` (single copy of the
+  snapshot/fork/settle/leaf/cleanup path, `try/finally` cleanup) plus a public
+  `estimate_root` that returns per-action + per-branch Q (no improvement /
+  selection). `search_root` delegates to `_rollout_core` — the 73 Phase 0 tests
+  still pass unchanged.
+- **Configs per root:** `root_critic_only` (no rollout), D=0 at `K_ref`, D=1 at
+  `K_ref` (optionally `inherited_trunk_rng` D=0 as the future-chance oracle
+  diagnostic). All evaluated at the *same* trunk state (search forks never
+  advance the trunk), so the root is fixed across the grid.
+- **Metrics (skill §22):** top-1 / block-top-1 agreement with the reference,
+  Spearman/Kendall rank correlation, simple regret, MAE, SE calibration
+  (block spread vs `std/sqrt(K')`), reference split-half stability; stratified by
+  entropy / top-2-gap / phase / reference-gap band.
+
+### Pilot result (GPU, K_ref=256, derived K={4,16,64}, D={0,1}, 40 roots, ~28.7 min)
+
+**Verdict: PASS (5/5 gate criteria).** The rollout estimator converges in the
+expected direction as K grows:
+
+| D | K | top1_agree | block_top1 | regret | MAE | spearman | se_ratio |
+|---|---|---|---|---|---|---|---|
+| 0 | 4  | 0.725 | 0.777 | 123.3 | 270.8 | 0.838 | 0.99 |
+| 0 | 16 | 0.900 | 0.898 |  17.1 | 123.5 | 0.934 | 0.98 |
+| 0 | 64 | 1.000 | 0.988 |   0.0 |  50.4 | 0.980 | 0.90 |
+| 1 | 4  | 0.525 | 0.666 | 240.1 | 459.3 | 0.711 | 0.99 |
+| 1 | 16 | 0.750 | 0.798 |  81.7 | 243.6 | 0.876 | 0.99 |
+| 1 | 64 | 0.875 | 0.912 |  11.4 |  96.8 | 0.960 | 0.93 |
+
+Key findings (skill §22/§39):
+
+- **D=0 converges cleanly**: top-1 agreement with the high-K reference rises
+  monotonically 0.725→0.900→1.000; simple regret falls 123→17→0; MAE falls
+  271→123→50; Spearman rises 0.84→0.93→0.98. The theoretical SE halves each
+  4×K (333→166→83), exactly as `std/sqrt(K)` predicts for i.i.d. rollouts.
+- **SE calibration is excellent**: `se_ratio` (block-spread / theoretical SE)
+  ≈ 0.99/0.98/0.90 for K=4/16/64 at D=0 — the block means' spread matches
+  `std/sqrt(K)`, confirming the K rollouts are i.i.d. (correct CRN reseeding,
+  no chance leakage) and the prefix/block derivation from one high-K run is
+  statistically sound.
+- **Reference self-stability**: split-half top-1 agreement = 1.000 (D=0) /
+  0.925 (D=1) over 40 roots — the K_ref=256 reference is itself stable.
+- **D=1 adds variance, not information, at this scale**: D=1 is noisier than
+  D=0 at every K (top1 0.525 vs 0.725 at K=4; regret 240 vs 123) and converges
+  slower (0.875 vs 1.000 at K=64). This answers skill §39 Q4: with the exact
+  `V_pi` leaf bootstrap, D=0 is the cleaner estimator; D=1's extra policy-guided
+  rollout adds rollout-opponent-model + recurrent-state variance faster than it
+  removes critic bias. (Deeper rollout may still help on specific tactical
+  roots — see the stratified view — but it is not the default win.)
+- **Stratification**: `small` actor top-2-gap roots (near-tied actor) agree at
+  1.0 even at K=4 (little to distinguish); `medium` top-2-gap roots are the
+  hardest (0.43 at K=4 → 1.0 at K=64) — exactly where search + K matter most.
+
+**Honest limitations of this pilot:**
+
+- **Early-phase only**: all 40 roots are `early` (decision < ~40); with
+  `root_stride=1` and `num_parallel=2`, the first 40 eval-decisions come from
+  the first ~20 decisions of 2 concurrent battles. Mid/late-phase roots (and
+  low-HP / status-heavy / forced-switch positions) are not yet represented. A
+  follow-up run with more battles + a phase-spreading stride (or replay across
+  more battles) is needed to span the §22 stratification space.
+- **Self-play opponent only**: the rollout opponent is the frozen self model
+  (skill §13 `self model`). The opponent-model matrix (§24) is a later phase.
+- **40 roots** is enough for the convergence *direction* (the monotone trend is
+  clear and the SE calibration is tight) but the prefix top-1 point estimates
+  still have ±~0.08 uncertainty at n=40; a 200-500 root run would tighten the
+  gate further (skill §22 "approximately 500 roots").
+- **`root_critic_only` vs D=0/D=1** head-to-head is recorded per root but not in
+  the gate table above; it is the next §22 comparison once the corpus spans
+  phases.
+
+Artifacts: `/tmp/tts_phase1_pilot/{REPORT.md, summary.json, run_manifest.json,
+root_results.jsonl, root_manifest.jsonl}`. Reproduce with the command in
+`## Commands` below.
+
+The smaller K_ref=128 / 6-root probe (run first) already showed the correct
+direction (block-top-1 0.77→0.85→0.92); its "PARTIAL" was a small-sample
+artifact (prefix top-1 noisy at n=6; SE-cal at K=64 had only 2 blocks with
+K_ref=128) — both fixed by K_ref=256 + 40 roots.
+
+### Tests
+
+`test_root_benchmark.py` (26): 25 CPU (pure-numpy derivation + rank corr +
+convergence metrics + aggregation + go/no-go logic + manifest features) and 1
+GPU-gated end-to-end smoke (2-root K_ref=16 benchmark on the real ckpt →
+well-formed records + verdict, no leak). **99 passed** on GPU.
 
 ## Commands
 
 ```bash
 export METAMON_CACHE_DIR=/home/eddie/metamon_cache
 cd /home/eddie/repos/metamon
-uv run python -m pytest tests/test_time_search/ -q -p no:cacheprovider   # 61 passed, 13 skipped (CPU) / 73 passed (GPU)
+uv run python -m pytest tests/test_time_search/ -q -p no:cacheprovider   # 61+26 skipped... / 99 passed (GPU after Phase 1)
+
+# Phase 1 fixed-root estimator benchmark (skill §22):
+#   derives K={4,16,64} from one K_ref=256 run per (root, depth) via prefix/block
+#   averaging (the per-k branch seed is K-independent -- see rng.py).
+uv run python -m metamon.rl.experimental.test_time_search.benchmark_roots \
+  --agent MiniOnlinePsroV1_4 --checkpoint 740 --format gen1ou --team_set competitive \
+  --num_parallel 2 --seed 42 --search_seed 0 \
+  --k_ref 256 --derived_ks 4 16 64 --depths 0 1 \
+  --max_roots 40 --max_battles 40 --output_dir /tmp/tts_phase1_pilot
+#   -> /tmp/tts_phase1_pilot/{root_results.jsonl, root_manifest.jsonl,
+#      summary.json, run_manifest.json, REPORT.md}
 
 # correctness smoke run (GPU; the §1C gate command, now clean after the fix):
 uv run python -m metamon.rl.experimental.test_time_search.eval_search \

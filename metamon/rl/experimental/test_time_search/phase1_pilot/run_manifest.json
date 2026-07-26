@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-07-26T14:18:04-0400",
+  "agent": "MiniOnlinePsroV1_4",
+  "checkpoint": 740,
+  "checkpoint_hash": "d3ee307ac597103c69f598057760a3fb29aff12824962c1451ec6fa8f7c5b2c6",
+  "battle_format": "gen1ou",
+  "team_set": "competitive",
+  "env_seed": 42,
+  "search_seed": 0,
+  "k_ref": 256,
+  "derived_ks": [
+    4,
+    16,
+    64
+  ],
+  "depths": [
+    0,
+    1
+  ],
+  "leaf_modes": [
+    "root_critic_only",
+    "policy_expectation"
+  ],
+  "chance_mode": "resample_crn",
+  "n_roots": 40,
+  "n_battles": 40,
+  "git_sha": "7bb4a25124ed2bf200dcb33b4b4a47350f64b50a",
+  "extra": {
+    "elapsed_sec": 1719.7838479309867,
+    "include_inherited_rng": false
+  }
+}

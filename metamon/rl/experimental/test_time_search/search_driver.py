@@ -278,6 +278,70 @@ class _Branches:
     seed_bank: Optional[RootSeedBank]
 
 
+@dataclass
+class _RolloutResult:
+    """Per-action + per-branch outputs of the rollout estimator core.
+
+    ``search_root`` uses the per-action aggregates (``q_mean``/``q_std``/
+    ``counts``/``term_frac``) for the policy-improvement step. The fixed-root
+    benchmark (skill §22) additionally uses the **per-branch** return matrix
+    (``root_action``, ``rollout_index``, ``q_per_branch``, ...) to derive
+    lower-K estimates from one high-K run: the per-``k`` branch seed is
+    K-independent (``rng.RootSeedBank`` keys on ``(root, k)``, not on ``K``), so
+    the first ``k`` rollouts of a K=256 run are identical to a K=4 run's 4
+    rollouts at the same root -- letting prefix/block averaging reconstruct
+    every K from a single high-K reference.
+    """
+
+    q_mean: np.ndarray  # (A,)
+    q_std: np.ndarray  # (A,)
+    counts: np.ndarray  # (A,) int
+    term_frac: np.ndarray  # (A,)
+    diag: Dict[str, Any]
+    opp_root_actions: List[int]
+    env_seed_hashes: List[str]
+    # per-branch (None for ``root_critic_only``, which has no rollouts):
+    root_action: Optional[np.ndarray]  # (N,) eval root action per branch
+    rollout_index: Optional[np.ndarray]  # (N,) k in [0, K) per branch
+    q_per_branch: Optional[np.ndarray]  # (N,) per-branch return
+    terminal_pb: Optional[np.ndarray]  # (N,) bool
+    cum_reward_pb: Optional[np.ndarray]  # (N,) discounted intermediate reward
+    depth_done_pb: Optional[np.ndarray]  # (N,) settled decisions
+
+
+@dataclass
+class RootEstimate:
+    """Public result of :meth:`SearchEvalRunner.estimate_root` (skill §22).
+
+    Captures the frozen estimator's view of one fixed root: the base actor
+    distribution and the per-action / per-branch Q estimates at a specific
+    ``(K, depth, leaf_value_mode, chance_mode)``. No policy improvement or
+    action selection is performed -- the benchmark ranks Q directly.
+    """
+
+    legal_arr: np.ndarray  # (A,) retained legal actions
+    base_probs: np.ndarray  # (A_full,) base actor distribution
+    base_argmax: int
+    q_mean: np.ndarray  # (A,) per-action mean return
+    q_std: np.ndarray  # (A,) per-action std
+    counts: np.ndarray  # (A,) int
+    term_frac: np.ndarray  # (A,)
+    diag: Dict[str, Any]
+    opp_root_actions: List[int]
+    env_seed_hashes: List[str]
+    root_action: Optional[np.ndarray]  # (N,) or None (root_critic_only)
+    rollout_index: Optional[np.ndarray]  # (N,) or None
+    q_per_branch: Optional[np.ndarray]  # (N,) or None
+    terminal_pb: Optional[np.ndarray]  # (N,) or None
+    cum_reward_pb: Optional[np.ndarray]  # (N,) or None
+    depth_done_pb: Optional[np.ndarray]  # (N,) or None
+    K: int
+    search_depth: int
+    leaf_value_mode: str
+    chance_mode: str
+    latency_ms: float
+
+
 # ---------------------------------------------------------------------------
 # Search driver
 # ---------------------------------------------------------------------------
@@ -540,111 +604,20 @@ class SearchEvalRunner:
         diag: Dict[str, Any] = {}
         error_msg = ""
         pending_raise: Optional[BaseException] = None
-        seed_bank: Optional[RootSeedBank] = None
         opp_root_actions: List[int] = []
+        env_seed_hashes: List[str] = []
 
         try:
-            if cfg.search_leaf_value_mode == "root_critic_only":
-                # No simulator rollout: Q_root(a) = frozen critic Q(h_root, a).
-                q_full, q_per_head = _all_action_q(
-                    self.eval_policy, emb, self.action_dim, cfg.critic_horizon_index
-                )
-                q_full = q_full[0].cpu().numpy()  # (A_full,)
-                q_mean = q_full[legal_arr]
-                counts = np.ones(A, dtype=np.int64)
-                diag["critic_disagreement"] = float(
-                    q_per_head[0, legal_arr].std(dim=-1).mean().item()
-                )
-                diag["intermediate_reward_mean"] = 0.0
-                diag["bootstrap_mean"] = float(q_mean.mean())
-                diag["n_settled_mean"] = 0.0
-            else:
-                # --- snapshot + fork (validated deepcopy + no-replay path) ---
-                proc = self.env.proc
-                proc.drain()
-                snap_id = proc.snapshot(trunk_lane_idx)
-                proc.drain()
-
-                # --- deterministic branch seed bank (skill §7) ---
-                if cfg.search_chance_mode == "resample_crn":
-                    seed_bank = RootSeedBank.build(
-                        cfg.search_seed,
-                        self._battle_id,
-                        self.env.eval_side,
-                        self._decision_counter,
-                        K,
-                    )
-                    branch_seeds: Optional[List[Optional[List[int]]]] = [
-                        seed_bank.env_seed_for_branch(b) for b in range(N)
-                    ]
-                else:  # inherited_trunk_rng (future-chance oracle DIAGNOSTIC)
-                    branch_seeds = None
-
-                branch_lane_ids = self._alloc_fork_lanes(N)
-                branch_lanes = []
-                for bid in branch_lane_ids:
-                    fl = copy.deepcopy(self._trunk_lane(trunk_lane_idx))
-                    fl.lane_id = bid
-                    proc.register_lane(bid, fl)
-                    branch_lanes.append(fl)
-                proc.fork_batch(
-                    snap_id, branch_lane_ids, replay_log=False, seeds=branch_seeds
-                )
-
-                eval_branch = make_branch_state(
-                    self.eval_driver, trunk_lane_idx, N, self.device
-                )
-                opp_branch = make_branch_state(
-                    self.opponent._driver, trunk_lane_idx, N, self.device
-                )
-
-                root_action = np.repeat(legal_arr, K)  # (N,): branch b = a*K + k
-                rollout_index = np.tile(np.arange(K), A)  # (N,): k = b % K
-
-                br = _Branches(
-                    lane_ids=branch_lane_ids,
-                    lanes=branch_lanes,
-                    root_action=root_action,
-                    rollout_index=rollout_index,
-                    active=np.ones(N, dtype=bool),
-                    depth_done=np.zeros(N, dtype=np.int64),
-                    cum_reward=np.zeros(N, dtype=np.float64),
-                    terminal=np.zeros(N, dtype=bool),
-                    eval_hidden=eval_branch.hidden,
-                    eval_rl2s=eval_branch.rl2s.copy(),
-                    eval_steps=eval_branch.step_counts.copy(),
-                    opp_hidden=opp_branch.hidden,
-                    opp_rl2s=opp_branch.rl2s.copy(),
-                    opp_steps=opp_branch.step_counts.copy(),
-                    snap_id=snap_id,
-                    trunk_lane=trunk_lane_idx,
-                    prev_eval_state=[None] * N,
-                    gamma=float(
-                        self.eval_policy.gammas[cfg.critic_horizon_index].item()
-                    ),
-                    seed_bank=seed_bank,
-                )
-
-                # --- force root eval action + (coupled) opp root action; settle ---
-                self._rollout_root(br, obs)
-                opp_root_actions = self._last_opp_root_actions
-
-                for d in range(cfg.search_depth):
-                    if not br.active.any():
-                        break
-                    self._rollout_step(br)
-
-                q_per_branch, leaf_diag = self._leaf_values(br)
-                diag.update(leaf_diag)
-
-                for ai, a in enumerate(legal_arr):
-                    mask = br.root_action == a
-                    vals = q_per_branch[mask]
-                    if vals.size:
-                        q_mean[ai] = float(vals.mean())
-                        q_std[ai] = float(vals.std()) if vals.size > 1 else 0.0
-                        counts[ai] = int(vals.size)
-                        term_frac[ai] = float(br.terminal[mask].mean())
+            core = self._rollout_core(
+                trunk_lane_idx, obs, legal_arr, base_probs, emb, illegal
+            )
+            q_mean = core.q_mean
+            q_std = core.q_std
+            counts = core.counts
+            term_frac = core.term_frac
+            diag = core.diag
+            opp_root_actions = core.opp_root_actions
+            env_seed_hashes = core.env_seed_hashes
 
             # --- policy improvement (skill §12) ---
             full_q = np.full(self.action_dim, np.nan)
@@ -735,9 +708,7 @@ class SearchEvalRunner:
             bootstrap_mean=float(diag.get("bootstrap_mean", 0.0)),
             critic_disagreement=float(diag.get("critic_disagreement", 0.0)),
             n_settled_mean=float(diag.get("n_settled_mean", 0.0)),
-            env_seed_hashes=(
-                seed_bank.env_seed_hashes if seed_bank is not None else []
-            ),
+            env_seed_hashes=list(env_seed_hashes),
             opp_root_actions=list(opp_root_actions),
             error=error_msg,
         )
@@ -745,10 +716,6 @@ class SearchEvalRunner:
             self._log_file.write(record.to_json() + "\n")
             self._log_file.flush()
         self.root_records.append(record)
-
-        # --- cleanup (always) ---
-        if br is not None:
-            self._cleanup_branches(br)
 
         if pending_raise is not None:
             raise pending_raise
@@ -797,6 +764,254 @@ class SearchEvalRunner:
             self._log_file.flush()
         self.root_records.append(rec)
         return int(fallback), rec
+
+    # ----- estimator core (shared by search_root + benchmark) -------------
+
+    def _rollout_core(
+        self,
+        trunk_lane_idx: int,
+        obs: dict,
+        legal_arr: np.ndarray,
+        base_probs: np.ndarray,
+        emb: torch.Tensor,
+        illegal: torch.Tensor,
+    ) -> _RolloutResult:
+        """Run the rollout estimator core (skill §3 steps 3-11) and clean up.
+
+        Returns per-action aggregates (``q_mean``/``q_std``/``counts``/
+        ``term_frac``) plus the **per-branch** return matrix, which the
+        fixed-root benchmark (skill §22) uses to derive lower-K estimates from
+        one high-K run via prefix/block averaging (the per-``k`` chance stream
+        is K-independent -- see ``rng.py``).
+
+        This is the single validated copy of the snapshot/fork/settle/leaf/
+        cleanup path; ``search_root`` delegates here and ``estimate_root`` calls
+        it directly. Branch lanes + the snapshot are released in a ``finally``
+        so the trunk is never left with phantom forks even on error. The trunk
+        lane itself is never advanced (forks use ``replay_log=false``).
+        """
+        cfg = self.config
+        A = int(legal_arr.size)
+        K = cfg.search_rollouts_per_action
+        N = A * K
+        q_mean = np.zeros(A)
+        q_std = np.zeros(A)
+        counts = np.zeros(A, dtype=np.int64)
+        term_frac = np.zeros(A)
+        diag: Dict[str, Any] = {}
+        opp_root_actions: List[int] = []
+        env_seed_hashes: List[str] = []
+        root_action = rollout_index = q_per_branch = None
+        terminal_pb = cum_reward_pb = depth_done_pb = None
+
+        if cfg.search_leaf_value_mode == "root_critic_only":
+            # No simulator rollout: Q_root(a) = frozen critic Q(h_root, a).
+            q_full, q_per_head = _all_action_q(
+                self.eval_policy, emb, self.action_dim, cfg.critic_horizon_index
+            )
+            q_full = q_full[0].cpu().numpy()  # (A_full,)
+            q_mean = q_full[legal_arr]
+            counts = np.ones(A, dtype=np.int64)
+            diag["critic_disagreement"] = float(
+                q_per_head[0, legal_arr].std(dim=-1).mean().item()
+            )
+            diag["intermediate_reward_mean"] = 0.0
+            diag["bootstrap_mean"] = float(q_mean.mean())
+            diag["n_settled_mean"] = 0.0
+            return _RolloutResult(
+                q_mean=q_mean,
+                q_std=q_std,
+                counts=counts,
+                term_frac=term_frac,
+                diag=diag,
+                opp_root_actions=opp_root_actions,
+                env_seed_hashes=env_seed_hashes,
+                root_action=root_action,
+                rollout_index=rollout_index,
+                q_per_branch=q_per_branch,
+                terminal_pb=terminal_pb,
+                cum_reward_pb=cum_reward_pb,
+                depth_done_pb=depth_done_pb,
+            )
+
+        br: Optional[_Branches] = None
+        try:
+            # --- snapshot + fork (validated deepcopy + no-replay path) ---
+            proc = self.env.proc
+            proc.drain()
+            snap_id = proc.snapshot(trunk_lane_idx)
+            proc.drain()
+
+            # --- deterministic branch seed bank (skill §7) ---
+            if cfg.search_chance_mode == "resample_crn":
+                seed_bank = RootSeedBank.build(
+                    cfg.search_seed,
+                    self._battle_id,
+                    self.env.eval_side,
+                    self._decision_counter,
+                    K,
+                )
+                branch_seeds: Optional[List[Optional[List[int]]]] = [
+                    seed_bank.env_seed_for_branch(b) for b in range(N)
+                ]
+                env_seed_hashes = seed_bank.env_seed_hashes
+            else:  # inherited_trunk_rng (future-chance oracle DIAGNOSTIC)
+                seed_bank = None
+                branch_seeds = None
+
+            branch_lane_ids = self._alloc_fork_lanes(N)
+            branch_lanes = []
+            for bid in branch_lane_ids:
+                fl = copy.deepcopy(self._trunk_lane(trunk_lane_idx))
+                fl.lane_id = bid
+                proc.register_lane(bid, fl)
+                branch_lanes.append(fl)
+            proc.fork_batch(
+                snap_id, branch_lane_ids, replay_log=False, seeds=branch_seeds
+            )
+
+            eval_branch = make_branch_state(
+                self.eval_driver, trunk_lane_idx, N, self.device
+            )
+            opp_branch = make_branch_state(
+                self.opponent._driver, trunk_lane_idx, N, self.device
+            )
+
+            root_action = np.repeat(legal_arr, K)  # (N,): branch b = a*K + k
+            rollout_index = np.tile(np.arange(K), A)  # (N,): k = b % K
+
+            br = _Branches(
+                lane_ids=branch_lane_ids,
+                lanes=branch_lanes,
+                root_action=root_action,
+                rollout_index=rollout_index,
+                active=np.ones(N, dtype=bool),
+                depth_done=np.zeros(N, dtype=np.int64),
+                cum_reward=np.zeros(N, dtype=np.float64),
+                terminal=np.zeros(N, dtype=bool),
+                eval_hidden=eval_branch.hidden,
+                eval_rl2s=eval_branch.rl2s.copy(),
+                eval_steps=eval_branch.step_counts.copy(),
+                opp_hidden=opp_branch.hidden,
+                opp_rl2s=opp_branch.rl2s.copy(),
+                opp_steps=opp_branch.step_counts.copy(),
+                snap_id=snap_id,
+                trunk_lane=trunk_lane_idx,
+                prev_eval_state=[None] * N,
+                gamma=float(self.eval_policy.gammas[cfg.critic_horizon_index].item()),
+                seed_bank=seed_bank,
+            )
+
+            # --- force root eval action + (coupled) opp root action; settle ---
+            self._rollout_root(br, obs)
+            opp_root_actions = self._last_opp_root_actions
+
+            for d in range(cfg.search_depth):
+                if not br.active.any():
+                    break
+                self._rollout_step(br)
+
+            q_per_branch, leaf_diag = self._leaf_values(br)
+            diag.update(leaf_diag)
+
+            for ai, a in enumerate(legal_arr):
+                mask = br.root_action == a
+                vals = q_per_branch[mask]
+                if vals.size:
+                    q_mean[ai] = float(vals.mean())
+                    q_std[ai] = float(vals.std()) if vals.size > 1 else 0.0
+                    counts[ai] = int(vals.size)
+                    term_frac[ai] = float(br.terminal[mask].mean())
+
+            # capture per-branch data for the benchmark BEFORE cleanup drops br
+            q_per_branch = q_per_branch.copy()
+            terminal_pb = br.terminal.copy()
+            cum_reward_pb = br.cum_reward.copy()
+            depth_done_pb = br.depth_done.copy()
+            return _RolloutResult(
+                q_mean=q_mean,
+                q_std=q_std,
+                counts=counts,
+                term_frac=term_frac,
+                diag=diag,
+                opp_root_actions=opp_root_actions,
+                env_seed_hashes=env_seed_hashes,
+                root_action=root_action,
+                rollout_index=rollout_index,
+                q_per_branch=q_per_branch,
+                terminal_pb=terminal_pb,
+                cum_reward_pb=cum_reward_pb,
+                depth_done_pb=depth_done_pb,
+            )
+        finally:
+            if br is not None:
+                self._cleanup_branches(br)
+
+    def estimate_root(
+        self,
+        trunk_lane_idx: int,
+        obs: dict,
+        legal: List[int],
+        config: SearchConfig,
+    ) -> RootEstimate:
+        """Run the rollout estimator at one root with an explicit ``config`` and
+        return per-action + per-branch Q estimates (NO policy improvement /
+        selection). For the fixed-root benchmark (skill §22).
+
+        Swaps ``self.config`` for the call so the validated internals see
+        consistent K / depth / leaf-mode / chance settings, then restores it.
+        The trunk lane is never advanced by phantom rollouts, so this is safe to
+        call repeatedly at the same root with different configs (e.g. K=4 then
+        K=256): every call snapshots the same trunk state and the base actor
+        distribution is recomputed from the unchanged trunk hidden state.
+
+        Set ``self._battle_id`` and ``self._decision_counter`` to the root's
+        stable identity before calling so the per-``k`` branch seeds are
+        identical across configs (the seed bank keys on
+        ``(battle_id, side, decision_idx, k)``, not on ``K`` -- see ``rng.py``).
+        This is what lets the benchmark derive a K=4 estimate from the first 4
+        rollouts of a K=256 run at the same root.
+
+        Errors propagate (no silent fallback): ``_rollout_core`` cleans up its
+        branches in a ``finally`` before re-raising, so a failed estimate never
+        leaks phantom forks.
+        """
+        saved_cfg = self.config
+        try:
+            self.config = config
+            t0 = time.perf_counter()
+            base_probs, legal_arr, emb, illegal, base_argmax = self._root_distribution(
+                trunk_lane_idx, obs, legal
+            )
+            core = self._rollout_core(
+                trunk_lane_idx, obs, legal_arr, base_probs, emb, illegal
+            )
+            latency = (time.perf_counter() - t0) * 1000.0
+            return RootEstimate(
+                legal_arr=legal_arr,
+                base_probs=base_probs,
+                base_argmax=int(base_argmax),
+                q_mean=core.q_mean,
+                q_std=core.q_std,
+                counts=core.counts,
+                term_frac=core.term_frac,
+                diag=core.diag,
+                opp_root_actions=core.opp_root_actions,
+                env_seed_hashes=core.env_seed_hashes,
+                root_action=core.root_action,
+                rollout_index=core.rollout_index,
+                q_per_branch=core.q_per_branch,
+                terminal_pb=core.terminal_pb,
+                cum_reward_pb=core.cum_reward_pb,
+                depth_done_pb=core.depth_done_pb,
+                K=int(config.search_rollouts_per_action),
+                search_depth=int(config.search_depth),
+                leaf_value_mode=str(config.search_leaf_value_mode),
+                chance_mode=str(config.search_chance_mode),
+                latency_ms=float(latency),
+            )
+        finally:
+            self.config = saved_cfg
 
     # ----- rollout steps --------------------------------------------------
 
