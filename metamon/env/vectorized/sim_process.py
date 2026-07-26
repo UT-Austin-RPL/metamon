@@ -23,7 +23,6 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
-
 HOST_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "battle_host.js")
 
 # Binary stdout frame types (must match battle_host.js).
@@ -88,6 +87,8 @@ class ShowdownSimProcess:
         # a previous (destroyed) battle that is still draining cannot corrupt the
         # state of the new battle that reused the same lane id.
         self._epoch: Dict[int, int] = {}
+        # Monotonic counter for host-side snapshot ids (test-time search).
+        self._snapshot_counter: int = 1
         self._inbox: "queue.Queue[dict]" = queue.Queue()
         self._closed = False
         self._write_lock = threading.Lock()
@@ -290,6 +291,175 @@ class ShowdownSimProcess:
     def ping(self) -> None:
         self._send({"cmd": "ping"})
 
+    # ----- test-time search: snapshot / fork / restore --------------------
+    #
+    # Snapshots are stored host-side (as JSON strings) keyed by an integer id
+    # that Python assigns and tracks. Fork/restore create a new battle in a
+    # lane from a stored snapshot; the host replays the full log + re-emits the
+    # current request so a fresh :class:`StreamBattleLane` rebuilds state. See
+    # ``battle_host.js`` and ``test_time_search/ARCHITECTURE.md``.
+
+    def snapshot(self, lane: int) -> int:
+        """Serialize ``lane``'s battle host-side and return a snapshot id."""
+        lane = int(lane)
+        snap_id = self._next_snapshot_id()
+        self._send({"cmd": "snapshot", "lane": lane, "snapshot_id": snap_id})
+        self._sync()  # ensure the host has stored the snapshot before forking
+        return snap_id
+
+    def fork(
+        self,
+        snapshot_id: int,
+        to_lane: int,
+        replay_log: bool = True,
+        seed: Optional[List[int]] = None,
+    ) -> int:
+        """Create/replace ``to_lane`` from a stored snapshot; return its new epoch.
+
+        When ``replay_log`` is True (default), the host replays the full log so a
+        *fresh* Python lane rebuilds parsed state. When False, the Python lane is
+        expected to be a deep copy of the trunk's parsed state already, so the
+        host skips the replay and only emits *new* log entries.
+
+        ``seed`` (optional, test-time search skill §7): a branch-only 4x uint16
+        Showdown PRNG seed. When provided, the fork's inherited trunk future-RNG
+        stream is replaced with an independent branch-only PRNG so candidate
+        actions are evaluated over resampled future chance. None = inherit the
+        trunk's PRNG (the legacy ``inherited_trunk_rng`` diagnostic mode).
+        """
+        to_lane = int(to_lane)
+        self._epoch[to_lane] = self._epoch.get(to_lane, 0) + 1
+        msg: Dict[str, Any] = {
+            "cmd": "fork",
+            "snapshot_id": int(snapshot_id),
+            "to_lane": to_lane,
+            "epoch": self._epoch[to_lane],
+            "replay_log": bool(replay_log),
+        }
+        if seed is not None:
+            msg["seed"] = [int(x) & 0xFFFF for x in seed]
+        self._send(msg)
+        self._sync()  # ensure the fork battle is live before any choose
+        return self._epoch[to_lane]
+
+    def fork_batch(
+        self,
+        snapshot_id: int,
+        to_lanes: List[int],
+        replay_log: bool = True,
+        seeds: Optional[List[Optional[List[int]]]] = None,
+    ) -> None:
+        """Fork many lanes from one snapshot in a single command + one sync.
+
+        Cheaper than N separate :meth:`fork` calls (one ping/pong round-trip
+        instead of N) for test-time search where many branches fork from the
+        same trunk snapshot.
+
+        ``seeds`` (optional, test-time search skill §7): one 4x uint16
+        Showdown PRNG seed per ``to_lane`` (same length). ``seeds[i] is None``
+        means lane ``i`` inherits the trunk PRNG. Used for the
+        ``resample_crn`` common-random-numbers branch chance mode.
+        """
+        if not to_lanes:
+            return
+        entries = []
+        for idx, lane in enumerate(to_lanes):
+            lane = int(lane)
+            self._epoch[lane] = self._epoch.get(lane, 0) + 1
+            entry: Dict[str, Any] = {"lane": lane, "epoch": self._epoch[lane]}
+            if seeds is not None and idx < len(seeds) and seeds[idx] is not None:
+                entry["seed"] = [int(x) & 0xFFFF for x in seeds[idx]]
+            entries.append(entry)
+        self._send(
+            {
+                "cmd": "fork_batch",
+                "snapshot_id": int(snapshot_id),
+                "to_lanes": entries,
+                "replay_log": bool(replay_log),
+            }
+        )
+        self._sync()
+
+    def restore(
+        self,
+        snapshot_id: int,
+        lane: int,
+        replay_log: bool = True,
+        seed: Optional[List[int]] = None,
+    ) -> int:
+        """Replace ``lane``'s battle from a stored snapshot; return its new epoch.
+
+        ``seed`` (optional, test-time search skill §7): branch-only 4x uint16
+        Showdown PRNG seed; None = inherit the trunk PRNG.
+        """
+        lane = int(lane)
+        self._epoch[lane] = self._epoch.get(lane, 0) + 1
+        msg: Dict[str, Any] = {
+            "cmd": "restore",
+            "snapshot_id": int(snapshot_id),
+            "lane": lane,
+            "epoch": self._epoch[lane],
+            "replay_log": bool(replay_log),
+        }
+        if seed is not None:
+            msg["seed"] = [int(x) & 0xFFFF for x in seed]
+        self._send(msg)
+        self._sync()
+        return self._epoch[lane]
+
+    def release_snapshot(self, snapshot_id: int) -> None:
+        self._send({"cmd": "release_snapshot", "snapshot_id": int(snapshot_id)})
+
+    def _sync(self) -> None:
+        """Block until the host has processed all commands sent so far.
+
+        Uses a ping/pong round-trip: the host processes stdin lines in order, so
+        by the time it echoes the pong every prior command (snapshot/fork/restore)
+        has been applied. This avoids a race where a ``choose`` for a freshly
+        forked lane arrives at the host before the ``fork`` command.
+
+        Non-pong messages that arrive while waiting (e.g. trailing lane chunks)
+        are stashed and re-queued so they are dispatched later by a normal
+        ``pump_until`` — this prevents ``_sync`` from silently advancing a trunk
+        lane's parsed state between a Python ``deepcopy`` and the matching JS
+        snapshot.
+        """
+        self._send({"cmd": "ping"})
+        stashed = []
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            try:
+                msg = self._inbox.get(timeout=deadline - time.monotonic())
+            except queue.Empty:
+                raise ShowdownSimProcessError(
+                    "_sync timed out waiting for pong. stderr:\n" + self.stderr_tail
+                )
+            if msg.get("event") == "pong":
+                for m in stashed:
+                    self._inbox.put(m)
+                return
+            stashed.append(msg)
+
+    def drain(self, idle: float = 0.05) -> None:
+        """Dispatch all currently-queued host messages, then return.
+
+        Useful to flush trailing chunks so a trunk lane's parsed state is fully
+        caught up before a Python ``deepcopy`` + JS ``snapshot`` pair are taken
+        for a search fork.
+        """
+        deadline = time.monotonic() + idle
+        while time.monotonic() < deadline:
+            try:
+                msg = self._inbox.get(timeout=deadline - time.monotonic())
+            except queue.Empty:
+                return
+            self._dispatch(msg)
+
+    def _next_snapshot_id(self) -> int:
+        sid = self._snapshot_counter
+        self._snapshot_counter += 1
+        return sid
+
     # ----- pumping ---------------------------------------------------------
 
     def _dispatch(self, msg: dict) -> None:
@@ -426,6 +596,10 @@ class ShardedShowdownSimProcess:
         self._epoch: Dict[int, int] = {}
         self._inbox: "queue.Queue[dict]" = queue.Queue()
         self._closed = False
+        # Test-time search snapshot bookkeeping (global id -> worker + local id).
+        self._snapshot_counter: int = 1
+        self._snapshot_worker: Dict[int, int] = {}
+        self._snapshot_local_id: Dict[int, int] = {}
 
         self._worker_bases: List[int] = []
         self._worker_counts: List[int] = []
@@ -533,6 +707,85 @@ class ShardedShowdownSimProcess:
     def ping(self) -> None:
         for proc in self._workers:
             proc.ping()
+
+    # ----- test-time search: snapshot / fork / restore --------------------
+    #
+    # Snapshot ids are host-side and live on a single worker (the one that owns
+    # the snapshotted lane). Fork/restore lanes MUST be on the same worker; the
+    # search driver is responsible for allocating branch lanes on the trunk's
+    # worker. (Search defaults to ``n_workers=1``.)
+
+    def snapshot(self, lane: int) -> int:
+        lane = int(lane)
+        worker_id, local_lane = self._local_lane(lane)
+        local_id = self._workers[worker_id].snapshot(local_lane)
+        global_id = self._next_snapshot_id()
+        self._snapshot_worker[global_id] = worker_id
+        self._snapshot_local_id[global_id] = local_id
+        return global_id
+
+    def fork(
+        self,
+        snapshot_id: int,
+        to_lane: int,
+        replay_log: bool = True,
+        seed: Optional[List[int]] = None,
+    ) -> int:
+        to_lane = int(to_lane)
+        worker_id, local_to = self._local_lane(to_lane)
+        snap_worker = self._snapshot_worker.get(int(snapshot_id))
+        if snap_worker is None:
+            raise ShowdownSimProcessError(f"unknown snapshot_id {snapshot_id}")
+        if snap_worker != worker_id:
+            raise ShowdownSimProcessError(
+                f"fork lane {to_lane} is on worker {worker_id} but snapshot "
+                f"{snapshot_id} lives on worker {snap_worker}; branch lanes "
+                f"must share the trunk's worker (use n_workers=1 for search)."
+            )
+        # The worker stored the snapshot under its own local id; reuse it by
+        # re-sending with the local id this shard handed out. We stored the
+        # local id implicitly via the worker's counter, so we pass the same
+        # global id — but the worker only knows its local ids. To keep this
+        # simple, the shard forwards the global id and the worker's snapshot
+        # map is keyed by the local id it returned. We therefore must remember
+        # the local id.
+        local_id = self._snapshot_local_id[int(snapshot_id)]
+        return self._workers[worker_id].fork(
+            local_id, local_to, replay_log=replay_log, seed=seed
+        )
+
+    def restore(
+        self,
+        snapshot_id: int,
+        lane: int,
+        replay_log: bool = True,
+        seed: Optional[List[int]] = None,
+    ) -> int:
+        lane = int(lane)
+        worker_id, local_lane = self._local_lane(lane)
+        snap_worker = self._snapshot_worker.get(int(snapshot_id))
+        if snap_worker is None:
+            raise ShowdownSimProcessError(f"unknown snapshot_id {snapshot_id}")
+        if snap_worker != worker_id:
+            raise ShowdownSimProcessError(
+                f"restore lane {lane} is on worker {worker_id} but snapshot "
+                f"{snapshot_id} lives on worker {snap_worker}."
+            )
+        local_id = self._snapshot_local_id[int(snapshot_id)]
+        return self._workers[worker_id].restore(
+            local_id, local_lane, replay_log=replay_log, seed=seed
+        )
+
+    def release_snapshot(self, snapshot_id: int) -> None:
+        snap_worker = self._snapshot_worker.pop(int(snapshot_id), None)
+        local_id = self._snapshot_local_id.pop(int(snapshot_id), None)
+        if snap_worker is not None and local_id is not None:
+            self._workers[snap_worker].release_snapshot(local_id)
+
+    def _next_snapshot_id(self) -> int:
+        sid = self._snapshot_counter
+        self._snapshot_counter += 1
+        return sid
 
     def _dispatch(self, msg: dict) -> None:
         event = msg.get("event")

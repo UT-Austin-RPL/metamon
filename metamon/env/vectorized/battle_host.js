@@ -58,7 +58,23 @@ function loadShowdown() {
 }
 
 const Showdown = loadShowdown();
-const { BattleStream, getPlayerStreams } = Showdown;
+const { Battle, BattleStream, getPlayerStreams } = Showdown;
+
+/*
+ * Test-time search snapshot/fork support.
+ *
+ * Snapshots are stored host-side as JSON *strings* (not objects) because
+ * `State.serializeBattle` sets `state.log = battle.log` by reference — a fork
+ * deserialized from an object snapshot would share the trunk's log array and
+ * corrupt it when the fork appends new log lines. `Battle.fromJSON(string)`
+ * runs `JSON.parse`, producing fresh arrays and breaking the alias.
+ *
+ * A fork replays its entire log (sentLogPos = 0) to a fresh Python lane so the
+ * lane rebuilds full parsed state from scratch (exactly the normal ingestion
+ * path), then re-emits each side's activeRequest so the lane parks at the same
+ * settled decision point as the trunk.
+ */
+const snapshots = new Map(); // snapshot_id (int) -> JSON string
 
 const MSG = { READY: 0, CHUNK: 1, HOST_ERROR: 2, LANE_ERROR: 3, PONG: 4 };
 const STREAM = { p1: 0, p2: 1, error: 2 };
@@ -185,6 +201,72 @@ class Lane {
     this.battleStream = null;
     this.streams = null;
   }
+
+  snapshot() {
+    // Serialize the current battle to a JSON string (deep copy via stringify).
+    if (!this.battleStream || !this.battleStream.battle) {
+      throw new Error("cannot snapshot a lane with no active battle");
+    }
+    return JSON.stringify(this.battleStream.battle.toJSON());
+  }
+
+  startFromSnapshot(snapshotStr, epoch, replayLog = true, seed = null) {
+    // Rebuild this lane from a serialized battle. Mirrors `start` but injects
+    // a pre-deserialized Battle instead of running `>start`.
+    //
+    // ``seed`` (optional, test-time search): a branch-only PRNG seed. When
+    // provided, the fork's inherited trunk future-RNG stream is replaced with
+    // an independent branch-only PRNG so candidate actions are evaluated over
+    // resampled future chance, not the trunk's actual hidden RNG realization
+    // (skill §7 future-chance RNG leakage). ``setSeed`` is silent, unlike
+    // ``Battle.resetRNG`` which emits a ``"message"`` log line that would
+    // pollute branch logs. Accepts a 4x uint16 array (``[s0,s1,s2,s3]``) or a
+    // ``"s0,s1,s2,s3"`` string (Gen5 LCG, the form metamon battles use).
+    //
+    // When ``replayLog`` is true (default, for a *fresh* Python lane that needs
+    // to rebuild parsed state from scratch), we set ``sentLogPos = 0`` and flush
+    // the entire log so the lane rebuilds, then re-emit each side's current
+    // request so it parks at the trunk's settled decision point.
+    //
+    // When ``replayLog`` is false, the Python lane is a deep copy of the trunk's
+    // parsed state (already populated, already holding the current request), so
+    // we skip the log replay and request re-emit entirely — the fork only emits
+    // *new* log entries from subsequent choices. This avoids the request-
+    // regeneration quirk where ``deserializeBattle``'s ``getRequests`` produces a
+    // request with slightly different field ordering/PP than the live emission.
+    this.battleStream = new BattleStream();
+    this.streams = getPlayerStreams(this.battleStream);
+    this.closed = false;
+    this.epoch = epoch;
+    const battle = Battle.fromJSON(snapshotStr);
+    // Optional branch-only PRNG reseed (applied before any choose so the first
+    // branch transition draws from the branch seed, not the trunk's stream).
+    if (seed != null) {
+      battle.prng.setSeed(Array.isArray(seed) ? seed.join(",") : String(seed));
+    }
+    if (replayLog) {
+      battle.sentLogPos = 0;
+    } // else: keep serialized sentLogPos so only new log entries are sent
+    // Wire `send` exactly like BattleStream's `>start` handler does.
+    battle.restart((t, data) => {
+      if (Array.isArray(data)) data = data.join("\n");
+      this.battleStream.pushMessage(t, data);
+      if (t === "end" && !this.battleStream.keepAlive) this.battleStream.pushEnd();
+    });
+    this.battleStream.battle = battle;
+    const epochNow = epoch;
+    this._pump(this.streams.p1, "p1", epochNow);
+    this._pump(this.streams.p2, "p2", epochNow);
+    if (replayLog) {
+      // Flush the full log replay to the player streams...
+      battle.sendUpdates();
+      // ...then re-emit each side's current request so the lane sees a fresh
+      // |request| and parks at the same settled decision point as the trunk.
+      for (const side of battle.sides) {
+        if (side.activeRequest) side.emitRequest(side.activeRequest);
+      }
+    }
+  }
 }
 
 const lanes = new Map();
@@ -224,6 +306,60 @@ function handleCommand(msg) {
       if (lane) lane.destroy();
       break;
     }
+    case "snapshot": {
+      // Store a serialized snapshot of `msg.lane` under `msg.snapshot_id`.
+      const lane = getLane(msg.lane);
+      snapshots.set(int(msg.snapshot_id), lane.snapshot());
+      break;
+    }
+    case "fork": {
+      // Create/replace lane `msg.to_lane` from a stored snapshot.
+      const snap = snapshots.get(int(msg.snapshot_id));
+      if (snap === undefined) {
+        emitLaneError(msg.to_lane, 0, `fork: unknown snapshot_id ${msg.snapshot_id}`);
+        break;
+      }
+      const lane = getLane(msg.to_lane);
+      lane.destroy();
+      const epoch = msg.epoch !== undefined ? msg.epoch : lane.epoch + 1;
+      const replayLog = msg.replay_log !== undefined ? !!msg.replay_log : true;
+      lane.startFromSnapshot(snap, epoch, replayLog, msg.seed);
+      break;
+    }
+    case "fork_batch": {
+      // Create many lanes from one stored snapshot in a single command.
+      const snap = snapshots.get(int(msg.snapshot_id));
+      if (snap === undefined) {
+        emitHostError(`fork_batch: unknown snapshot_id ${msg.snapshot_id}`);
+        break;
+      }
+      const replayLog = msg.replay_log !== undefined ? !!msg.replay_log : true;
+      for (const toLane of (msg.to_lanes || [])) {
+        const lane = getLane(int(toLane.lane));
+        lane.destroy();
+        lane.startFromSnapshot(snap, int(toLane.epoch), replayLog, toLane.seed);
+      }
+      break;
+    }
+    case "restore": {
+      // Replace `msg.lane`'s battle with a stored snapshot (advances epoch so
+      // any in-flight chunks from the old battle are dropped by Python).
+      const snap = snapshots.get(int(msg.snapshot_id));
+      if (snap === undefined) {
+        emitLaneError(msg.lane, 0, `restore: unknown snapshot_id ${msg.snapshot_id}`);
+        break;
+      }
+      const lane = getLane(msg.lane);
+      lane.destroy();
+      const epoch = msg.epoch !== undefined ? msg.epoch : lane.epoch + 1;
+      const replayLog = msg.replay_log !== undefined ? !!msg.replay_log : true;
+      lane.startFromSnapshot(snap, epoch, replayLog, msg.seed);
+      break;
+    }
+    case "release_snapshot": {
+      snapshots.delete(int(msg.snapshot_id));
+      break;
+    }
     case "ping": {
       emitPong();
       break;
@@ -236,6 +372,13 @@ function handleCommand(msg) {
     default:
       emitHostError(`unknown cmd: ${JSON.stringify(msg)}`);
   }
+}
+
+// Coerce a value that may arrive from JSON as a number or string to an int.
+function int(x) {
+  const n = Number(x);
+  if (!Number.isInteger(n)) throw new Error(`expected int, got ${JSON.stringify(x)}`);
+  return n;
 }
 
 const rl = readline.createInterface({ input: process.stdin });
