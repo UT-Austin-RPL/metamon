@@ -364,18 +364,58 @@ class WeightedMixedTeamSet(TeamSet):
         return self._most_recent_team_file
 
     def yield_team(self) -> str:
-        # Lazy schedule refresh: if the shared epoch counter advanced since our
-        # last lookup, recompute weights before drawing. One int comparison per
-        # team draw — negligible cost; weight recompute only on epoch change.
+        # Lazy schedule refresh + weighted component pick, delegated to
+        # ``sample_component_index`` so callers that need to couple both sides
+        # to the same component can reuse the identical draw logic.
+        idx = self.sample_component_index()
+        return self.yield_team_from_component(idx)
+
+    def sample_component_index(self) -> int:
+        """Pick a component index per the current weights (schedule-refreshed).
+
+        Performs the lazy schedule refresh (one int comparison per draw; weight
+        recompute only on epoch change) and then samples one component index.
+        Factored out of :meth:`yield_team` so a caller can sample one index and
+        then draw *both* players' teams from the same component via
+        :meth:`yield_team_from_component` — keeping both sides on the same team
+        pool per battle (no composition mismatch).
+        """
         if self._schedule is not None and self._epoch_ref is not None:
             if self._epoch_ref.epoch != self._last_epoch:
                 self._apply_schedule_weights()
                 self._log_weights()
-        idx = random.choices(range(len(self.team_sets)), weights=self.weights)[0]
+        return random.choices(range(len(self.team_sets)), weights=self.weights)[0]
+
+    def yield_team_from_component(self, idx: int) -> str:
+        """Draw a team from a specific component (no weighted pick).
+
+        ``idx`` should come from :meth:`sample_component_index` (or be located
+        via :meth:`index_for_team_file_dir`). Sets
+        ``most_recent_team_file`` to the chosen component's file, exactly like
+        :meth:`yield_team`, so the ``_ts-`` teamset token in trajectory
+        filenames records the real component drawn.
+        """
         chosen = self.team_sets[idx]
         team = chosen.yield_team()
         self._most_recent_team_file = chosen.most_recent_team_file
         return team
+
+    def index_for_team_file_dir(self, team_file_dir: Optional[str]) -> Optional[int]:
+        """Return the component index whose ``team_file_dir`` matches the arg.
+
+        Used to couple two team sets to the same pool: when one side is a plain
+        :class:`TeamSet` (pinned to one set, e.g. ``team_set: smogon_pass2``)
+        and the other is this mix, the mix can draw from the component whose
+        directory matches the plain side's, so both share the pool. Returns
+        ``None`` when no component matches (the plain side's set is not one of
+        this mix's components).
+        """
+        if team_file_dir is None:
+            return None
+        for idx, ts in enumerate(self.team_sets):
+            if getattr(ts, "team_file_dir", None) == team_file_dir:
+                return idx
+        return None
 
     def block_team(self, packed_team: str) -> bool:
         return any(ts.block_team(packed_team) for ts in self.team_sets)

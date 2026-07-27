@@ -53,7 +53,7 @@ from .obs_utils import stack_obs_dicts
 from .opponent import BatchedOpponent, ConfigBatchedOpponent, RandomBatchedOpponent
 from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig, load_opponent_pool
 from .sim_process import ShowdownSimProcess, ShowdownSimProcessError, make_sim_process
-from .team_adapter import player_spec
+from .team_adapter import coupled_player_specs
 
 
 def _teamset_from_team_file(team_file: Optional[str]) -> Optional[str]:
@@ -326,14 +326,20 @@ class VectorizedShowdownEnv(gym.Env):
         self._lane_steps[i] = 0
         self._last_opp_obs[i] = None
         self._cycle_prev_eval[i] = None
-        eval_team = self.player_team_set
-        opp_team = self.opponent_team_set
-        if self.eval_side == "p1":
-            p1_team, p2_team = eval_team, opp_team
-        else:
-            p1_team, p2_team = opp_team, eval_team
-        p1_spec, p1_file = player_spec(f"p1-{i}", p1_team, self.battle_format)
-        p2_spec, p2_file = player_spec(f"p2-{i}", p2_team, self.battle_format)
+        # Both sides draw from the SAME team pool per battle: when either side
+        # is a WeightedMixedTeamSet, the component is chosen once and the other
+        # side is drawn from the matching component / set. This eliminates the
+        # learner-draws-smogon-vs-opponent-draws-gl composition mismatch that
+        # previously inflated PSRO-Lite per-opponent win rates relative to
+        # same-pool ladder play.
+        p1_spec, p1_file, p2_spec, p2_file = coupled_player_specs(
+            f"p1-{i}",
+            f"p2-{i}",
+            self.player_team_set,
+            self.opponent_team_set,
+            self.battle_format,
+            self.eval_side,
+        )
         self._team_files[i] = p1_file if self.eval_side == "p1" else p2_file
         self._opp_team_files[i] = p2_file if self.eval_side == "p1" else p1_file
         seed = self._random_seed()
