@@ -49,6 +49,7 @@ def run_search_eval(
     opponent_checkpoint: Optional[int] = None,
     seed: Optional[int] = None,
     action_temperature: float = 1.0,
+    eval_player_side: int = 0,
 ) -> Dict:
     """Run vectorized eval and return win-rate + search diagnostics.
 
@@ -108,7 +109,7 @@ def run_search_eval(
         opponent_sample=True,
         batched_envs=num_parallel,
         n_workers=1,
-        eval_player_side=0,
+        eval_player_side=eval_player_side,
         seed=seed,
         device=str(dev),
     )
@@ -141,7 +142,9 @@ def run_search_eval(
         # The critic is trained with reward_multiplier=10.0 (set on the
         # MultiTaskAgent via gin). It lives on agent.policy, not the experiment
         # handle ``agent``; fall back to 10.0 only if absent (returns audit).
-        reward_multiplier=float(getattr(getattr(agent, "policy", agent), "reward_multiplier", 10.0)),
+        reward_multiplier=float(
+            getattr(getattr(agent, "policy", agent), "reward_multiplier", 10.0)
+        ),
     )
 
     wins: List[float] = []
@@ -235,8 +238,11 @@ def run_search_eval(
         "search_depth": config.search_depth,
         "search_beta": config.search_beta,
         "opponent": opp_name,
+        "eval_player_side": env.eval_side,
+        "seed": seed,
         "total_battles": len(wins),
         "win_rate": win_rate,
+        "per_battle_wins": [float(w) for w in wins],
         "diagnostics": agg,
     }
 
