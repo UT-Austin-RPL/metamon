@@ -302,6 +302,17 @@ def run_paired_eval(
     run_idx = 0
     t0 = time.perf_counter()
 
+    # Stream per-run results to disk for crash safety (a 4-hour screen should
+    # not lose all data if the process dies at run 10/12). The analysis is
+    # recomputed from these at the end, but the raw per-run + per-pair data
+    # survives a crash.
+    _runs_fh = None
+    _pairs_fh = None
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _runs_fh = open(os.path.join(output_dir, "paired_runs.jsonl"), "w")
+        _pairs_fh = open(os.path.join(output_dir, "paired_pairs.jsonl"), "w")
+
     for si in range(num_seeds):
         seed = seed_base + si
         for side in sides:
@@ -326,6 +337,15 @@ def run_paired_eval(
                 eval_player_side=side,
             )
             runs.append({"seed": seed, "side": side, "search": "on", **res_on})
+            if _runs_fh is not None:
+                _runs_fh.write(
+                    json.dumps(
+                        {"seed": seed, "side": side, "search": "on", **res_on},
+                        default=lambda o: str(o),
+                    )
+                    + "\n"
+                )
+                _runs_fh.flush()
 
             # --- search-off (control) ---
             run_idx += 1
@@ -348,6 +368,15 @@ def run_paired_eval(
                 eval_player_side=side,
             )
             runs.append({"seed": seed, "side": side, "search": "off", **res_off})
+            if _runs_fh is not None:
+                _runs_fh.write(
+                    json.dumps(
+                        {"seed": seed, "side": side, "search": "off", **res_off},
+                        default=lambda o: str(o),
+                    )
+                    + "\n"
+                )
+                _runs_fh.flush()
 
             # pair by battle index
             wins_on = res_on.get("per_battle_wins", [])
@@ -358,6 +387,20 @@ def run_paired_eval(
                 pair_sides.append(side)
                 pair_seeds.append(seed)
                 pair_battle_idx.append(bi)
+                if _pairs_fh is not None:
+                    _pairs_fh.write(
+                        json.dumps(
+                            {
+                                "seed": seed,
+                                "side": side,
+                                "battle_idx": bi,
+                                "search_win": float(wins_on[bi]),
+                                "baseline_win": float(wins_off[bi]),
+                            }
+                        )
+                        + "\n"
+                    )
+                    _pairs_fh.flush()
 
     elapsed = time.perf_counter() - t0
     analysis = analyze_pairs(all_pairs, pair_sides)
@@ -366,6 +409,11 @@ def run_paired_eval(
     analysis["battles_per_seed"] = battles_per_seed
     analysis["sides"] = list(sides)
     analysis["seed_base"] = seed_base
+
+    if _runs_fh is not None:
+        _runs_fh.close()
+    if _pairs_fh is not None:
+        _pairs_fh.close()
 
     return {
         "analysis": analysis,

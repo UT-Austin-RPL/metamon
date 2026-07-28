@@ -97,6 +97,46 @@ def estimate_global_advantage_scale(
     }
 
 
+def _recover_paired(input_dir: str) -> None:
+    """Recompute the paired-eval analysis from streamed paired_pairs.jsonl."""
+    from metamon.rl.experimental.test_time_search.paired_eval import (
+        analyze_pairs,
+        write_paired_results,
+    )
+
+    pairs_path = os.path.join(input_dir, "paired_pairs.jsonl")
+    pairs = []
+    sides = []
+    for line in open(pairs_path):
+        d = json.loads(line)
+        pairs.append((float(d["search_win"]), float(d["baseline_win"])))
+        sides.append(int(d["side"]))
+    print(f"Loaded {len(pairs)} pairs from {pairs_path}")
+    analysis = analyze_pairs(pairs, sides)
+    # stub the result structure for write_paired_results
+    result = {
+        "analysis": analysis,
+        "pairs": {"all": pairs, "sides": sides, "seeds": [], "battle_idx": []},
+        "runs": [],
+        "search_config": {},
+    }
+    paths = write_paired_results(result, input_dir)
+    a = analysis
+    print(
+        json.dumps(
+            {
+                "n_pairs": a["n_pairs"],
+                "paired_delta": a["paired_delta"],
+                "bootstrap_ci": a["bootstrap_ci"],
+                "discordant_b": a["discordant_b"],
+                "discordant_c": a["discordant_c"],
+                "outputs": paths,
+            },
+            indent=2,
+        )
+    )
+
+
 def _load_records(path: str) -> List[RootResultRecord]:
     recs: List[RootResultRecord] = []
     with open(path) as f:
@@ -122,6 +162,14 @@ def main() -> None:
     args = p.parse_args()
 
     roots_path = os.path.join(args.input_dir, "root_results.jsonl")
+    if not os.path.exists(roots_path):
+        # Maybe this is a paired-eval dir, not a Phase 1 dir.
+        pairs_path = os.path.join(args.input_dir, "paired_pairs.jsonl")
+        if os.path.exists(pairs_path):
+            _recover_paired(args.input_dir)
+            return
+        print(f"No root_results.jsonl or paired_pairs.jsonl in {args.input_dir}")
+        return
     recs = _load_records(roots_path)
     print(f"Loaded {len(recs)} root records from {roots_path}")
 
