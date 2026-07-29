@@ -273,6 +273,7 @@ def run_paired_eval(
     seed_base: int = 1000,
     sides: Tuple[int, ...] = (0, 1),
     progress_fn=None,
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the paired + mirrored eval (skill §23).
 
@@ -646,6 +647,7 @@ def main() -> None:
         seed_base=args.seed_base,
         sides=tuple(args.sides),
         progress_fn=progress,
+        output_dir=args.output_dir,
     )
     paths = write_paired_results(result, args.output_dir)
     a = result["analysis"]
