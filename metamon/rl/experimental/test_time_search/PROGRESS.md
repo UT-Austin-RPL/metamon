@@ -390,3 +390,165 @@ uv run python -m metamon.rl.experimental.test_time_search.eval_search \
   --search_beta 1.0 --total_battles 100 --num_parallel 4 --seed 42 \
   --legacy_prototype --search_log_roots /tmp/sr_k4_legacy.jsonl
 ```
+
+## Phase 1 expansion (skill §22) — 120-root corpus, both gates PASS
+
+A full Phase 1 expansion was run to span the §22 stratification space and
+render the §23-precondition (search-justification) gate verdict.
+
+**Run**: K_ref=128, derived K={4,16,64}, D={0,1}, 120 roots (111 early, 9 mid),
+seed=42, decision_stride=3, ckpt epoch 740, competitive team_set. ~21s/root
+(K_ref=128 is §35-verified for 200 roots; K_ref=256 hit a 60s pump timeout at
+root 32 — the 2304-branch count exceeds the Node host's per-pump-round capacity
+over a long run; K_ref=128 with `TTS_PUMP_TIMEOUT=120` is the safe high-K).
+
+### §22 convergence gate — PASS (5/5)
+
+| D | K | top1_agree | regret | MAE | spearman | se_ratio |
+|---|---|---|---|---|---|---|
+| 0 | 4  | 0.667 | 80.1  | 246.1 | 0.874 | 1.000 |
+| 0 | 16 | 0.883 | 11.6  | 116.7 | 0.937 | 0.965 |
+| 0 | 64 | 0.925 | 2.2   | 48.3  | 0.976 | 0.799 |
+| 1 | 4  | 0.642 | 167.6 | 459.8 | 0.768 | 1.002 |
+| 1 | 16 | 0.783 | 44.5  | 221.8 | 0.877 | 0.963 |
+| 1 | 64 | 0.875 | 9.0   | 82.6  | 0.950 | 0.767 |
+
+D=0 converges cleanly (0.667→0.883→0.925); D=1 is noisier at every K (confirms
+the pilot: D=1 adds variance not information at this scale). Reference
+split-half stability: 0.892 (D=0) / 0.783 (D=1).
+
+### §23-precondition (search-justification) gate — PASS (4/4)
+
+| criterion | value | pass |
+|---|---|---|
+| addressable_opportunity | actor disagrees with ref on **63.3%** of roots | ✅ (>10%) |
+| search_adds_over_critic | D=0 disagrees with root_critic_only on **63.3%** | ✅ (>10%) |
+| concentrated_not_random | high-entropy 100% vs low-entropy 63.4% | ✅ |
+| pruning_safe | legacy 5% rule drops ref-best on 45.8% | ✅ (<50%) |
+
+**Key finding (skill §40 interpretation)**: both the actor AND root_critic_only
+are wrong 63% of the time vs the D=0 reference. The real one-step Showdown
+transition (D=0) corrects both — "the exact one-step Showdown transition is
+correcting critic action ranking. This validates the core search idea." The
+critic-only vs D=0 agreement is only 36.7%; the simulator transition changes
+the ranking 63% of the time. This is NOT a cheap critic rerank; search is
+needed.
+
+### Global advantage scale (skill §11)
+
+From the 120-root D=0 corpus: robust_std (MAD-based) = **458.7** (raw critic
+units). Recommended beta for target median KL: beta≈5.0 (KL~0.02),
+beta≈7.1 (KL~0.01), beta≈3.2 (KL~0.05). Used beta=5.0 + `global_standardized`
+for Phase 2.
+
+Artifacts: `/tmp/tts_phase1_v2/{REPORT.md, summary.json, comparison.json,
+root_results.jsonl, ...}`. Recovery tool: `analyze_roots.py`.
+
+## Phase 2 paired+mirrored eval (skill §23) — smoke COMPLETE, screen RUNNING
+
+### Smoke (20 pairs) — infrastructure verified, positive direction
+
+K=16, D=0, single_anchor_kl, resample_crn, policy_expectation, all_legal,
+beta=5.0, global_standardized (scale=458.7), every_n=3, 1 seed (2000),
+2 sides, 10 battles/side = 20 pairs. ~8.7 min.
+
+| metric | value |
+|---|---|
+| search win rate | 0.55 |
+| baseline win rate | 0.45 |
+| paired delta | **+0.10** |
+| 95% bootstrap CI | [-0.20, +0.40] (includes zero; n=20 smoke) |
+| discordant b/c | 6/4 |
+| both-lose (draws) | 5/20 (25%) |
+
+Search diagnostics: mean KL 0.03-0.06 (target 0.01-0.05 ✓), 22% argmax
+changes, ~1s latency/root. Per-side: side 0 delta +0.20 (4/2), side 1 delta
+0.00 (2/2).
+
+Verdict: INCONCLUSIVE (n=20 < 50, smoke check — no strength claim). The
+infrastructure works end-to-end: no crashes, no errors, `error_policy=raise`
+clean, mirrored side-swap verified.
+
+### Screen (600 pairs) — RUNNING
+
+3 seeds (3000-3002, held-out from Phase 1 dev at seed 42 + smoke at 2000) ×
+2 sides × 100 battles = 600 paired battles. Same config as smoke. ~3.5-4 hours.
+Artifacts: `/tmp/tts_phase2_screen/`.
+
+### Screen results — INCONCLUSIVE at all tested configurations
+
+Three configurations were evaluated with paired + mirrored battles (skill §23):
+
+| config | pairs | delta | 95% bootstrap CI | b/c | McNemar p |
+|---|---|---|---|---|---|
+| sampling (K=16, D=0, beta=5.0, every_n=3) | 500 | -0.008 | [-0.066, +0.052] | 112/116 | 0.84 |
+| argmax (same, greedy selection) | 300 | +0.037 | [-0.047, +0.117] | 83/72 | — |
+| root_critic_only (no rollout, critic rerank) | 80 | -0.038 | [-0.175, +0.100] | 14/17 | — |
+
+**All CIs include zero.** The main sampling config (500 pairs, the primary result) has
+delta = -0.008 ± 0.06 — statistically indistinguishable from baseline. The per-seed-side
+variance is high (sampling: -0.04 to +0.07; argmax: -0.08 to +0.11), confirming the effect
+is small relative to game-to-game noise.
+
+**Per-side (sampling, 500 pairs)**: side 0 delta=+0.020 (n=300, b/c=71/65), side 1
+delta=-0.050 (n=200, b/c=41/51). The side asymmetry is within noise (SE ~0.03-0.04
+per side).
+
+**Search diagnostics (sampling, consistent across runs)**: ~2000 searched roots per
+100 battles, 22% argmax changes, mean KL 0.03-0.06 (target 0.01-0.05 ✓), ~1s latency/
+root. The search is working correctly — it changes actions in the direction the
+estimator says is better, with well-calibrated KL. The issue is not a plumbing or
+calibration bug.
+
+**Argmax vs sampling**: argmax changes only 3.4% of actions (vs 22% for sampling)
+because beta=5.0 keeps the improved policy's argmax close to the base. The argmax
+point estimate (+0.037) is higher than sampling (-0.008), consistent with skill §40
+"root sampling rather than greedy choice may dilute the gain." But the argmax CI
+still includes zero, and the per-seed-side variance is very high (-0.08 to +0.11),
+so this is suggestive not conclusive. The skill §12 warns that greedy selection can
+increase exploitability in zero-sum games.
+
+**root_critic_only**: null/negative (-0.038), as expected from Phase 1 — the critic-only
+is also wrong 63% of the time (same as the actor), and critic-only vs D=0 agreement is
+only 36.7%. A cheap critic rerank does not capture the gain.
+
+### Conclusion: estimator-positive, game-negative (skill §37)
+
+The Phase 1 gates both PASS: the estimator converges with K (§22), and there IS a
+search signal — the actor is wrong 63% of the time, D=0 corrects both the actor AND
+the critic, and the real Showdown transition adds information a critic rerank cannot
+(§23-precondition gate 4/4 PASS). But this signal does NOT translate to improved game
+outcomes at the tested configuration (K=16, D=0, beta=5.0, every_n=3, self-play).
+
+Per skill §40, the likely explanations (not mutually exclusive):
+
+1. **Shaped-reward / win-probability misalignment**: the critic's Q is trained on
+   AggressiveShapedReward (damage + HP + 200*victory), not win probability. A locally
+   higher Q may not correspond to a higher win probability. Search improves the shaped
+   objective but not the game outcome.
+2. **K=16 is too noisy**: 88% top-1 agreement with the K=128 reference means ~12% of
+   action changes are in the wrong direction. These may cancel the 88% correct changes
+   over a full game.
+3. **Root sampling dilutes the gain**: argmax (+0.037) > sampling (-0.008), but argmax
+   is still INCONCLUSIVE and the skill warns about exploitability.
+4. **Oracle gains are small relative to game noise**: the per-seed-side delta variance
+   is ~0.08, meaning even a true 4% effect requires ~1000+ pairs to resolve.
+5. **Self-play symmetry**: the opponent is the same frozen policy; any improvement is
+   partially symmetric (both sides use the same value function).
+
+### What would be needed to reach a conclusion
+
+- **More pairs at the current config**: ~1000-1500 argmax pairs would tighten the CI
+  to ±0.04, potentially resolving the +0.037 trend. Compute cost: ~5-8 hours.
+- **Higher K (K=64) with every_n=1**: the most accurate estimator, exhaustive search.
+  Phase 1 showed K=64 achieves 0.925 top-1 agreement. But ~20× slower than K=16
+  (~30s/root × 85 roots/battle), making 100+ pairs infeasible in reasonable time.
+- **Different opponent (§24 opponent-model matrix)**: search might help more against
+  weaker opponents (Tauros, earlier checkpoints) where the actor is more often wrong.
+- **Objective alignment investigation**: check whether the critic's Q correlates with
+  actual game outcomes on a per-root basis. If Q doesn't predict wins, the objective
+  is the bottleneck.
+
+Artifacts: `/tmp/tts_phase2_combined/` (sampling, 500 pairs),
+`/tmp/tts_phase2_argmax_combined/` (argmax, 300 pairs), `/tmp/tts_phase2_criticonly/`
+(critic-only, 80 pairs). Recovery: `analyze_roots --input_dir <dir>`.
