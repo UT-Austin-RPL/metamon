@@ -346,6 +346,16 @@ def run_paired_eval(
                     + "\n"
                 )
                 _runs_fh.flush()
+            # Inter-run GPU cleanup: each run_search_eval creates+destroys an
+            # env and runner; without an explicit cache clear, CUDA memory can
+            # accumulate over many runs (a likely cause of silent death at run
+            # 8/12 in the first screen attempt).
+            import gc
+            import torch
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # --- search-off (control) ---
             run_idx += 1
@@ -377,6 +387,10 @@ def run_paired_eval(
                     + "\n"
                 )
                 _runs_fh.flush()
+            # Inter-run GPU cleanup (same as above).
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # pair by battle index
             wins_on = res_on.get("per_battle_wins", [])
