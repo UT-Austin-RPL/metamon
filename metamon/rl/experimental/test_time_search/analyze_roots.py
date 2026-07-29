@@ -98,30 +98,87 @@ def estimate_global_advantage_scale(
 
 
 def _recover_paired(input_dir: str) -> None:
-    """Recompute the paired-eval analysis from streamed paired_pairs.jsonl."""
+    """Recompute the paired-eval analysis from streamed paired_pairs.jsonl.
+
+    Writes the analysis + report WITHOUT truncating the streamed pair/run
+    files (uses separate filenames for the analysis output so the raw data
+    survives even if this function is run multiple times).
+    """
     from metamon.rl.experimental.test_time_search.paired_eval import (
         analyze_pairs,
-        write_paired_results,
+        _verdict_text,
     )
 
     pairs_path = os.path.join(input_dir, "paired_pairs.jsonl")
     pairs = []
     sides = []
+    seeds_seen = set()
     for line in open(pairs_path):
         d = json.loads(line)
         pairs.append((float(d["search_win"]), float(d["baseline_win"])))
         sides.append(int(d["side"]))
+        seeds_seen.add(int(d["seed"]))
     print(f"Loaded {len(pairs)} pairs from {pairs_path}")
+    if not pairs:
+        print("No pairs to analyze.")
+        return
     analysis = analyze_pairs(pairs, sides)
-    # stub the result structure for write_paired_results
-    result = {
-        "analysis": analysis,
-        "pairs": {"all": pairs, "sides": sides, "seeds": [], "battle_idx": []},
-        "runs": [],
-        "search_config": {},
-    }
-    paths = write_paired_results(result, input_dir)
+    analysis["num_seeds"] = len(seeds_seen)
+    analysis["battles_per_seed"] = (
+        len(pairs) // max(1, len(set(sides))) // max(1, analysis["num_seeds"])
+    )
+    analysis["sides"] = sorted(set(sides))
+    analysis["seed_base"] = min(seeds_seen) if seeds_seen else 0
+    analysis["elapsed_sec"] = 0.0
+
+    analysis_path = os.path.join(input_dir, "paired_analysis.json")
+    report_path = os.path.join(input_dir, "REPORT.md")
+    with open(analysis_path, "w") as f:
+        json.dump(analysis, f, indent=2, default=lambda o: str(o))
+
     a = analysis
+    md = [
+        "# Test-Time Search — Phase 2 Paired Eval (RECOVERED from streamed JSONL)",
+        "",
+        f"- **{a['n_pairs']} paired battles** ({a['discordant_b'] + a['discordant_c']} discordant)",
+        "",
+        "## Headline result",
+        "",
+        "| metric | value |",
+        "|---|---|",
+        f"| search win rate | {a['search_win_rate']:.4f} |",
+        f"| baseline win rate | {a['baseline_win_rate']:.4f} |",
+        f"| **paired delta** | **{a['paired_delta']:+.4f}** |",
+        f"| 95% bootstrap CI | [{a['bootstrap_ci']['ci_low']:+.4f}, {a['bootstrap_ci']['ci_high']:+.4f}] |",
+        f"| discordant b/c | {a['discordant_b']}/{a['discordant_c']} |",
+        f"| McNemar p | {a['mcnemar']['p_value']:.4f} |",
+        "",
+        "## Verdict",
+        "",
+        _verdict_text(a),
+        "",
+        "## Per-side",
+        "",
+        "| side | n | search WR | baseline WR | delta | b/c |",
+        "|---|---|---|---|---|---|",
+    ]
+    for side_val, sd in sorted(a["by_side"].items()):
+        md.append(
+            f"| {side_val} | {sd['n']} | {sd['search_win_rate']:.4f} | "
+            f"{sd['baseline_win_rate']:.4f} | {sd['delta']:+.4f} | "
+            f"{sd['discordant_b']}/{sd['discordant_c']} |"
+        )
+    md += [
+        "",
+        "## Full analysis",
+        "",
+        "```json",
+        json.dumps(a, indent=2, default=lambda o: str(o)),
+        "```",
+    ]
+    with open(report_path, "w") as f:
+        f.write("\n".join(md))
+
     print(
         json.dumps(
             {
@@ -130,7 +187,8 @@ def _recover_paired(input_dir: str) -> None:
                 "bootstrap_ci": a["bootstrap_ci"],
                 "discordant_b": a["discordant_b"],
                 "discordant_c": a["discordant_c"],
-                "outputs": paths,
+                "verdict": _verdict_text(a).split(":")[0],
+                "outputs": {"analysis": analysis_path, "report": report_path},
             },
             indent=2,
         )
