@@ -658,17 +658,77 @@ Spearman is moderate (0.246), not strong. `converges_with_k` barely passes
 This is a **preliminary signal, not a conclusion**. The full G=128 / 80-root /
 phase-spanning run is needed before any go/no-go claim.
 
-### Full run (GPU, G=128, 80 roots, decision_stride=3, depths=[0,1]) — RUNNING
+### Full run (GPU, G=128, 80 roots, decision_stride=3, depths=[0,1]) — Gate A PASS at n=64
 
 Kicked off in the background (`/tmp/tts_phaseA_run/`, log
 `/tmp/tts_phaseA_run.log`). G=128 (the expert's reference K), 80 roots spanning
 early/mid/late (`decision_stride=3`, `max_battles=240`), D=0 + D=1 predictors,
 per-branch matrices stored for paired diagnostics. `TTS_PUMP_TIMEOUT=120`
-(§35-verified for K_ref=128). Estimated ~5-6 min/root → ~7 hours. Streams each
-root to `terminal_win_roots.jsonl` (crash-safe); writes
-`terminal_win_REPORT.md` + `terminal_win_summary.json` + gate at the end.
+(§35-verified for K_ref=128). ~3 min/root (simulator-bound; GPU at 0-9% util
+during to-terminal continuations — the bottleneck is the single-threaded JS
+Showdown host at ~220 branch-steps/sec, not the GPU). Streams each root to
+`terminal_win_roots.jsonl` (crash-safe); `recover_terminal_win.py` re-aggregates
+the streamed JSONL into the summary + gate + report at any point.
 
-Artifacts: `/tmp/tts_phaseA_pilot/` (G=32 pilot), `/tmp/tts_phaseA_run/` (full).
-Recovery: the streamed JSONL can be re-aggregated by calling
-`aggregate_terminal_win` on the parsed records (each line is a
-`TerminalWinRootRecord.to_json()`).
+**Gate A verdict at n=64: PASS (4/4)** — the shaped critic's preference after
+an exact oracle transition DOES predict which action increases terminal win
+probability, and selecting by it wins more than the actor. This is the first
+credible evidence of objective alignment (not just estimator convergence).
+
+| criterion | result | detail |
+|---|---|---|
+| correlated | ✅ PASS | Spearman +0.330 (meaningful subset +0.392, median 0.494) |
+| improves_over_actor | ✅ PASS | regret 0.0489→0.0324 (34% reduction vs actor) |
+| not_catastrophic | ✅ PASS | D=0 decreases win vs actor only ~10% of the time |
+| converges_with_k | ✅ PASS | K4(0.380) vs K64(0.370) — flat, within 0.02 tolerance |
+
+**Phase-stratified Spearman (D=0 K=ref vs terminal win):**
+- early: 0.205 (biggest absolute regret reduction: 0.062→0.040, 35%)
+- mid: 0.080 (weakest — the shaped Q struggles most in mid-game)
+- late: 0.351 (strongest correlation; lowest regret 0.024)
+
+**Meaningful subset** (50 of 62 roots, 80.6% — the action changes the terminal
+win; 12 are no-opportunity / already-won): D=0 K=ref Spearman = 0.392 (median
+0.494 — approaching the expert's 0.5 heuristic), actor regret 0.061 → D=0
+regret 0.040 (34% of the addressable opportunity captured).
+
+**D=1 confirms Phase 1**: worse than D=0 (Spearman 0.198 vs 0.330; decrease
+freq 0.167 vs 0.10). Deeper rollout adds variance not information at this scale.
+
+**Terminal-win estimator self-converges**: term_G4 (0.13) → term_G16 (0.35) →
+term_G64 (0.67) — the ground truth is stable and prefix averaging is valid.
+
+**Honest caveats:**
+- n=64 is below the expert's 150-300 root target (though it spans 27 early /
+  19 mid / 16 late — good phase coverage).
+- The Spearman is moderate (0.33-0.39), not strong — the shaped objective is
+  only *partially* aligned with winning.
+- `converges_with_k` barely passes (flat, not increasing) — more K doesn't
+  *help* alignment, it just doesn't hurt. The shaped-Q ranking has a systematic
+  component that doesn't align with winning, but it's stable across K.
+- The mid-game correlation is weak (0.080) — the shaped Q struggles most when
+  the board state is most complex.
+- Self-play only (opponent matrix not tested).
+- 12/62 roots are no-opportunity (already-won positions where every action
+  wins 100% — these dilute the all-roots correlation with flat-target noise).
+
+**Interpretation (skill §37/§40):**
+- The Phase 2 "estimator-positive, game-negative" result was NOT primarily
+  objective misalignment — the shaped Q IS correlated with winning (Spearman
+  +0.33) and D=0 reduces terminal-win regret 34%. The game-negative result was
+  more about the KL update / sampling diluting the signal (expert failure mode
+  #2: actual median KL 0.0013 vs target 0.02; only 6.5% of decisions changed).
+- The `converges_with_k` flatness (not increasing) suggests a terminal-outcome
+  value head would still be *stronger* (directly aligned; more K would help it),
+  but the existing shaped critic has enough alignment to proceed with Phase B/C/D.
+- **Gate A PASS → proceed with the existing shaped-critic evaluator.** The next
+  steps (per the expert's plan) are Phase B (finite-budget/adaptive-K evaluation)
+  and Phase C (confidence-gated policy update — the z-score-gated update that
+  conditions intervention on signal quality, likely more useful than a globally
+  stronger β).
+
+Artifacts: `/tmp/tts_phaseA_pilot/` (G=32 pilot), `/tmp/tts_phaseA_run/`
+(full: `terminal_win_roots.jsonl`, `terminal_win_REPORT.md`,
+`terminal_win_summary.json`, `run_manifest.json`, `audit.md`).
+Recovery: `recover_terminal_win.py --input_dir /tmp/tts_phaseA_run`.
+Audit: `audit_terminal_win.py --input_dir /tmp/tts_phaseA_run --n_audit 30`.
