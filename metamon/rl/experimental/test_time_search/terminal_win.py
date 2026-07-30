@@ -777,6 +777,21 @@ def aggregate_terminal_win(
     n_draws_total = 0
     n_branches_total = 0
 
+    # "meaningful" subset: roots where the action actually changes the terminal
+    # win (spread > threshold). All-tied roots (e.g. already-won positions where
+    # every action wins 100%) contribute zero regret (good -- search can't hurt)
+    # but noise to the Spearman correlation (a flat target makes any ranking
+    # look "anti-correlated"). The shaped-Q alignment should be judged on the
+    # subset where the action matters; the no-opportunity roots are counted
+    # separately.
+    SPREAD_THRESHOLD = 0.02  # terminal-win (max - min) above which the action matters
+    meaningful_spearman_d0: List[float] = []
+    meaningful_regret_actor: List[float] = []
+    meaningful_regret_d0: List[float] = []
+    meaningful_actor_gap: List[float] = []
+    n_no_opportunity = 0  # all-tied terminal-win (action doesn't matter)
+    n_meaningful = 0
+
     for r in records:
         legal = r.legal_actions
         A = r.n_legal
@@ -792,6 +807,14 @@ def aggregate_terminal_win(
         )
         actor_win = float(tw[actor_idx_in_legal])
         actor_vs_best_gap.append(best_win - actor_win)
+
+        # classify the root: does the action actually matter?
+        tw_spread = float(np.nanmax(tw) - np.nanmin(tw))
+        is_meaningful = tw_spread > SPREAD_THRESHOLD
+        if is_meaningful:
+            n_meaningful += 1
+        else:
+            n_no_opportunity += 1
 
         rc = np.asarray(r.root_critic_q, dtype=np.float64)
         d0 = np.asarray(r.d0_q, dtype=np.float64)
@@ -852,6 +875,15 @@ def aggregate_terminal_win(
         for sname, sidx in sel_idx.items():
             regret_by_sel[sname].append(_regret(tw, best_idx, sidx))
 
+        # meaningful-subset tracking (roots where the action changes the outcome)
+        if is_meaningful:
+            sp_d0 = spearman_corr(d0, tw)
+            if not np.isnan(sp_d0):
+                meaningful_spearman_d0.append(sp_d0)
+            meaningful_regret_actor.append(_regret(tw, best_idx, actor_idx_in_legal))
+            meaningful_regret_d0.append(_regret(tw, best_idx, int(np.nanargmax(d0))))
+            meaningful_actor_gap.append(best_win - actor_win)
+
         # does shaped-search argmax decrease terminal win vs actor?
         actor_sel = actor_idx_in_legal
         for pname in ("root_critic", "d0_k_ref", "d1") + tuple(
@@ -863,8 +895,21 @@ def aggregate_terminal_win(
             pidx = int(np.nanargmax(pred))
             decrease_freq_by_pred[pname].append(float(tw[pidx] < actor_win - 1e-9))
 
-        # stratification tags
-        tags_phase.append(r.phase_band)
+        # stratification tags -- phase recomputed from the ACTUAL battle-length
+        # estimate (decision + mean_steps_to_terminal), not the static
+        # typical_battle_len=120 heuristic in root_dataset.phase_band (which
+        # mislabels late-game roots as "early" in short ~35-decision self-play
+        # games). The record's stored phase_band is kept as phase_band_static
+        # for audit; the analysis uses the calibrated band.
+        est_battle_len = r.decision + max(r.mean_steps_to_terminal, 1.0)
+        frac = r.decision / max(est_battle_len, 1.0)
+        if frac < 0.33:
+            phase_cal = "early"
+        elif frac < 0.66:
+            phase_cal = "mid"
+        else:
+            phase_cal = "late"
+        tags_phase.append(phase_cal)
         tags_entropy.append(r.entropy_band)
         tags_top2gap.append(r.top2_gap_band)
         tags_request.append(r.request_kind)
@@ -928,6 +973,20 @@ def aggregate_terminal_win(
             if actor_vs_best_gap
             else float("nan")
         ),
+        # meaningful-subset: roots where the action actually changes the terminal
+        # win (spread > 0.02). All-tied roots are "no-opportunity" (search can't
+        # help, and their Spearman is noise against a flat target).
+        "n_meaningful": n_meaningful,
+        "n_no_opportunity": n_no_opportunity,
+        "meaningful_spearman_d0_k_ref_mean": nm(meaningful_spearman_d0),
+        "meaningful_spearman_d0_k_ref_median": (
+            float(np.nanmedian(meaningful_spearman_d0))
+            if meaningful_spearman_d0
+            else float("nan")
+        ),
+        "meaningful_actor_regret_mean": nm(meaningful_regret_actor),
+        "meaningful_d0_k_ref_regret_mean": nm(meaningful_regret_d0),
+        "meaningful_actor_gap_mean": nm(meaningful_actor_gap),
     }
 
     # stratification of the primary correlation (D=0 K=ref) + actor regret
@@ -956,6 +1015,12 @@ def aggregate_terminal_win(
     }
     out["phase_distribution"] = {
         b: int(tags_phase.count(b)) for b in ("early", "mid", "late")
+    }
+    # also report the static (heuristic) phase bands for comparison, so the
+    # miscalibration is visible in the report
+    static_phases = [r.phase_band for r in records if r.n_legal >= 2]
+    out["phase_distribution_static_heuristic"] = {
+        b: int(static_phases.count(b)) for b in ("early", "mid", "late")
     }
     out["request_kind_distribution"] = {
         b: int(tags_request.count(b)) for b in ("move", "forceswitch")
@@ -1169,6 +1234,17 @@ def report_markdown(
         f"Actor vs terminal-win-best gap: mean = {_fmt(summary.get('actor_vs_best_gap_mean'))}, "
         f"median = {_fmt(summary.get('actor_vs_best_gap_median'))} "
         "(the terminal-win the actor leaves on the table -- the addressable opportunity).",
+        "",
+        f"**Meaningful subset** (roots where the action changes the terminal win, "
+        f"spread > 0.02): n = {summary.get('n_meaningful', 0)} of "
+        f"{summary.get('n_roots_used', 0)} ({_fmt(summary.get('n_meaningful', 0) / max(summary.get('n_roots_used', 1), 1))} of roots). "
+        f"{summary.get('n_no_opportunity', 0)} roots are no-opportunity (all actions tie -- search can't help, and their Spearman is noise).",
+        "",
+        f"On the meaningful subset: D=0 K=ref Spearman = {_fmt(summary.get('meaningful_spearman_d0_k_ref_mean'))} "
+        f"(median {_fmt(summary.get('meaningful_spearman_d0_k_ref_median'))}), "
+        f"actor regret = {_fmt(summary.get('meaningful_actor_regret_mean'))}, "
+        f"D=0 K=ref regret = {_fmt(summary.get('meaningful_d0_k_ref_regret_mean'))}, "
+        f"actor-vs-best gap = {_fmt(summary.get('meaningful_actor_gap_mean'))}.",
         "",
         "## Stratified (D=0 K_ref Spearman + regret)",
         "",

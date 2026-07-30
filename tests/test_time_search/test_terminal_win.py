@@ -111,6 +111,7 @@ def _synth_record(
     phase: str = "early",
     request_kind: str = "move",
     tactical: str = "move",
+    mean_steps_to_terminal: float = 60.0,
 ) -> TerminalWinRootRecord:
     A = len(legal)
     return TerminalWinRootRecord(
@@ -147,7 +148,7 @@ def _synth_record(
         per_action_wins=None,
         per_action_shaped_r=None,
         G=G,
-        mean_steps_to_terminal=60.0,
+        mean_steps_to_terminal=mean_steps_to_terminal,
         latency_ms_shaped=1000.0,
         latency_ms_terminal=50000.0,
     )
@@ -224,16 +225,22 @@ def test_aggregate_stratification_by_phase_and_tactical():
     for i in range(6):
         phase = "early" if i < 3 else "mid"
         tac = "move+imminent_ko" if i < 3 else "move"
+        # calibrated phase = decision / (decision + mean_steps). For "early"
+        # (frac < 0.33): mean_steps > 2*decision. For "mid" (0.33-0.66):
+        # mean_steps in [0.5*decision, 2*decision).
+        dec = 5 * i
+        ms = 60.0 if i < 3 else 15.0  # early: 5/65=0.08; mid: 15/30=0.5, 25/40=0.625
         recs.append(
             _synth_record(
                 battle_id=f"b{i}",
-                decision=5 * i,
+                decision=dec,
                 legal=[0, 1],
                 base_probs=[0.5, 0.5],
                 shaped_q=[10.0, 20.0],
                 terminal_win=[0.3, 0.7],
                 phase=phase,
                 tactical=tac,
+                mean_steps_to_terminal=ms,
             )
         )
     s = aggregate_terminal_win(recs, [4, 16, 64])
