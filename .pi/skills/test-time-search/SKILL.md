@@ -183,16 +183,19 @@ A G=32 / 12-root preliminary pilot **PASSED Gate A (4/4)** with an encouraging
 signal: D=0 K=ref Spearman vs terminal win = +0.246, and D=0 search reduces
 terminal-win regret 0.126→0.089 (−29% vs the actor). The terminal-win estimator
 self-converges (term_G16 Spearman 0.679). The full G=128 run then **PASSED
-Gate A (4/4) at n=64** (27 early / 19 mid / 16 late): Spearman +0.330
-(meaningful subset +0.392, median 0.494), regret 0.049→0.032 (−34% vs actor),
-catastrophic errors ~10%, converges_with_k flat-but-passing. This is the first
+Gate A (4/4) at n=80** (37 early / 23 mid / 18 late, 3.63 hours): Spearman
++0.297 (meaningful subset +0.336, median 0.418), regret 0.055→0.038 (−32% vs
+actor), catastrophic errors 14%, converges_with_k flat-but-passing (K4=0.331 vs
+K64=0.330). D=0 beats the actor in all phases (strongest in late game: 44%
+regret reduction; biggest absolute gain in early: 36%). This is the first
 credible evidence of objective alignment — the Phase 2 "game-negative" result
 was more about the KL update/sampling diluting the signal than fundamental
 objective misalignment. **Gate A PASS → proceed with the existing shaped-critic
-evaluator (then Phase B/C/D).** A terminal-outcome value head would still likely
-be stronger (the `converges_with_k` is flat not increasing — more K doesn't *help*
-alignment, it just doesn't hurt), but the shaped critic has enough alignment to
-proceed. See `PROGRESS.md` "Phase A" for the full table + honest caveats.
+evaluator (then Phase B/C/D).** A terminal-outcome value head would still
+likely be stronger (the `converges_with_k` is flat not increasing — more K
+doesn't *help* alignment, it just doesn't hurt), but the shaped critic has
+enough alignment to proceed. See `PROGRESS.md` "Phase A" for the full table +
+honest caveats.
 
 ### The main change in research strategy
 
