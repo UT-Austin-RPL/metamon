@@ -552,3 +552,123 @@ Per skill §40, the likely explanations (not mutually exclusive):
 Artifacts: `/tmp/tts_phase2_combined/` (sampling, 500 pairs),
 `/tmp/tts_phase2_argmax_combined/` (argmax, 300 pairs), `/tmp/tts_phase2_criticonly/`
 (critic-only, 80 pairs). Recovery: `analyze_roots --input_dir <dir>`.
+
+## Phase A: terminal-win fixed-root benchmark (skill §37 "Gate A") — IMPLEMENTED + RUNNING
+
+The expert diagnosis of the Phase 2 "estimator-positive, game-negative" result
+identified the central unmeasured question as **objective alignment**:
+
+> Does the frozen critic's preference after an exact oracle transition predict
+> which action actually increases terminal win probability?
+
+The shaped critic is trained on `AggressiveShapedReward` (damage + HP +
+200*victory), not win probability. Until that correlation is measured, larger K,
+deeper search, more opponents, and thousands of additional battles are premature.
+Phase A is the go/no-go gate for that question.
+
+### Implementation
+
+- **`search_driver.SearchEvalRunner.terminal_continuations()`** — the core new
+  capability. For one forced root action `a` and `G` continuations: forks `G`
+  branches (CRN seed bank, same as the shaped-Q estimate), forces action `a`,
+  settles the root, then **continues both sides with the frozen policy until
+  every branch reaches a terminal state** (looping the validated `_rollout_step`
+  + `_pump_branches`), and records the actual `battle_won` outcome per branch
+  (1.0 win / 0.0 loss / 0.5 draw). Reuses ALL Phase 0 rollout infrastructure;
+  the only new logic is (a) one forced action (G branches, not A*K) so
+  concurrency stays at G, (b) loop to terminal instead of fixed depth, (c)
+  terminal outcome instead of critic bootstrap. Cleanup in `finally` (no leak).
+- **`terminal_win.py`** (new) — the benchmark + analysis + gate + CLI:
+  - `benchmark_terminal_win()` drives the env with the baseline policy (natural
+    self-play corpus), and at each phase-stratified root records the shaped-Q
+    predictors (`root_critic_only`, `D=0` K_ref with per-branch `R`, optional
+    `D=1`) via `estimate_root`, then runs `terminal_continuations` for **every
+    legal action** to get the terminal-win ground truth. Derives every lower-K
+    shaped Q and lower-G terminal win by prefix averaging (the per-`k` chance
+    stream is K-independent — `rng.py`). Streams each root to JSONL (crash
+    safety).
+  - `_extract_tactical_features()` — stratifies by the tactical categories the
+    expert asked for (imminent KO, at-risk, status, forced switch, endgame) from
+    the root's universal state, plus the phase/entropy/top-2-gap bands.
+  - `aggregate_terminal_win()` — the central outputs: **Spearman correlation**
+    between each shaped-Q predictor and terminal win probability (per-root +
+    aggregated), **pairwise top-1 ordering accuracy**, **terminal-win regret**
+    of each selector (actor / root-critic / D=0 K=16 / D=0 K=128 / D=1), and the
+    **frequency a shaped-search argmax decreases terminal win vs the actor**.
+    Stratified by phase, entropy, top-2 gap, request kind, tactical category.
+  - `terminal_win_gate()` — Gate A (4 criteria): `correlated` (Spearman > 0),
+    `improves_over_actor` (D=0 K=ref regret < actor regret), `not_catastrophic`
+    (decrease freq < 50%), `converges_with_k` (high-K Spearman >= low-K).
+    PASS = proceed with the existing shaped-critic evaluator (then Phase B/C/D);
+    PARTIAL/FAIL = the shaped objective is not aligned with winning → train a
+    terminal-outcome value head (skill §37 "Failure outcome").
+
+**CRN pairing (skill §7):** the terminal continuation for action `a` at rollout
+index `k` uses the *same* branch seed + coupled opponent root action as the
+shaped-Q estimate's branch `k` for action `a` (the seed bank keys on `(root, k)`,
+not action identity). So `wins[a, k]` pairs with `R[a, k]` on the same chance
+stream — the exact counterfactual pairing. Verified by
+`test_terminal_continuation_seed_is_action_independent`.
+
+### Tests
+
+`test_terminal_win.py` (14): 13 CPU (prefix-win-rate derivation, binomial SEM,
+CRN action-independence, perfect/anti/no-correlation aggregation, regret +
+actor-gap, stratification, truncation/draw rates, the 4 gate verdicts) + 1
+GPU-gated end-to-end smoke (G=8, 2-root fork-to-terminal on the real ckpt →
+well-formed records + gate verdict). **Full suite: 143 passed** on GPU (130
+existing + 13 new CPU; the GPU smoke passes in ~55s).
+
+### Preliminary pilot (GPU, G=32, 12 roots, ~15 min) — gate PASS (4/4), encouraging
+
+| predictor | mean Spearman vs terminal win | top-1 match |
+|---|---|---|
+| root_critic | 0.179 | 0.179 |
+| D=0 K=ref (32) | **0.246** | 0.246 |
+| D=0 K=4 | 0.178 | 0.417 |
+| D=0 K=16 | 0.172 | 0.417 |
+| term_G16 (self-consistency) | 0.679 | 0.583 |
+
+| selector | mean terminal-win regret |
+|---|---|
+| actor (frozen) | 0.126 |
+| root_critic | 0.097 |
+| **D=0 K=ref** | **0.089** (−29% vs actor) |
+| term_G16 | 0.025 (near-zero: the G=16 estimate ≈ the G=32 reference) |
+
+**Key findings (preliminary, n=12, all early-phase, G=32):**
+
+1. **The shaped objective IS partially aligned with winning** — D=0 K=ref
+   Spearman vs terminal win = +0.246 (positive). This is the first direct
+   evidence that the §23 "game-negative" result was more about the KL
+   update/sampling diluting the signal (expert failure mode #2) than about
+   fundamental objective misalignment (failure mode #1).
+2. **D=0 search reduces terminal-win regret 0.126 → 0.089** (a 29% reduction).
+   Selecting by shaped Q wins more than the actor on these roots.
+3. **The terminal-win estimator self-converges**: term_G4 Spearman 0.333 →
+   term_G16 0.679 (derived-G' vs G_ref ranking agreement rises with G);
+   term_G16 regret 0.025 (near-zero). Confirms the ground truth is stable and
+   prefix averaging is valid.
+4. **Catastrophic errors are rare**: D=0 K=ref decreases terminal win vs actor
+   only 16.7% of the time.
+
+**Honest limitations:** n=12 (all early-phase, self-play opponent, G=32). The
+Spearman is moderate (0.246), not strong. `converges_with_k` barely passes
+(K4=0.178 vs K16=0.172 — within the 0.02 tolerance but not monotonically rising).
+This is a **preliminary signal, not a conclusion**. The full G=128 / 80-root /
+phase-spanning run is needed before any go/no-go claim.
+
+### Full run (GPU, G=128, 80 roots, decision_stride=3, depths=[0,1]) — RUNNING
+
+Kicked off in the background (`/tmp/tts_phaseA_run/`, log
+`/tmp/tts_phaseA_run.log`). G=128 (the expert's reference K), 80 roots spanning
+early/mid/late (`decision_stride=3`, `max_battles=240`), D=0 + D=1 predictors,
+per-branch matrices stored for paired diagnostics. `TTS_PUMP_TIMEOUT=120`
+(§35-verified for K_ref=128). Estimated ~5-6 min/root → ~7 hours. Streams each
+root to `terminal_win_roots.jsonl` (crash-safe); writes
+`terminal_win_REPORT.md` + `terminal_win_summary.json` + gate at the end.
+
+Artifacts: `/tmp/tts_phaseA_pilot/` (G=32 pilot), `/tmp/tts_phaseA_run/` (full).
+Recovery: the streamed JSONL can be re-aggregated by calling
+`aggregate_terminal_win` on the parsed records (each line is a
+`TerminalWinRootRecord.to_json()`).

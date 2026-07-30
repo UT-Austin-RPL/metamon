@@ -342,6 +342,42 @@ class RootEstimate:
     latency_ms: float
 
 
+@dataclass
+class TerminalContinuationResult:
+    """Public result of :meth:`SearchEvalRunner.terminal_continuations`.
+
+    The ground-truth estimator for the Phase A terminal-win fixed-root
+    benchmark: ``G`` continuations of one forced root action, each played to a
+    terminal state with the frozen policy on both sides. ``wins[k]`` is the
+    actual eval-side outcome (1.0 win / 0.0 loss / 0.5 draw) for rollout index
+    ``k``.
+
+    CRN pairing (skill §7): if ``G`` and the root identity match the
+    :meth:`estimate_root` call for the same root/action, ``wins[k]`` shares the
+    same branch seed + coupled opponent root action as the shaped-Q estimate's
+    branch ``k`` for this action -- so the benchmark can pair shaped Q against
+    terminal win on the *same* chance stream.
+    """
+
+    forced_action: int
+    wins: np.ndarray  # (G,) 1.0 win / 0.0 loss / 0.5 draw (eval-side POV)
+    terminal: np.ndarray  # (G,) bool: branch reached a terminal state
+    truncated: np.ndarray  # (G,) bool: hit max_steps without ending
+    steps_to_terminal: np.ndarray  # (G,) int: settled eval decisions to end
+    rollout_index: np.ndarray  # (G,) k for each branch (pairs with shaped-Q R)
+    opp_root_actions: List[int]  # per-k coupled opponent root action
+    env_seed_hashes: List[str]  # per-k branch seed hash
+    win_rate: float  # mean wins over non-truncated branches (draws = 0.5)
+    n_wins: int
+    n_losses: int
+    n_draws: int
+    n_truncated: int
+    G: int
+    chance_mode: str
+    n_steps_played: int  # rollout steps looped (excludes root settlement)
+    latency_ms: float
+
+
 # ---------------------------------------------------------------------------
 # Search driver
 # ---------------------------------------------------------------------------
@@ -1013,6 +1049,200 @@ class SearchEvalRunner:
         finally:
             self.config = saved_cfg
 
+    def terminal_continuations(
+        self,
+        trunk_lane_idx: int,
+        obs: dict,
+        legal: List[int],
+        forced_action: int,
+        config: SearchConfig,
+        max_steps_to_terminal: int = 250,
+    ) -> TerminalContinuationResult:
+        """Play one forced root action to terminal for ``G`` coupled continuations.
+
+        The ground-truth estimator for the Phase A terminal-win fixed-root
+        benchmark (the §37 "estimator-positive, game-negative" follow-up):
+        instead of bootstrapping the shaped critic after a short rollout, this
+        continues **both sides with the frozen policy until each branch reaches a
+        terminal state** and records the actual win/loss outcome. The frozen
+        shaped critic's Q (recorded separately via :meth:`estimate_root`) is then
+        correlated against this terminal win probability to answer the central
+        go/no-go question:
+
+        > Does the frozen critic's preference after an exact oracle transition
+        > predict which action actually increases terminal win probability?
+
+        Reuses the validated Phase 0 rollout infrastructure
+        (``_rollout_root`` / ``_rollout_step`` / ``_pump_branches`` /
+        ``_cleanup_branches``). Differences from ``_rollout_core``:
+
+        * **one forced action** -- ``G`` branches all force ``forced_action``
+          (not ``A*K`` over all actions), so the concurrent branch count stays
+          at ``G`` (compute-efficient; keeps pump times bounded vs. ``A*G``);
+        * **to terminal** -- ``_rollout_step`` is looped until every branch ends
+          (or ``max_steps_to_terminal``), instead of a fixed ``search_depth``;
+        * **terminal outcome** -- the leaf value is the actual
+          ``battle_won`` (1.0/0.0/0.5 draw), not a critic bootstrap.
+
+        CRN pairing with the shaped-Q estimate (skill §7): the branch seed bank
+        keys on ``(search_seed, battle_id, side, decision, k)`` -- NOT on action
+        identity -- so if ``config.search_rollouts_per_action == G`` and
+        ``self._battle_id`` / ``self._decision_counter`` match the
+        :meth:`estimate_root` call for the same root, rollout index ``k`` here
+        uses the *same* branch seed and the *same* coupled opponent root action
+        as the shaped-Q estimate's branch ``k`` for this action. The root
+        settlement is therefore identical and ``wins[k]`` pairs with
+        ``R[action, k]`` -- the exact counterfactual pairing the benchmark needs.
+
+        Errors propagate (``_rollout_core``-style ``finally`` cleanup; no silent
+        fallback). The trunk lane is never advanced by phantom rollouts.
+        """
+        saved_cfg = self.config
+        br: Optional[_Branches] = None
+        try:
+            self.config = config
+            t0 = time.perf_counter()
+            cfg = config
+            G = int(cfg.search_rollouts_per_action)
+            proc = self.env.proc
+            eval_side = self.env.eval_side
+
+            # --- snapshot (validated deepcopy + no-replay path) ---
+            proc.drain()
+            snap_id = proc.snapshot(trunk_lane_idx)
+            proc.drain()
+
+            # --- deterministic branch seed bank (skill §7; CRN across actions) ---
+            if cfg.search_chance_mode == "resample_crn":
+                seed_bank = RootSeedBank.build(
+                    cfg.search_seed,
+                    self._battle_id,
+                    eval_side,
+                    self._decision_counter,
+                    G,
+                )
+                branch_seeds: Optional[List[Optional[List[int]]]] = [
+                    seed_bank.env_seed_for_branch(b) for b in range(G)
+                ]
+                env_seed_hashes = seed_bank.env_seed_hashes
+            else:  # inherited_trunk_rng (future-chance oracle DIAGNOSTIC)
+                seed_bank = None
+                branch_seeds = None
+                env_seed_hashes = []
+
+            branch_lane_ids = self._alloc_fork_lanes(G)
+            branch_lanes = []
+            for bid in branch_lane_ids:
+                fl = copy.deepcopy(self._trunk_lane(trunk_lane_idx))
+                fl.lane_id = bid
+                proc.register_lane(bid, fl)
+                branch_lanes.append(fl)
+            proc.fork_batch(
+                snap_id, branch_lane_ids, replay_log=False, seeds=branch_seeds
+            )
+
+            eval_branch = make_branch_state(
+                self.eval_driver, trunk_lane_idx, G, self.device
+            )
+            opp_branch = make_branch_state(
+                self.opponent._driver, trunk_lane_idx, G, self.device
+            )
+
+            # All G branches force the SAME root action; rollout_index = 0..G-1
+            # so the seed bank maps branch b -> env_seeds[b] (k = b), matching the
+            # shaped-Q estimate's branch k for this action (CRN pairing).
+            root_action = np.full(G, int(forced_action), dtype=np.int64)
+            rollout_index = np.arange(G, dtype=np.int64)
+
+            br = _Branches(
+                lane_ids=branch_lane_ids,
+                lanes=branch_lanes,
+                root_action=root_action,
+                rollout_index=rollout_index,
+                active=np.ones(G, dtype=bool),
+                depth_done=np.zeros(G, dtype=np.int64),
+                cum_reward=np.zeros(G, dtype=np.float64),
+                terminal=np.zeros(G, dtype=bool),
+                eval_hidden=eval_branch.hidden,
+                eval_rl2s=eval_branch.rl2s.copy(),
+                eval_steps=eval_branch.step_counts.copy(),
+                opp_hidden=opp_branch.hidden,
+                opp_rl2s=opp_branch.rl2s.copy(),
+                opp_steps=opp_branch.step_counts.copy(),
+                snap_id=snap_id,
+                trunk_lane=trunk_lane_idx,
+                prev_eval_state=[None] * G,
+                gamma=float(self.eval_policy.gammas[cfg.critic_horizon_index].item()),
+                seed_bank=seed_bank,
+            )
+
+            # --- force the root action; settle; park at next eval decision ---
+            self._rollout_root(br, obs)
+            opp_root_actions = self._last_opp_root_actions
+
+            # --- continue both sides with the frozen policy until terminal ---
+            steps_to_terminal = br.depth_done.copy()  # root settlement = 1
+            n_steps = 0
+            while br.active.any() and n_steps < max_steps_to_terminal:
+                prev_active = br.active.copy()
+                self._rollout_step(br)
+                n_steps += 1
+                # record the step count at which each branch became terminal
+                for i in np.where(prev_active & ~br.active)[0]:
+                    steps_to_terminal[i] = int(br.depth_done[i])
+
+            # --- read terminal win outcomes (eval-side perspective) ---
+            wins = np.full(G, 0.5, dtype=np.float64)
+            terminal = br.terminal.copy()
+            truncated = np.zeros(G, dtype=bool)
+            n_wins = n_losses = n_draws = n_truncated = 0
+            for i in range(G):
+                if br.terminal[i]:
+                    bw = br.lanes[i].universal_state(eval_side).battle_won
+                    if bw is True:
+                        wins[i] = 1.0
+                        n_wins += 1
+                    elif bw is False:
+                        wins[i] = 0.0
+                        n_losses += 1
+                    else:  # tie / draw
+                        wins[i] = 0.5
+                        n_draws += 1
+                else:
+                    # hit max_steps without ending -> truncated (not a real
+                    # outcome); flagged so the benchmark can exclude it.
+                    truncated[i] = True
+                    n_truncated += 1
+
+            latency = (time.perf_counter() - t0) * 1000.0
+            non_trunc = ~truncated
+            win_rate = (
+                float(wins[non_trunc].mean()) if non_trunc.any() else float("nan")
+            )
+            return TerminalContinuationResult(
+                forced_action=int(forced_action),
+                wins=wins,
+                terminal=terminal,
+                truncated=truncated,
+                steps_to_terminal=steps_to_terminal,
+                rollout_index=rollout_index,
+                opp_root_actions=opp_root_actions,
+                env_seed_hashes=env_seed_hashes,
+                win_rate=win_rate,
+                n_wins=n_wins,
+                n_losses=n_losses,
+                n_draws=n_draws,
+                n_truncated=n_truncated,
+                G=G,
+                chance_mode=str(cfg.search_chance_mode),
+                n_steps_played=n_steps,
+                latency_ms=float(latency),
+            )
+        finally:
+            if br is not None:
+                self._cleanup_branches(br)
+            self.config = saved_cfg
+
     # ----- rollout steps --------------------------------------------------
 
     def _send_branch_choices(
@@ -1386,7 +1616,63 @@ class SearchEvalRunner:
                 proc.choose_batch(entries)
             return done
 
-        proc.pump_until(ready, timeout=60.0, idle_timeout=20.0)
+        # The settle timeout is configurable via TTS_PUMP_TIMEOUT (default
+        # 60s) so a slow high-K root -- where A*K forked lanes (e.g. 9*128 =
+        # 1152) each walk a mid-game faint cascade inside one pump_until call --
+        # can be measured instead of hard-crashing (skill §35: a timeout is a
+        # correctness issue only if it is a settle-LOGIC stall; a throughput
+        # limit at high branch count is a capacity bug, diagnosed separately).
+        pump_timeout = float(os.environ.get("TTS_PUMP_TIMEOUT", "60.0"))
+        verbose = os.environ.get("TTS_PUMP_VERBOSE", "0") == "1"
+        n_active = int(br.active.sum())
+        _t0 = time.monotonic()
+        try:
+            proc.pump_until(ready, timeout=pump_timeout, idle_timeout=20.0)
+        except Exception:
+            # Stall-state dump (skill §35 / HANDOFF_GPU §5): print per
+            # active non-ended branch lane so the unhandled settle state can
+            # be compared against _pump_settle's handling.
+            dt = time.monotonic() - _t0
+            print(
+                f"  [pump-timeout] dt={dt:.1f}s n_active={n_active} "
+                f"depth_done={int(br.depth_done[br.active].mean()) if n_active else 0}",
+                flush=True,
+            )
+            if os.environ.get("TTS_STALL_DUMP") == "1":
+                eval_side = self.env.eval_side
+                opp_side = self.env.opp_side
+                for i in np.where(br.active)[0]:
+                    lane = br.lanes[i]
+                    if lane.ended:
+                        continue
+                    print(
+                        f"  [stall] b{i} root_a={br.root_action[i]} k={br.rollout_index[i]} "
+                        f"depth_done={br.depth_done[i]} | "
+                        f"eval: kind={lane.request_kind(eval_side)} "
+                        f"serial={lane.request_serial[eval_side]} "
+                        f"settled={lane.settled_serial[eval_side]} "
+                        f"needs={lane.needs_agent_decision(eval_side)} "
+                        f"ready={lane._side_ready(eval_side)} "
+                        f"reprompt={lane.reprompt_pending[eval_side]} "
+                        f"err={lane.error[eval_side]} | "
+                        f"opp: kind={lane.request_kind(opp_side)} "
+                        f"serial={lane.request_serial[opp_side]} "
+                        f"settled={lane.settled_serial[opp_side]} "
+                        f"needs={lane.needs_agent_decision(opp_side)} "
+                        f"ready={lane._side_ready(opp_side)} "
+                        f"reprompt={lane.reprompt_pending[opp_side]} "
+                        f"err={lane.error[opp_side]} | "
+                        f"decision_ready={lane.decision_ready()} ended={lane.ended}",
+                        flush=True,
+                    )
+            raise
+        dt = time.monotonic() - _t0
+        if verbose or dt > 10.0:
+            print(
+                f"  [pump] dt={dt:.1f}s n_active={n_active} "
+                f"depth_done={int(br.depth_done[br.active].mean()) if n_active else 0}",
+                flush=True,
+            )
         for i in np.where(br.active)[0]:
             if br.lanes[i].ended:
                 br.terminal[i] = True

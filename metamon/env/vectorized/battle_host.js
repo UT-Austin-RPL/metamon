@@ -303,7 +303,15 @@ function handleCommand(msg) {
     }
     case "reset": {
       const lane = lanes.get(msg.lane);
-      if (lane) lane.destroy();
+      if (lane) {
+        lane.destroy();
+        // Remove the lane shell from the map so it does not accumulate:
+        // test-time search allocates ever-incrementing fork-lane ids (never
+        // recycled), so without this delete the map grows by ~A*K entries per
+        // searched root per config and the host degrades / stalls after a few
+        // hundred roots. getLane() re-creates a fresh Lane on demand.
+        lanes.delete(msg.lane);
+      }
       break;
     }
     case "snapshot": {

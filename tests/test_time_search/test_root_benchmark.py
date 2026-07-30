@@ -34,6 +34,9 @@ from metamon.rl.experimental.test_time_search.benchmark_roots import (
     spearman_corr,
     kendall_corr,
     build_grid_configs,
+    estimator_comparison,
+    comparison_table,
+    search_justification_gate,
 )
 from metamon.rl.experimental.test_time_search.root_dataset import (
     compute_root_features,
@@ -468,6 +471,276 @@ class TestConfigGrid:
 
 
 # ---------------------------------------------------------------------------
+# CPU: estimator head-to-head (actor vs critic-only vs D=0-ref vs D=1)
+# ---------------------------------------------------------------------------
+
+
+def _make_record_with_configs(
+    legal,
+    base_probs,
+    base_argmax,
+    d0_q,
+    critic_q=None,
+    d1_q=None,
+    entropy="medium",
+    phase="mid",
+    critic_disagreement=0.0,
+):
+    """Build a RootResultRecord with the configs dict estimator_comparison reads."""
+    legal_arr = np.asarray(legal)
+    d0_argmax = int(legal_arr[int(np.argmax(d0_q))])
+    configs = {
+        "d0": {
+            "q_mean": [float(x) for x in d0_q],
+            "q_argmax": d0_argmax,
+            "critic_disagreement": float(critic_disagreement),
+        }
+    }
+    if critic_q is not None:
+        configs["root_critic_only"] = {
+            "q_mean": [float(x) for x in critic_q],
+            "q_argmax": int(legal_arr[int(np.argmax(critic_q))]),
+        }
+    if d1_q is not None:
+        configs["d1"] = {
+            "q_mean": [float(x) for x in d1_q],
+            "q_argmax": int(legal_arr[int(np.argmax(d1_q))]),
+        }
+    return RootResultRecord(
+        root_id="r",
+        battle_id="b",
+        lane=0,
+        decision=0,
+        legal_actions=[int(x) for x in legal_arr],
+        base_probs=[float(x) for x in np.asarray(base_probs)[legal_arr]],
+        base_argmax=int(base_argmax),
+        base_entropy=1.0,
+        base_top2_gap=0.2,
+        entropy_band=entropy,
+        top2_gap_band="medium",
+        phase_band=phase,
+        n_legal=int(legal_arr.size),
+        configs=configs,
+    )
+
+
+class TestEstimatorComparison:
+    def test_actor_agrees_with_ref_everywhere(self):
+        # actor argmax == d0 argmax on every root -> 0 disagreement
+        recs = [
+            _make_record_with_configs(
+                legal=[0, 1, 2],
+                base_probs=[0.6, 0.3, 0.1],
+                base_argmax=0,
+                d0_q=[100.0, 50.0, 10.0],
+                critic_q=[90.0, 50.0, 10.0],
+                entropy="low",
+                phase="early",
+            )
+            for _ in range(5)
+        ]
+        comp = estimator_comparison(recs)
+        assert comp["n_roots"] == 5
+        assert comp["actor_disagrees_with_ref"] == 0.0
+        # regret is 0 when actor == ref
+        assert comp["actor_mean_regret_vs_ref"] == 0.0
+
+    def test_actor_disagrees_critic_agrees_with_ref(self):
+        # actor picks action 0, but ref (d0) and critic both pick action 1
+        recs = [
+            _make_record_with_configs(
+                legal=[0, 1, 2],
+                base_probs=[0.6, 0.3, 0.1],
+                base_argmax=0,
+                d0_q=[50.0, 100.0, 10.0],
+                critic_q=[50.0, 100.0, 10.0],
+                entropy="high",
+                phase="mid",
+                critic_disagreement=10.0,
+            )
+            for _ in range(5)
+        ]
+        comp = estimator_comparison(recs)
+        assert comp["actor_disagrees_with_ref"] == 1.0
+        # critic agrees with d0 -> critic disagreement with ref = 0
+        assert comp["root_critic_only_disagrees_with_ref"] == 0.0
+        # actor vs critic: they disagree
+        assert comp["actor_vs_critic_agree"] == 0.0
+        # regret: ref[best]=100, ref[actor_pick=0]=50 -> regret 50
+        assert comp["actor_mean_regret_vs_ref"] == pytest.approx(50.0)
+
+    def test_d0_disagrees_with_critic(self):
+        # critic picks 0, d0 picks 1 -> critic_vs_d0 agreement = 0
+        recs = [
+            _make_record_with_configs(
+                legal=[0, 1],
+                base_probs=[0.5, 0.5],
+                base_argmax=0,
+                d0_q=[50.0, 100.0],
+                critic_q=[100.0, 50.0],
+                d1_q=[50.0, 100.0],
+                entropy="medium",
+                phase="late",
+            )
+        ]
+        comp = estimator_comparison(recs)
+        assert comp["critic_vs_d0_agree"] == 0.0
+        assert comp["d0_vs_d1_agree"] == 1.0  # d1 matches d0
+
+    def test_pruning_diagnostic_drops_ref_best(self):
+        # ref-best is action 1 (d0_q=[10, 100]) but its base_prob (0.02) is < 5%
+        # of max (0.95) -> legacy prune would drop it.
+        recs = [
+            _make_record_with_configs(
+                legal=[0, 1],
+                base_probs=[0.95, 0.02],
+                base_argmax=0,
+                d0_q=[10.0, 100.0],
+                critic_q=[10.0, 100.0],
+            )
+        ]
+        comp = estimator_comparison(recs)
+        assert comp["legacy_prune_would_drop_ref_best"] == 1.0
+
+    def test_pruning_diagnostic_keeps_ref_best(self):
+        recs = [
+            _make_record_with_configs(
+                legal=[0, 1],
+                base_probs=[0.6, 0.4],
+                base_argmax=0,
+                d0_q=[10.0, 100.0],
+                critic_q=[10.0, 100.0],
+            )
+        ]
+        comp = estimator_comparison(recs)
+        assert comp["legacy_prune_would_drop_ref_best"] == 0.0
+
+    def test_phase_distribution_reported(self):
+        recs = [
+            _make_record_with_configs(
+                [0, 1],
+                [0.5, 0.5],
+                0,
+                [10.0, 20.0],
+                [10.0, 20.0],
+                phase="early",
+            ),
+            _make_record_with_configs(
+                [0, 1],
+                [0.5, 0.5],
+                0,
+                [10.0, 20.0],
+                [10.0, 20.0],
+                phase="mid",
+            ),
+            _make_record_with_configs(
+                [0, 1],
+                [0.5, 0.5],
+                0,
+                [10.0, 20.0],
+                [10.0, 20.0],
+                phase="mid",
+            ),
+        ]
+        comp = estimator_comparison(recs)
+        assert comp["phase_distribution"] == {"early": 1, "mid": 2, "late": 0}
+
+    def test_comparison_table_renders(self):
+        recs = [
+            _make_record_with_configs(
+                [0, 1],
+                [0.6, 0.4],
+                0,
+                [10.0, 100.0],
+                [10.0, 100.0],
+                entropy="high",
+                phase="mid",
+            )
+        ]
+        comp = estimator_comparison(recs)
+        table = comparison_table(comp)
+        assert "actor (frozen)" in table
+        assert "root_critic_only" in table
+        assert "addressable opportunity" in table
+
+
+class TestSearchJustificationGate:
+    def test_passes_when_actor_disagrees_and_concentrated(self):
+        # actor disagrees with ref on high-entropy roots; agrees on low-entropy
+        recs = []
+        for i in range(6):
+            recs.append(
+                _make_record_with_configs(
+                    [0, 1],
+                    [0.6, 0.4],
+                    0,
+                    [10.0, 100.0],
+                    [10.0, 100.0],
+                    entropy="high",
+                    phase="mid",
+                    critic_disagreement=20.0,
+                )
+            )
+        for i in range(4):
+            # low-entropy: actor matches ref (d0 picks 0, actor picks 0)
+            recs.append(
+                _make_record_with_configs(
+                    [0, 1],
+                    [0.9, 0.1],
+                    0,
+                    [100.0, 10.0],
+                    [100.0, 10.0],
+                    entropy="low",
+                    phase="early",
+                    critic_disagreement=1.0,
+                )
+            )
+        comp = estimator_comparison(recs)
+        gate = search_justification_gate(comp)
+        assert gate["verdict"] == "PASS", gate
+        assert gate["criteria"]["addressable_opportunity"]["pass"] is True
+        assert gate["criteria"]["concentrated_not_random"]["pass"] is True
+
+    def test_fails_when_actor_matches_ref(self):
+        # actor always matches ref -> no addressable opportunity
+        recs = [
+            _make_record_with_configs(
+                [0, 1],
+                [0.9, 0.1],
+                0,
+                [100.0, 10.0],
+                [100.0, 10.0],
+                entropy="low",
+                phase="early",
+            )
+            for _ in range(5)
+        ]
+        comp = estimator_comparison(recs)
+        gate = search_justification_gate(comp)
+        assert gate["criteria"]["addressable_opportunity"]["pass"] is False
+        assert gate["verdict"] != "PASS"
+
+    def test_fails_when_everyone_agrees_with_actor(self):
+        # actor == critic == d0 -> no search signal at all
+        recs = [
+            _make_record_with_configs(
+                [0, 1],
+                [0.6, 0.4],
+                0,
+                [100.0, 10.0],
+                [100.0, 10.0],
+                entropy="medium",
+                phase="mid",
+            )
+            for _ in range(5)
+        ]
+        comp = estimator_comparison(recs)
+        gate = search_justification_gate(comp)
+        assert gate["criteria"]["addressable_opportunity"]["pass"] is False
+        assert gate["criteria"]["search_adds_over_critic"]["pass"] is False
+
+
+# ---------------------------------------------------------------------------
 # GPU-gated: end-to-end benchmark smoke on the real checkpoint
 # ---------------------------------------------------------------------------
 
@@ -518,6 +791,13 @@ class TestBenchmarkSmokeGPU:
         assert summary["_n_roots"] == 2
         assessment = go_no_go_assessment(summary, [4])
         assert assessment["verdict"] in ("PASS", "PARTIAL", "INCONCLUSIVE")
+        # estimator head-to-head + search-justification gate run (skill §40)
+        comp = estimator_comparison(records)
+        assert comp["n_roots"] == 2
+        assert 0.0 <= comp["actor_disagrees_with_ref"] <= 1.0
+        gate = search_justification_gate(comp)
+        assert gate["verdict"] in ("PASS", "PARTIAL", "INCONCLUSIVE")
+        assert "phase_distribution" in comp
         # No fork lanes leaked: benchmark_roots ran 2 roots x 2 grid configs
         # (root_critic_only + D=0 K=16) through estimate_root -> _rollout_core,
         # each of which cleans up its branches in a finally. The bundle's env

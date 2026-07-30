@@ -412,9 +412,13 @@ def benchmark_roots(
     max_roots: int = 64,
     max_battles: int = 20,
     root_stride: int = 1,
+    decision_stride: int = 1,
+    min_decision: int = 0,
+    max_decision: Optional[int] = None,
     store_branch_matrices: bool = False,
     progress_every: int = 5,
     env_seed: Optional[int] = None,
+    output_dir: Optional[str] = None,
 ) -> Tuple[List[RootResultRecord], List[RootManifestEntry]]:
     """Run the in-battle fixed-root benchmark (skill §22).
 
@@ -425,6 +429,14 @@ def benchmark_roots(
     to continue. Stops once ``max_roots`` roots are captured or ``max_battles``
     battles complete.
 
+    Phase coverage (skill §22 "Stratify across early/middle/late battle"): the
+    ``decision_stride`` / ``min_decision`` / ``max_decision`` filters select
+    *which* eval-decisions per battle are benchmarked, based on the **true
+    per-battle decision index** (``lane_total_dec``). ``decision_stride=3``
+    captures every 3rd decision per battle, spreading the corpus across
+    early/mid/late instead of clustering on the opening (the Phase 1 pilot's
+    ``root_stride=1`` + small ``max_roots`` produced an all-early corpus).
+
     Args:
         bundle: a ``FrozenBundle``-like object (env, eval_driver, opponent,
             eval_policy, opponent_policy, model, opp_model, action_dim, device,
@@ -434,9 +446,22 @@ def benchmark_roots(
         derived_ks: low-K values derived from each high-K run via prefix/block
             averaging (e.g. ``[4, 16, 64]``).
         depths: rollout depths with a high-K run (e.g. ``[0, 1]``).
-        max_roots / max_battles / root_stride: corpus controls.
+        max_roots / max_battles: corpus caps.
+        root_stride: global capture cadence (every N-th *encountered* eval-
+            decision across all lanes); use for a quick smoke. Prefer
+            ``decision_stride`` for phase coverage.
+        decision_stride: per-battle capture cadence (capture when
+            ``lane_total_dec % decision_stride == 0``); spreads across phases.
+        min_decision / max_decision: optional per-battle decision-index window
+            (e.g. ``min_decision=20`` to skip the opening and target mid/late).
         store_branch_matrices: keep the per-branch ``R (A,K)`` matrices in each
             record (verbose; needed only for deep post-hoc analysis).
+        output_dir: if set, stream each root record + manifest entry to
+            ``<output_dir>/root_results.jsonl`` and ``root_manifest.jsonl`` as
+            they are produced (flushed per record). A crash or signal kill mid-
+            run then still leaves the first N roots on disk for analysis; the
+            summary/comparison/report are written at the end by ``write_results``
+            (or regenerated from the streamed JSONL by a recovery tool).
 
     Returns ``(records, manifest_entries)``.
     """
@@ -468,11 +493,23 @@ def benchmark_roots(
     # per-lane battle / decision counters (stable, distinct root identities for
     # the seed bank: (battle_id, side, decision_idx) is unique per root).
     lane_battle = [0] * n
-    lane_decision = [0] * n
+    lane_decision = [0] * n  # benchmarked count (legacy; kept for compat)
+    lane_total_dec = [0] * n  # true per-battle decision index (phase filter)
     lane_history: List[List[List[int]]] = [[] for _ in range(n)]
 
     records: List[RootResultRecord] = []
     manifest: List[RootManifestEntry] = []
+    # Incremental streaming (skill §35 robustness): a high-K phase-spanning run
+    # can be killed mid-benchmark by a signal (e.g. the Node host hitting its
+    # V8 heap limit under ~A*K concurrent battles) with no Python traceback,
+    # losing all results if they are only written at the end. Stream each record
+    # to JSONL as it is produced so the first N roots survive a crash.
+    _roots_fh = None
+    _manifest_fh = None
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _roots_fh = open(os.path.join(output_dir, "root_results.jsonl"), "w")
+        _manifest_fh = open(os.path.join(output_dir, "root_manifest.jsonl"), "w")
     battles_done = 0
     steps = 0
     max_steps = max(max_battles * 400 // n + 200, 400)
@@ -496,12 +533,24 @@ def benchmark_roots(
                     continue
                 legal = info["legal_actions"][i]
                 root_capture_idx += 1
-                run_grid = (root_capture_idx % max(root_stride, 1)) == 0 and (
-                    len(records) < max_roots
+                lane_total_dec[i] += 1
+                tdec = lane_total_dec[i]
+                # phase-spreading capture filter: per-battle decision stride +
+                # optional window (skill §22 phase stratification). The global
+                # root_stride is an additional cadence (kept for smoke runs).
+                in_window = (
+                    (tdec % max(decision_stride, 1) == 0)
+                    and (tdec >= min_decision)
+                    and (max_decision is None or tdec <= max_decision)
+                )
+                run_grid = (
+                    (root_capture_idx % max(root_stride, 1) == 0)
+                    and in_window
+                    and (len(records) < max_roots)
                 )
                 if run_grid:
                     battle_id = f"b{i}_{lane_battle[i]}"
-                    decision_idx = lane_decision[i]
+                    decision_idx = tdec  # true per-battle decision index
                     # stable identity for the seed bank across all grid configs
                     runner._battle_id = battle_id
                     runner._decision_counter = decision_idx
@@ -545,6 +594,21 @@ def benchmark_roots(
                     rec, mentry = lane_root_this_step[i]
                     records.append(rec)
                     manifest.append(mentry)
+                    if _roots_fh is not None:
+                        try:
+                            _roots_fh.write(rec.to_json() + "\n")
+                            _roots_fh.flush()
+                        except OSError:
+                            # Disk-full etc: the record is in `records` in
+                            # memory; streaming is best-effort crash safety, not
+                            # a hard requirement. Keep benchmarking.
+                            _roots_fh = None
+                    if _manifest_fh is not None:
+                        try:
+                            _manifest_fh.write(mentry.to_json() + "\n")
+                            _manifest_fh.flush()
+                        except OSError:
+                            _manifest_fh = None
                     lane_decision[i] += 1
                     if (len(records) % progress_every) == 0:
                         print(
@@ -573,9 +637,14 @@ def benchmark_roots(
                     )
                     lane_battle[i] += 1
                     lane_decision[i] = 0
+                    lane_total_dec[i] = 0
                     lane_history[i] = []
     finally:
         runner.close()
+        if _roots_fh is not None:
+            _roots_fh.close()
+        if _manifest_fh is not None:
+            _manifest_fh.close()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -939,6 +1008,311 @@ def go_no_go_assessment(
 
 
 # ---------------------------------------------------------------------------
+# Estimator head-to-head: actor vs root_critic_only vs D=0 vs D=1 (skill §40)
+# ---------------------------------------------------------------------------
+
+
+def _critic_disagreement_band(value: float, threshold: float) -> str:
+    """Low/high critic-disagreement band (threshold frozen from the dev corpus)."""
+    return "high" if value >= threshold else "low"
+
+
+def estimator_comparison(
+    records: List[RootResultRecord],
+    reference_name: str = "d0",
+    legacy_prune_threshold: float = 0.05,
+) -> Dict[str, Any]:
+    """Head-to-head: actor vs root_critic_only vs D=0 (ref) vs D=1 (skill §40).
+
+    This is the decision-relevant analysis that the convergence gate does NOT
+    cover: it asks whether the estimators *disagree with the actor* (addressable
+    opportunity) and whether the real simulator transition *adds anything over a
+    cheap critic rerank* (D=0 vs root_critic_only). The reference is the high-K
+    D=0 estimate (our best estimator); D=0 is the reference by construction, so
+    its disagreement is 0 and it is not in the regret table.
+
+    Per root we read the argmax of each config from ``record.configs[name][
+    "q_argmax"]`` and the reference Q from ``record.configs[reference_name][
+    "q_mean"]`` (over ``record.legal_actions``). We also compute the §39 Q6
+    pruning diagnostic: would the legacy 5%-of-max pruning rule have dropped the
+    reference-best action?
+
+    Returns a dict with:
+    * ``n_roots``;
+    * disagreement-with-reference rates for actor / critic_only / d1 (frac of
+      roots whose argmax != ref argmax);
+    * pairwise agreement rates (actor-vs-critic, critic-vs-d0, d0-vs-d1);
+    * mean regret vs reference for actor / critic_only / d1
+      (``ref_q[ref_argmax] - ref_q[their_argmax]`` -- skill §31 root regret);
+    * all of the above stratified by entropy / phase / critic-disagreement /
+      reference-gap band;
+    * the pruning diagnostic (frac where the legacy rule would drop ref-best).
+    """
+    if not records:
+        return {"n_roots": 0}
+
+    # critic-disagreement threshold: median split over the corpus (frozen here
+    # for this run; a production gate would freeze it from a dev set).
+    cd_vals = []
+    for r in records:
+        cd = r.configs.get(reference_name, {}).get("critic_disagreement")
+        if cd is not None:
+            cd_vals.append(float(cd))
+    cd_threshold = float(np.median(cd_vals)) if cd_vals else 0.0
+
+    est_names = ["root_critic_only", "d1"]
+    # collectors
+    disagree = {n: [] for n in est_names}  # 1.0 if argmax != ref
+    regret = {n: [] for n in est_names}
+    actor_disagree = []
+    actor_regret = []
+    pairwise = {"actor_vs_critic": [], "critic_vs_d0": [], "d0_vs_d1": []}
+    prune_drop = []
+    # stratification tags (collected per-root, same for all estimators)
+    tags = {"entropy": [], "phase": [], "critic_disagree": [], "ref_gap": []}
+
+    for r in records:
+        legal = np.asarray(r.legal_actions)
+        ref_cfg = r.configs.get(reference_name)
+        if ref_cfg is None or ref_cfg.get("q_argmax") is None:
+            continue
+        ref_q = np.asarray(ref_cfg["q_mean"], dtype=np.float64)
+        ref_argmax_idx = int(np.argmax(ref_q))  # index into legal_actions
+        ref_argmax = int(legal[ref_argmax_idx])
+        actor_argmax = int(r.base_argmax)
+        actor_disagree.append(float(actor_argmax != ref_argmax))
+        actor_regret.append(
+            float(
+                ref_q[ref_argmax_idx]
+                - ref_q[int(np.argmin(np.abs(legal - actor_argmax)))]
+            )
+        )
+
+        # critic_disagreement band for this root
+        cd = ref_cfg.get("critic_disagreement", 0.0)
+        cd_band = _critic_disagreement_band(float(cd), cd_threshold)
+        # reference-gap band (recompute from ref_q)
+        order = np.argsort(-ref_q)
+        top1 = float(ref_q[order[0]])
+        top2 = float(ref_q[order[1]]) if ref_q.size > 1 else 0.0
+        rg_band = ref_gap_band(top1 - top2)
+
+        tags["entropy"].append(r.entropy_band)
+        tags["phase"].append(r.phase_band)
+        tags["critic_disagree"].append(cd_band)
+        tags["ref_gap"].append(rg_band)
+
+        # pairwise agreements
+        critic_cfg = r.configs.get("root_critic_only", {})
+        critic_argmax = critic_cfg.get("q_argmax")
+        d1_cfg = r.configs.get("d1", {})
+        d1_argmax = d1_cfg.get("q_argmax")
+        if critic_argmax is not None:
+            pairwise["actor_vs_critic"].append(float(actor_argmax == critic_argmax))
+            pairwise["critic_vs_d0"].append(float(critic_argmax == ref_argmax))
+            # regret for critic_only
+            ci_idx = int(np.argmin(np.abs(legal - int(critic_argmax))))
+            regret["root_critic_only"].append(
+                float(ref_q[ref_argmax_idx] - ref_q[ci_idx])
+            )
+            disagree["root_critic_only"].append(float(critic_argmax != ref_argmax))
+        if d1_argmax is not None:
+            pairwise["d0_vs_d1"].append(float(ref_argmax == d1_argmax))
+            d1_idx = int(np.argmin(np.abs(legal - int(d1_argmax))))
+            regret["d1"].append(float(ref_q[ref_argmax_idx] - ref_q[d1_idx]))
+            disagree["d1"].append(float(d1_argmax != ref_argmax))
+
+        # §39 Q6: would legacy 5%-of-max pruning drop the ref-best action?
+        bp = np.asarray(r.base_probs, dtype=np.float64)
+        if bp.size:
+            max_p = float(bp.max())
+            ref_best_prob = float(bp[ref_argmax_idx])
+            prune_drop.append(float(ref_best_prob < legacy_prune_threshold * max_p))
+
+    def nm(x):
+        return float(np.nanmean(x)) if len(x) else float("nan")
+
+    def stratified(values, tag_list):
+        bands: Dict[str, List[float]] = {}
+        for v, t in zip(values, tag_list):
+            bands.setdefault(t, []).append(float(v))
+        return {b: float(np.nanmean(vv)) for b, vv in bands.items() if vv}
+
+    out: Dict[str, Any] = {
+        "n_roots": len(records),
+        "reference": reference_name,
+        "critic_disagreement_threshold": cd_threshold,
+        "actor_disagrees_with_ref": nm(actor_disagree),
+        "actor_mean_regret_vs_ref": nm(actor_regret),
+        "root_critic_only_disagrees_with_ref": nm(disagree["root_critic_only"]),
+        "root_critic_only_mean_regret_vs_ref": nm(regret["root_critic_only"]),
+        "d1_disagrees_with_ref": nm(disagree["d1"]),
+        "d1_mean_regret_vs_ref": nm(regret["d1"]),
+        "actor_vs_critic_agree": nm(pairwise["actor_vs_critic"]),
+        "critic_vs_d0_agree": nm(pairwise["critic_vs_d0"]),
+        "d0_vs_d1_agree": nm(pairwise["d0_vs_d1"]),
+        "legacy_prune_would_drop_ref_best": nm(prune_drop),
+    }
+    # stratified actor disagreement (the addressable-opportunity signal)
+    out["actor_disagrees_by_entropy"] = stratified(actor_disagree, tags["entropy"])
+    out["actor_disagrees_by_phase"] = stratified(actor_disagree, tags["phase"])
+    out["actor_disagrees_by_critic_disagree"] = stratified(
+        actor_disagree, tags["critic_disagree"]
+    )
+    out["actor_disagrees_by_ref_gap"] = stratified(actor_disagree, tags["ref_gap"])
+    # stratified critic_vs_d0 disagreement (does the transition add anything?)
+    cvd = [1.0 - x for x in pairwise["critic_vs_d0"]]
+    out["critic_disagrees_with_d0_by_phase"] = stratified(cvd, tags["phase"])
+    out["critic_disagrees_with_d0_by_entropy"] = stratified(cvd, tags["entropy"])
+    # phase distribution of the corpus (for honest reporting)
+    out["phase_distribution"] = {
+        b: int(tags["phase"].count(b)) for b in ("early", "mid", "late")
+    }
+    return out
+
+
+def comparison_table(comp: Dict[str, Any]) -> str:
+    """Render the head-to-head comparison table (Markdown) for the report."""
+    if comp.get("n_roots", 0) == 0:
+        return "## Estimator head-to-head (no roots)\n"
+    lines = [
+        "## Estimator head-to-head (actor vs critic-only vs D=0-ref vs D=1)",
+        "",
+        f"Reference = high-K D=0. n = {comp['n_roots']} roots.",
+        f"Critic-disagreement threshold (median split) = {comp.get('critic_disagreement_threshold', 0):.3f}.",
+        "",
+        "| estimator | disagrees w/ ref | mean regret vs ref |",
+        "|---|---|---|",
+        f"| actor (frozen) | {comp['actor_disagrees_with_ref']:.3f} | {comp['actor_mean_regret_vs_ref']:.1f} |",
+        f"| root_critic_only | {comp['root_critic_only_disagrees_with_ref']:.3f} | {comp['root_critic_only_mean_regret_vs_ref']:.1f} |",
+        f"| D=1 (vs D=0 ref) | {comp['d1_disagrees_with_ref']:.3f} | {comp['d1_mean_regret_vs_ref']:.1f} |",
+        "",
+        "| pair | agreement rate |",
+        "|---|---|",
+        f"| actor vs critic-only | {comp['actor_vs_critic_agree']:.3f} |",
+        f"| critic-only vs D=0 | {comp['critic_vs_d0_agree']:.3f} |",
+        f"| D=0 vs D=1 | {comp['d0_vs_d1_agree']:.3f} |",
+        "",
+        f"Legacy 5%-of-max pruning would drop the reference-best action on "
+        f"{comp['legacy_prune_would_drop_ref_best']:.1%} of roots (skill §39 Q6).",
+        "",
+        "Actor disagreement with reference (addressable opportunity), stratified:",
+        f"- by entropy band: {comp.get('actor_disagrees_by_entropy', {})}",
+        f"- by phase band: {comp.get('actor_disagrees_by_phase', {})}",
+        f"- by critic disagreement: {comp.get('actor_disagrees_by_critic_disagree', {})}",
+        f"- by reference gap: {comp.get('actor_disagrees_by_ref_gap', {})}",
+        "",
+        f"Phase distribution: {comp.get('phase_distribution', {})}",
+        "",
+        "Critic-only vs D=0 disagreement (does the real transition add anything?), stratified:",
+        f"- by phase: {comp.get('critic_disagrees_with_d0_by_phase', {})}",
+        f"- by entropy: {comp.get('critic_disagrees_with_d0_by_entropy', {})}",
+    ]
+    return "\n".join(lines)
+
+
+def search_justification_gate(comp: Dict[str, Any]) -> Dict[str, Any]:
+    """The §23-precondition gate: is there enough signal to justify a paired
+    win-rate eval? (skill §40 interpretation + §39 Q3/Q6/Q7).
+
+    This is separate from the §22 convergence gate (which passed): convergence
+    proves the *estimator is sound*; this gate asks whether *search has a
+    target*. The criteria are intentionally conservative -- a non-PASS means
+    "the estimator is valid but there is no evidence search will change
+    outcomes; do not spend the §23 budget yet."
+
+    Criteria:
+    * **addressable_opportunity**: the actor disagrees with the best estimator
+      (D=0 ref) on a non-trivial fraction of roots (> 10%). If the actor nearly
+      always matches the reference, search cannot change actions by definition.
+    * **search_adds_over_critic**: D=0 disagrees with root_critic_only on a
+      non-trivial fraction (> 10%), OR (if not) root_critic_only itself
+      disagrees with the actor -- i.e. either the simulator transition adds
+      information, or a cheap critic rerank already captures the gain (which
+      still merits a rerank experiment, just not full search). FAIL only if both
+      the critic AND D=0 match the actor (nothing to gain).
+    * **concentrated_not_random**: actor disagreement is higher at high-entropy
+      or high-critic-disagreement roots than at low (the changes are where the
+      actor is uncertain, not random noise).
+    * **pruning_safe**: the legacy 5%-of-max rule does NOT drop the reference-
+      best action on most roots (search can actually find these under
+      exhaustive ``all_legal``).
+    """
+    n = comp.get("n_roots", 0)
+    if n == 0:
+        return {
+            "verdict": "INCONCLUSIVE",
+            "passed": 0,
+            "total": 4,
+            "criteria": {},
+            "note": "no roots",
+        }
+
+    actor_dis = comp.get("actor_disagrees_with_ref", 0.0)
+    critic_vs_d0_dis = 1.0 - comp.get("critic_vs_d0_agree", 1.0)
+    critic_vs_actor_dis = 1.0 - comp.get("actor_vs_critic_agree", 1.0)
+
+    crit_opportunity = {
+        "actor_disagrees_with_ref": float(actor_dis),
+        "pass": bool(actor_dis > 0.10),
+    }
+
+    # search adds over critic: D0 != critic_only, OR critic_only != actor
+    search_adds = bool(critic_vs_d0_dis > 0.10 or critic_vs_actor_dis > 0.10)
+    crit_search_adds = {
+        "d0_disagrees_with_critic_only": float(critic_vs_d0_dis),
+        "critic_only_disagrees_with_actor": float(critic_vs_actor_dis),
+        "pass": search_adds,
+    }
+
+    # concentrated at high-entropy / high-critic-disagreement
+    by_ent = comp.get("actor_disagrees_by_entropy", {})
+    by_cd = comp.get("actor_disagrees_by_critic_disagree", {})
+    high_ent = by_ent.get("high", by_ent.get("medium", 0.0))
+    low_ent = by_ent.get("low", 0.0)
+    high_cd = by_cd.get("high", 0.0)
+    low_cd = by_cd.get("low", 0.0)
+    concentrated = bool((high_ent > low_ent) or (high_cd > low_cd))
+    crit_concentrated = {
+        "high_entropy_disagree": float(high_ent),
+        "low_entropy_disagree": float(low_ent),
+        "high_critic_disagree": float(high_cd),
+        "low_critic_disagree": float(low_cd),
+        "pass": concentrated,
+    }
+
+    prune = comp.get("legacy_prune_would_drop_ref_best", 1.0)
+    crit_prune = {"value": float(prune), "pass": bool(prune < 0.50)}
+
+    criteria = {
+        "addressable_opportunity": crit_opportunity,
+        "search_adds_over_critic": crit_search_adds,
+        "concentrated_not_random": crit_concentrated,
+        "pruning_safe": crit_prune,
+    }
+    passed = sum(1 for c in criteria.values() if c.get("pass"))
+    total = len(criteria)
+    verdict = (
+        "PASS" if passed == total else ("INCONCLUSIVE" if passed == 0 else "PARTIAL")
+    )
+    return {
+        "verdict": verdict,
+        "passed": passed,
+        "total": total,
+        "criteria": criteria,
+        "note": (
+            "PASS = there is a non-trivial, located signal that search could "
+            "change actions where the actor is uncertain, justifying the §23 "
+            "paired win-rate investment. A non-PASS means the estimator is valid "
+            "(§22 gate passed) but there is no evidence search will change "
+            "outcomes -- do not spend the §23 budget yet. Per skill §40: if "
+            "root_critic_only ~= D=0 >> actor, the win is a cheap critic rerank, "
+            "not simulator search."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Output writers
 # ---------------------------------------------------------------------------
 
@@ -948,6 +1322,8 @@ def write_results(
     manifest: List[RootManifestEntry],
     summary: Dict[str, Any],
     assessment: Dict[str, Any],
+    comparison: Dict[str, Any],
+    justification: Dict[str, Any],
     run_manifest_dict: Dict[str, Any],
     output_dir: str,
     derived_ks: List[int],
@@ -957,6 +1333,7 @@ def write_results(
     roots_path = os.path.join(output_dir, "root_results.jsonl")
     manifest_path = os.path.join(output_dir, "root_manifest.jsonl")
     summary_path = os.path.join(output_dir, "summary.json")
+    comparison_path = os.path.join(output_dir, "comparison.json")
     run_path = os.path.join(output_dir, "run_manifest.json")
     report_path = os.path.join(output_dir, "REPORT.md")
 
@@ -964,8 +1341,13 @@ def write_results(
         for r in records:
             f.write(r.to_json() + "\n")
     write_manifest(manifest, manifest_path)
+    summary_with = dict(summary)
+    summary_with["_comparison"] = comparison
+    summary_with["_justification_gate"] = justification
     with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2, default=_json_default)
+        json.dump(summary_with, f, indent=2, default=_json_default)
+    with open(comparison_path, "w") as f:
+        json.dump(comparison, f, indent=2, default=_json_default)
     with open(run_path, "w") as f:
         json.dump(run_manifest_dict, f, indent=2, default=_json_default)
 
@@ -977,21 +1359,30 @@ def write_results(
         f"- derived K: {run_manifest_dict.get('derived_ks')}",
         f"- depths: {run_manifest_dict.get('depths')}",
         f"- chance mode: {run_manifest_dict.get('chance_mode')}",
-        f"- verdict: **{assessment['verdict']}** ({assessment['passed']}/{assessment['total']} criteria)",
+        f"- §22 convergence verdict: **{assessment['verdict']}** ({assessment['passed']}/{assessment['total']} criteria)",
+        f"- §23-precondition (search-justification) verdict: **{justification['verdict']}** ({justification['passed']}/{justification['total']} criteria)",
         "",
         convergence_table(summary, derived_ks),
         "",
-        "## Go/no-go assessment",
+        comparison_table(comparison),
+        "",
+        "## §22 convergence gate (estimator validity)",
         "",
         "```json",
         json.dumps(assessment, indent=2, default=_json_default),
         "```",
         "",
-        "## Aggregate per-cell metrics",
+        "## §23-precondition gate (is there a search signal?)",
+        "",
+        "```json",
+        json.dumps(justification, indent=2, default=_json_default),
+        "```",
+        "",
+        "## Aggregate per-cell convergence metrics",
         "",
         "```json",
         json.dumps(summary, indent=2, default=_json_default),
-        "``",
+        "```",
     ]
     with open(report_path, "w") as f:
         f.write("\n".join(md))
@@ -1000,6 +1391,7 @@ def write_results(
         "roots": roots_path,
         "manifest": manifest_path,
         "summary": summary_path,
+        "comparison": comparison_path,
         "run_manifest": run_path,
         "report": report_path,
     }
@@ -1130,6 +1522,25 @@ def main() -> None:
     p.add_argument("--max_battles", type=int, default=20)
     p.add_argument("--root_stride", type=int, default=1)
     p.add_argument(
+        "--decision_stride",
+        type=int,
+        default=1,
+        help="per-battle capture cadence: capture when (decision_idx %% stride)==0; "
+        "spreads the corpus across early/mid/late (skill §22 phase stratification)",
+    )
+    p.add_argument(
+        "--min_decision",
+        type=int,
+        default=0,
+        help="skip per-battle decisions below this index (target mid/late)",
+    )
+    p.add_argument(
+        "--max_decision",
+        type=int,
+        default=None,
+        help="skip per-battle decisions above this index",
+    )
+    p.add_argument(
         "--include_inherited_rng",
         action="store_true",
         help="also run the inherited-trunk-RNG future-chance oracle diagnostic (D=0)",
@@ -1161,13 +1572,19 @@ def main() -> None:
             max_roots=args.max_roots,
             max_battles=args.max_battles,
             root_stride=args.root_stride,
+            decision_stride=args.decision_stride,
+            min_decision=args.min_decision,
+            max_decision=args.max_decision,
             store_branch_matrices=args.store_branch_matrices,
             progress_every=args.progress_every,
             env_seed=args.seed,
+            output_dir=args.output_dir,
         )
         elapsed = time.perf_counter() - t0
         summary = aggregate_convergence(records)
         assessment = go_no_go_assessment(summary, derived_ks)
+        comparison = estimator_comparison(records)
+        justification = search_justification_gate(comparison)
 
         import subprocess
 
@@ -1209,12 +1626,21 @@ def main() -> None:
             },
         )
         paths = write_results(
-            records, manifest, summary, assessment, rm, args.output_dir, derived_ks
+            records,
+            manifest,
+            summary,
+            assessment,
+            comparison,
+            justification,
+            rm,
+            args.output_dir,
+            derived_ks,
         )
         print(
             json.dumps(
                 {
-                    "verdict": assessment["verdict"],
+                    "convergence_verdict": assessment["verdict"],
+                    "search_justification_verdict": justification["verdict"],
                     "n_roots": len(records),
                     "elapsed_sec": elapsed,
                     "outputs": paths,

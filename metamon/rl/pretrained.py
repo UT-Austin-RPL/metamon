@@ -246,6 +246,7 @@ class PretrainedModel:
             ckpt_state = torch.load(ckpt_path, map_location="cpu")
             ckpt_state = self._normalize_checkpoint_keys(ckpt_state)
             model_state = experiment.policy.state_dict()
+            ckpt_state = self._migrate_legacy_perceiver_ff_keys(ckpt_state, model_state)
             self._validate_checkpoint(ckpt_state, model_state)
             experiment.policy.load_state_dict(ckpt_state, strict=True)
             experiment.policy.on_checkpoint_loaded(is_resume=False)
@@ -279,6 +280,42 @@ class PretrainedModel:
         if changed:
             return normalized
         return ckpt_state
+    def _migrate_legacy_perceiver_ff_keys(ckpt_state: dict, model_state: dict) -> dict:
+        """Remap pre-``metamon-dev sync`` perceiver feed-forward keys.
+
+        Older checkpoints stored the perceiver layer FF as an ``nn.Sequential``
+        (``cross_ff.0`` = Linear, ``.1`` = SiLU, ``.2`` = Linear). The current
+        ``PerceiverLayer`` uses two separate Linears (``cross_ff1`` / ``cross_ff2``
+        and ``self_ff1`` / ``self_ff2``). The math is identical, so a pure rename
+        of the state-dict keys restores compatibility. Only applied when the
+        checkpoint has the old keys and the model expects the new ones.
+        """
+        needed = {
+            k for k in model_state
+            if ".cross_ff1." in k or ".cross_ff2." in k
+            or ".self_ff1." in k or ".self_ff2." in k
+        }
+        if not needed:
+            return ckpt_state
+        remap = {
+            ".cross_ff.0.": ".cross_ff1.",
+            ".cross_ff.2.": ".cross_ff2.",
+            ".self_ff.0.": ".self_ff1.",
+            ".self_ff.2.": ".self_ff2.",
+        }
+        new_state = {}
+        migrated = 0
+        for k, v in ckpt_state.items():
+            nk = k
+            for old, new in remap.items():
+                if old in k and k.replace(old, new) in needed:
+                    nk = k.replace(old, new)
+                    migrated += 1
+                    break
+            new_state[nk] = v
+        if migrated:
+            print(f"Migrated {migrated} legacy perceiver FF keys (cross_ff/self_ff Sequential -> split Linear).")
+        return new_state
 
     @staticmethod
     def _validate_checkpoint(ckpt_state: dict, model_state: dict) -> None:

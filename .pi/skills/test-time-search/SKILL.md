@@ -161,6 +161,36 @@ next steps (span phases/mid-late + opponent-model matrix before any win-rate
 sweep). Do not start a win-rate sweep (§23) until Phase 1 spans the §22
 stratification space and the root-critic-only vs D=0/D=1 comparison is in.
 
+**Phase 2 (paired+mirrored eval, §23) is IMPLEMENTED and ran to a screen.**
+The headline result is **estimator-positive, game-negative** (skill §37): the
+shaped-Q search changes actions in the estimator's preferred direction with
+well-calibrated KL, but the paired win-rate delta is statistically
+indistinguishable from baseline (sampling 500 pairs delta=-0.008 CI
+[-0.066,+0.052]; argmax 300 pairs delta=+0.037 CI [-0.047,+0.117]; root-critic-
+only 80 pairs delta=-0.038). See `PROGRESS.md` "Phase 2" for the full table +
+the five candidate explanations.
+
+**Phase A (terminal-win fixed-root benchmark — the §37 "Gate A: Is the critic
+suitable for search?" go/no-go) is IMPLEMENTED.** The central unmeasured question
+after the Phase 2 null was **objective alignment**: does the frozen shaped
+critic's preference after an exact oracle transition predict which action
+actually increases **terminal win probability** (not just shaped return)?
+`search_driver.SearchEvalRunner.terminal_continuations()` plays one forced root
+action to a terminal state with the frozen policy on both sides (reusing all
+Phase 0 rollout infra; CRN-paired with the shaped-Q estimate on the same chance
+stream `k`), and `terminal_win.py` runs the benchmark + analysis + gate + CLI.
+A G=32 / 12-root preliminary pilot **PASSED Gate A (4/4)** with an encouraging
+signal: D=0 K=ref Spearman vs terminal win = +0.246, and D=0 search reduces
+terminal-win regret 0.126→0.089 (−29% vs the actor) — the first direct evidence
+that the shaped objective IS partially aligned with winning (the Phase 2 null
+was more about the KL update/sampling diluting the signal than objective
+misalignment). The terminal-win estimator self-converges (term_G16 Spearman
+0.679). **Honest caveat:** n=12, all early-phase, G=32 — a preliminary signal,
+not a conclusion. The full G=128 / 80-root / phase-spanning run is the
+go/no-go measurement; see `PROGRESS.md` "Phase A". Gate A PASS → proceed with
+the existing shaped-critic evaluator (then Phase B/C/D); PARTIAL/FAIL → train a
+terminal-outcome value head (§37 "Failure outcome").
+
 ### The main change in research strategy
 
 Do **not** begin with a broad K × depth × beta win-rate sweep.
@@ -1301,11 +1331,14 @@ metamon/rl/experimental/test_time_search/
 ├── config.py
 ├── improvement.py
 ├── branch_state.py
-├── search_driver.py          # search_root + _rollout_core + estimate_root (Phase 1)
+├── search_driver.py          # search_root + _rollout_core + estimate_root (Phase 1) + terminal_continuations (Phase A)
 ├── eval_search.py
 ├── rng.py                    # Phase 0: deterministic keyed CRN seed bank
 ├── root_dataset.py           # Phase 1: fixed-root manifest + stratification features
 ├── benchmark_roots.py        # Phase 1: K/depth convergence benchmark + go/no-go
+├── paired_eval.py            # Phase 2: mirrored paired evaluation helpers
+├── terminal_win.py           # Phase A: terminal-win fixed-root benchmark + Gate A + CLI
+├── analyze_roots.py          # root-result recovery / re-aggregation tool
 ├── PROGRESS.md
 ├── HANDOFF_GPU.md
 └── __init__.py
@@ -1316,7 +1349,8 @@ Current tests:
 ```text
 tests/test_time_search/
 ├── test_sim_fork.py
-└── test_improvement.py
+├── test_improvement.py
+└── test_terminal_win.py      # Phase A: prefix-win-rate + Spearman/regret + Gate A (13 CPU + 1 GPU smoke)
 ```
 
 Modified environment files:
@@ -2324,6 +2358,36 @@ The high-K reference is the full-`K_ref` mean per (root, depth); convergence is
 judged by whether K={4,16,64} prefix/block estimates move toward it (skill §22
 gate). See `PROGRESS.md` "Phase 1" for the pilot result + go/no-go verdict.
 
+### Terminal-win fixed-root benchmark (IMPLEMENTED — Phase A, the §37 Gate A)
+
+The central go/no-go after the Phase 2 "estimator-positive, game-negative"
+result: does the frozen shaped critic's preference after an exact oracle
+transition predict which action increases **terminal win probability**? For each
+legal action at each root it plays `G=K_ref` coupled continuations to a terminal
+state (frozen policy both sides), records the actual win/loss, and correlates
+the shaped-Q predictors against terminal win. CRN-paired with the shaped-Q
+estimate on the same chance stream `k`. Writes `terminal_win_roots.jsonl` +
+`root_manifest.jsonl` + `terminal_win_summary.json` + `terminal_win_REPORT.md` +
+`run_manifest.json` + the Gate A verdict.
+
+```bash
+uv run python -m metamon.rl.experimental.test_time_search.terminal_win \
+  --agent MiniOnlinePsroV1_4 --checkpoint 740 --format gen1ou --team_set competitive \
+  --num_parallel 2 --seed 42 --search_seed 0 \
+  --k_ref 128 --derived_ks 4 16 64 --depths 0 1 \
+  --max_roots 80 --max_battles 240 --decision_stride 3 \
+  --max_steps_to_terminal 250 --store_per_branch \
+  --output_dir /tmp/tts_phaseA_run
+#   --decision_stride spreads the corpus across early/mid/late (§22 phase bands)
+#   --store_per_branch keeps wins (A,G) + R (A,K) for paired diagnostics
+#   G=K_ref so terminal-win and shaped-Q share the CRN seed bank (§7)
+```
+Gate A (4 criteria): `correlated` (Spearman>0), `improves_over_actor`
+(regret<actor), `not_catastrophic` (decrease freq<50%), `converges_with_k`.
+PASS → proceed with the existing evaluator (Phase B/C/D); PARTIAL/FAIL → train
+a terminal-outcome value head (§37). See `PROGRESS.md` "Phase A" for the
+preliminary pilot (G=32/12-root PASS, Spearman +0.246, regret 0.126→0.089).
+
 ### Paired evaluation (NOT YET IMPLEMENTED — Phase 2, §23)
 
 ```bash
@@ -2599,6 +2663,43 @@ went idle. The fix answers opponent-only follow-ups whenever the eval side owes
 no decision and re-answers single-side `|error|` re-prompts. Treat any *new*
 timeout as a correctness issue, not normal noise — re-enable the stall dump
 described in `HANDOFF_GPU.md` §5 to capture the lane state.
+
+### Host `lanes` Map growth (the 60s *total*-timeout class)
+
+A **second, distinct** timeout class appeared in the Phase 1 phase-spanning
+run: `pump_until timed out after 60.0s` (the *total* deadline, not the 20s
+*idle* deadline) with **empty stderr** and a crash at ~root 130. This is NOT
+the Phase 0 settle-logic stall (which is a 20s *idle* timeout — the host
+produces no output). A 60s *total* timeout with non-idle host means the host is
+producing output but a single pump round-trip for all active branches exceeds
+60s.
+
+**Root cause:** the host `lanes` Map grew unboundedly. Test-time search
+allocates ever-incrementing fork-lane ids that are never recycled, so without
+an explicit delete the Map accumulated ~A×K entries per searched root per
+config (~2300/root here). By ~130 roots the Map held ~300k stale `Lane`
+shells; every `handleCommand` / `getLane` lookup degraded, and a single pump
+round-trip for ~1152 branches (K_ref=128 × A=9) eventually exceeded 60s.
+
+**Fix** (`battle_host.js` `handleCommand("destroy")`): `lanes.delete(
+msg.lane)` after `lane.destroy()`, so the Map stays bounded. `getLane()`
+re-creates a fresh `Lane` on demand (fork ids are never reused, so a deleted
+id is never referenced again). **Verified by elimination:** with the fix, a
+K_ref=4 run sailed past root 130 to 200 roots (168s, no crash), a K_ref=128
+measurement held pump times to ≤12.7s over 1024 branches, and the K_ref=128
+200-root phase-spanning run held pump times to ≤21s with zero timeouts —
+confirming the crash was host-side capacity (Map growth), not a settle-logic
+bug (which would reproduce at any K, including K_ref=4).
+
+**Diagnostics** (`search_driver._pump_branches`): `TTS_STALL_DUMP=1` dumps
+per-lane state on timeout; `TTS_PUMP_TIMEOUT` (default `60.0`s) configures the
+total deadline (set higher, e.g. `120`, for high-K runs as a safety margin);
+`TTS_PUMP_VERBOSE=1` logs every pump's `dt` + `n_active`. Interpretation: a
+timeout with **all** lanes in a consistent waiting state + empty stderr + high
+`n_active` is a throughput/capacity issue (Map growth or branch count), NOT a
+settle-logic bug; a timeout with **one** lane in an unhandled state (e.g. both
+sides `needs` but `not decision_ready`, or an uncleared `error`) is a logic
+bug — use the stall dump to tell them apart.
 
 ### Sim-fork equivalence flake (pre-existing, load-sensitive)
 
