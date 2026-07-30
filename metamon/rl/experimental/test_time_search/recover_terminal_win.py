@@ -30,19 +30,8 @@ from .terminal_win import (
     aggregate_terminal_win,
     terminal_win_gate,
     write_results,
+    load_records,
 )
-
-
-def load_records(path: str) -> List[TerminalWinRootRecord]:
-    records: List[TerminalWinRootRecord] = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            d = json.loads(line)
-            records.append(TerminalWinRootRecord(**d))
-    return records
 
 
 def main() -> None:

@@ -203,6 +203,26 @@ class TerminalWinRootRecord:
         return json.dumps(self.to_dict())
 
 
+def load_records(path: str) -> List["TerminalWinRootRecord"]:
+    """Load streamed ``terminal_win_roots.jsonl`` records (crash-recovery).
+
+    Each line is a ``TerminalWinRootRecord.to_json()``; all fields are JSON
+    types (lists / floats / ints / bools / str / dict), so reconstruction is a
+    direct dataclass unfurl. Used by ``recover_terminal_win`` and
+    ``audit_terminal_win`` so a long G=128 run is crash-proof: the streamed
+    JSONL is the source of truth and the summary / gate / report / audit can be
+    regenerated from it at any point.
+    """
+    records: List[TerminalWinRootRecord] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(TerminalWinRootRecord(**json.loads(line)))
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Derived-G' terminal win (prefix averaging -- the per-k chance stream is
 # G-independent, so the first G' continuations of a G=K_ref run ARE a G'
