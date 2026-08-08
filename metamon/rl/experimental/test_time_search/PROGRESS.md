@@ -944,3 +944,75 @@ uv run python -m metamon.rl.experimental.test_time_search.paired_eval \
 #   --search_ablation single_anchor_kl --adaptive_k true --k_pilot 4 --k_max 16 \
   --k_batch 4 --k_z_stop 2.0 --search_beta 5.0
 ```
+
+
+## kimi-search M0 + M1 (squirtle @ epoch 975, frozen)
+
+### M0 -- squirtle control baseline (shaped-critic search, Phase B+C config)
+
+2 held-out seeds (6000-6001) x 2 sides x 40 battles = 160 paired battles,
+self-play (squirtle vs squirtle), competitive teams, D=0 adaptive-K
+(pilot 4, max 16, z_stop 2.0), confidence_gated_kl (z_gate 2.0, adaptive
+beta, beta 5.0), every_n=3, all_legal, resample_crn, policy_expectation,
+global_standardized (scale 458.7). Artifacts: /tmp/tts_kimi_m0_baseline/.
+
+| metric | value |
+|---|---|
+| paired delta | **-0.0187** |
+| 95% bootstrap CI | [-0.1187, +0.0813] (includes zero) |
+| McNemar b/c, p | 31/34, 0.804 |
+| search WR / baseline WR | 0.525 / 0.544 |
+| per-side | side 0: -0.113 (12/21); side 1: +0.075 (19/13) |
+| both-lose | 42/160 (26%) |
+
+**Verdict: shaped-critic search is a wash on squirtle** (as predicted by the
+Phase 2 / B+C diagnosis on MiniOnlinePsroV1_4). This is the control arm. The
+side-0 negative here (vs the side-1 negative in Phase 2/B+C) confirms the
+per-side asymmetry is seed noise, not a systematic exploitability effect.
+
+### M1 -- multi-gamma-head predictors on the terminal-win gate (H2: REFUTED)
+
+`terminal_win.py` now supports `--gamma_indices` (adds root_critic_g{i} and
+d0_g{i} predictors at those critic horizons). Ran the Phase A fixed-root
+benchmark on squirtle: k_ref=32, derived Ks {4,16}, D=0, gamma heads {4,5}
+(0.99, 0.995) + primary (6 = 0.999), 24 roots, 6784 branches, 0.1%
+truncation. Artifacts: /tmp/tts_kimi_m1_gate/.
+
+| predictor | mean Spearman vs terminal win | mean regret |
+|---|---|---|
+| actor (base policy) | -- | **0.091** |
+| root_critic (primary) | 0.167 | 0.095 |
+| d0_k_ref (primary, K=32) | 0.127 | 0.103 |
+| root_critic_g4 (0.99) | 0.145 | 0.091 |
+| root_critic_g5 (0.995) | 0.163 | 0.091 |
+| d0_g4 / d0_g5 | 0.147 / 0.144 | 0.106 / 0.105 |
+| term_G16 (terminal-win ground truth, G=16) | 0.785 | **0.019** |
+
+Ladder-data calibration (310 human-ladder battles, tools/traj_analysis
+cache): V(gamma) state-level AUC vs actual win rises monotonically with gamma
+(0.595 @ 0.1 -> 0.796 @ 0.995/0.999; 0.635 even in the first 25% of turns).
+**But the fixed-root gate shows this does NOT transfer to action-level
+alignment**: no gamma head's regret beats the actor (0.091), and all critics
+sit at 0.13-0.17 Spearman. State-level win correlation (the side that is
+winning has high V) is much easier than action ranking (which action *changes*
+the win probability) -- the latter is what search needs.
+
+**H2 verdict: REFUTED.** Swapping the search leaf value to a higher-gamma
+head will not fix objective misalignment. Gate for squirtle is PARTIAL
+(3/4; improves_over_actor FAILS: d0 regret 0.103 > actor 0.091).
+
+**Addressable opportunity is real**: actor-vs-best terminal-win gap mean =
+0.091, and the G=16 terminal-win selector achieves regret 0.019 (vs actor
+0.091) -- i.e. a well-aligned estimator could recover most of the 9-point
+gap. This is the prize for M3.
+
+### Next: M3 -- trained win-probability head
+
+Per the skill §37 failure path (and now twice-confirmed empirically): train a
+small win-probability head on the frozen squirtle traj-encoder embeddings.
+Data: the run's own 50k-battle FIFO buffer
+(~/metamon_runs/mini_online_smogon_v0/buffer/gen1ou/, WIN/LOSS in filenames,
+in-distribution for the final policy). Head: logistic on the per-turn
+embedding (or light 2-layer MLP), binary cross-entropy vs battle outcome.
+Wire in as `search_leaf_value_mode="win_head"` (leaf value = predicted
+P(win); advantages in probability units, naturally calibrated for beta).
