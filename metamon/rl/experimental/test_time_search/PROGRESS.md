@@ -731,3 +731,216 @@ per-branch matrices, `terminal_win_REPORT.md`, `terminal_win_summary.json`,
 `run_manifest.json`, `audit.md` 30-root manual audit, `root_manifest.jsonl`).
 Recovery: `recover_terminal_win.py --input_dir /tmp/tts_phaseA_run`.
 Audit: `audit_terminal_win.py --input_dir /tmp/tts_phaseA_run --n_audit 30`.
+
+## Phase B+C: adaptive-K evaluation + confidence-gated update — IMPLEMENTED
+
+Phase B (finite-budget / adaptive-K) and Phase C (confidence-gated policy
+update) are **implemented, tested, and verified on GPU**. Together they
+directly address the Phase 2 "estimator-positive, game-negative" diagnosis:
+the KL update was diluting the signal (median KL 0.0013 vs target 0.02; only
+6.5% of decisions changed) because ~12% of action changes at K=16 were in the
+wrong direction (noisy roots). Phase C gates those out; Phase B makes the
+higher-K estimator affordable.
+
+### Phase C: confidence-gated policy update (skill §37)
+
+**New operator:** `confidence_gated_kl`. Added to `improvement.py` alongside
+the existing `single_anchor_kl` / `magnetic_kl` / ablations.
+
+**Mechanism:** before applying the policy update, compute the **minimum paired
+z-score** between the best-Q action and all competitors::
+
+    a_star = argmax(Q_mean)
+    min_z = min over a' != a_star of (Q[a_star] - Q[a']) / SE_paired(a_star, a')
+
+where `SE_paired` uses the per-branch return matrix `R (A, K)` with common
+random numbers (skill §7/§31): `SE = std(R[a*] - R[a'], ddof=1) / sqrt(K)`,
+which is often much smaller than the independent SE because CRN coupling makes
+paired differences less variable. When `R` is unavailable (`root_critic_only`),
+falls back to independent SE (all zero for a deterministic critic call →
+`min_z = inf` → always passes — correct: no sampling uncertainty).
+
+**Gate:** when `min_z < z_gate`, the update is suppressed (returns `pi_base`).
+When `min_z >= z_gate`, the `single_anchor_kl` update is applied with an
+optional **adaptive beta**::
+
+    beta_eff = beta * z_gate / max(min_z, z_gate)
+
+so the update strengthens as confidence rises (at `min_z = z_gate` →
+`beta_eff = beta`; at `min_z = 2*z_gate` → `beta_eff = beta/2`; as `min_z → inf`
+→ `beta_eff → 0`, approaching `argmax_q`).
+
+**New helpers** (`improvement.py`): `build_return_matrix` (per-branch →
+`R (A, K)`), `paired_sem` (paired SE of action-difference), `min_z_score`
+(min z between best action and all competitors).
+
+**Config** (`config.py`): `search_z_gate` (float, 0=off), `search_adaptive_beta`
+(bool). The `z_gate` modifier works with any operator, not just
+`confidence_gated_kl`.
+
+**`SearchRootRecord`** logs: `z_gate`, `min_z_score`, `gated` (bool),
+`effective_beta`.
+
+**Tests** (`test_improvement.py`): 21 new tests — `build_return_matrix`,
+`paired_sem` (CRN vs independent, edge cases), `min_z_score` (best-vs-competitor
+min, edge cases), `confidence_gated_kl` (z_gate=0 ≡ single_anchor_kl, gated
+returns base when noisy, not gated when confident, adaptive beta formula +
+strengthens with confidence, no per-branch data → fallback SE, constant-shift
+invariance, output sums to 1, gating logs). **51 improvement tests total**
+(30 existing + 21 new), all pass.
+
+### Phase B: adaptive-K evaluation (skill §37)
+
+**New method:** `SearchEvalRunner._adaptive_rollout_core`. Multi-round fork
+with z-score early stopping.
+
+**Mechanism:**
+1. Build a `RootSeedBank` with `K=K_max` once (the per-`k` branch seed is
+   K-independent — `rng.py` keys on `(root, k)`, not on `K`).
+2. Create one snapshot (kept alive across rounds).
+3. **Round 1:** fork `A*K_pilot` branches (seeds for `k=0..K_pilot-1`), settle,
+   leaf, accumulate per-branch returns.
+4. **Z-stop check:** build `R` from all accumulated returns, compute `min_z`,
+   stop if `min_z >= k_z_stop` (or `K_max` reached).
+5. **Round 2+:** fork `A*K_batch` more branches (seeds for the next `k` range),
+   settle, leaf, accumulate, re-check.
+6. Aggregate across all rounds; release all lanes + snapshot in `finally`.
+
+The per-round `_Branches` uses a sliced `RootSeedBank` view (local k maps to
+global k), so each round's rollouts use the same chance streams as a standalone
+`K=K_max` run at those `k` indices. Recommended for `D=0` only (deeper-rollout
+policy RNG keys use local k, which doesn't maintain CRN across rounds —
+documented limitation).
+
+**Config** (`config.py`): `search_adaptive_k` (bool), `search_k_pilot` (int,
+default 4), `search_k_max` (int, default 64), `search_k_batch` (int, default 4),
+`search_k_z_stop` (float, default 2.0). Validation: `k_pilot >= 1`,
+`k_max >= k_pilot`, `k_batch >= 1`, `k_z_stop >= 0`.
+
+**`SearchRootRecord`** logs: `adaptive_k` (bool), `k_effective` (int — actual
+rollouts/action, may be < `k_max` when z-stop fires).
+
+**Tests** (`test_adaptive_k.py`): 13 new — config validation (6), stopping
+criterion simulation (5: stops at pilot when confident, runs to max when noisy,
+stops partway when z crosses threshold, single action always stops, equal Q
+never stops early), GPU-gated end-to-end smoke (2: well-formed result + no
+leak). **All 13 pass on GPU.**
+
+### Smoke verification (GPU, ckpt epoch 740)
+
+**Correctness smoke** (3 battles, `error_policy=raise`, `every_n=1`):
+204 roots, 0 errors, 0 fallbacks. Gating: 42% gated, 38% changed argmax,
+median KL 0.007, K_eff range [4, 16], mean 10.4. Adaptive-K saving ~35% of
+rollouts vs `K_max=16`.
+
+**Calibrated smoke** (5 battles, beta=5.0, `every_n=1`):
+380 roots, 0 errors. Gating: 28% gated, 29% changed argmax, median KL 0.004
+(below 0.02 target), p90 KL 0.93, mean K_eff 8.7 (saving ~46% vs `K_max=16`).
+Effective beta mean 3.44 (adaptive_beta scaling from 5.0).
+
+**Paired smoke** (20 pairs, beta=5.0, `every_n=3`): clean run, 0 errors,
+artifacts written. Delta=-0.10 CI [-0.35, +0.15] (n=20 smoke, inconclusive).
+
+### Full test suite
+
+```
+178 passed in ~127s   (GPU: 144 existing + 21 Phase C + 13 Phase B)
+```
+
+All 144 existing tests still pass (no regressions). Black formatting clean on
+all modified files.
+
+### Phase B+C screen — COMPLETE
+
+2 seeds (4000-4001, held-out) × 2 sides × 40 battles = 160 paired battles.
+~43 min. Config: `confidence_gated_kl`, `z_gate=2.0`, `adaptive_beta=true`,
+`beta=5.0`, `global_standardized` (scale=458.7), `adaptive_k` (pilot=4, max=16,
+batch=4, z_stop=2.0), `D=0`, `every_n=3`, `all_legal`, `resample_crn`,
+`policy_expectation`, `error_policy=raise`. Artifacts: `/tmp/tts_phaseBC_screen/`.
+
+| metric | value |
+|---|---|
+| paired delta | **-0.0375** |
+| 95% bootstrap CI | [-0.1375, +0.0688] (includes zero) |
+| discordant b/c | 34/40 |
+| McNemar p | 0.561 |
+| both-lose (draws) | 34/160 (21.3%) |
+| search WR | 0.5375 |
+| baseline WR | 0.575 |
+
+**Per-side:** side 0 delta +0.025 (b/c=20/18), side 1 delta -0.100 (b/c=14/22).
+The side-1 negative is driven by seed=4000 side=1 (WR 0.450 vs baseline 0.650,
+delta -0.200); seed=4001 side=1 is 0.550 vs 0.550 (delta 0.000).
+
+**Search diagnostics** (consistent across runs): 24-26% changed argmax, mean
+KL 0.18-0.30 (higher than Phase 2's 0.03-0.06 — the adaptive_beta makes
+stronger updates on confident roots; median KL 0.004 from the smoke), 740-976
+searched roots per 40-battle run, 0 errors.
+
+### Interpretation
+
+**Verdict: estimator-positive, game-negative (again).** The Phase B+C
+gating works as designed — 28% of roots are gated (search suppressed on noisy
+roots), preventing wrong-direction changes. The adaptive_beta concentrates the
+update budget on confident roots (mean KL 0.18-0.30 vs Phase 2's 0.03-0.06).
+But the game result is still slightly negative (-0.0375, CI includes zero).
+
+This is consistent with the Phase A diagnosis: the shaped critic's objective
+alignment is moderate (Spearman 0.30, `converges_with_k` flat). The gate
+ensures we only update on confident Q advantages, but if Q itself is
+misaligned with winning, then confident Q advantages can still lead to game
+losses. The gate + adaptive_beta cannot fix objective misalignment — they make
+the (partially misaligned) updates more aggressive on confident roots.
+
+The side-1 negative (recurring from Phase 2) suggests the stronger updates may
+increase exploitability on some matchups. The skill §40 warns: "a locally
+higher Q may not correspond to a higher win probability" and "greedy selection
+can make the policy more exploitable."
+
+**What would be needed to reach a positive result:**
+
+1. **Terminal-outcome value head** (skill §37 failure path): the
+   `converges_with_k` flatness is the key tell that the shaped critic has a
+   systematic misaligned component. A value head trained directly on terminal
+   win/loss would make the gate more effective — confident advantages would
+   actually correspond to game wins. The `terminal_continuations` infra
+   (Phase A) already generates the training data.
+2. **More pairs**: 160 pairs gives CI ±0.10, too wide to resolve a small
+   effect. Need ~500+ pairs (the adaptive-K makes this affordable: mean
+   K_eff=8.7 vs K=16, ~46% compute savings).
+3. **Investigate side-1 exploitability**: the recurring side-1 negative
+   suggests the stronger updates (higher KL) may be exploitable. A lower
+   `z_gate` (more conservative) or a per-side beta might help.
+4. **every_n=1 with higher K_max**: searching every decision with K_max=32
+   would amplify the effect (both positive and negative); the adaptive-K makes
+   this more affordable than fixed K=32.
+
+### Commands
+
+```bash
+export METAMON_CACHE_DIR=/home/eddie/metamon_cache
+
+# Phase B+C paired eval (skill §37):
+uv run python -m metamon.rl.experimental.test_time_search.paired_eval \
+  --agent MiniOnlinePsroV1_4 --checkpoint 740 --format gen1ou --team_set competitive \
+  --search_mode oracle-root-mc --rollouts_per_action 4 --search_depth 0 \
+  --root_candidate_mode all_legal --search_every_n 3 \
+  --search_chance_mode resample_crn --leaf_value_mode policy_expectation \
+  --search_value_normalization false --value_scale_mode global_standardized \
+  --global_advantage_scale 458.7 \
+  --search_ablation confidence_gated_kl --z_gate 2.0 --adaptive_beta true \
+  --search_beta 5.0 \
+  --adaptive_k true --k_pilot 4 --k_max 16 --k_batch 4 --k_z_stop 2.0 \
+  --error_policy raise \
+  --num_seeds 3 --battles_per_seed 50 --seed_base 4000 \
+  --num_parallel 4 --output_dir /tmp/tts_phaseBC_screen
+
+# Phase C only (no adaptive-K, fixed K=16):
+#   --search_ablation confidence_gated_kl --z_gate 2.0 --adaptive_beta true \
+  --search_beta 5.0 --rollouts_per_action 16
+#   (drop the --adaptive_k / --k_* flags)
+
+# Phase B only (adaptive-K, no gating):
+#   --search_ablation single_anchor_kl --adaptive_k true --k_pilot 4 --k_max 16 \
+  --k_batch 4 --k_z_stop 2.0 --search_beta 5.0
+```
