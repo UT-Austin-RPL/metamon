@@ -1118,3 +1118,67 @@ individual pivotal moves the way Stratego flag-play is. There is no pool of
   Ataraxos-like: belief network over the opponent's hidden team/set) project.
 - The strongest near-term lever for a better squirtle is more/better *training*
   (the online run), not test-time compute.
+
+
+## kimi-search M6: best-response search vs a fixed, different-distribution opponent -- also negative
+
+The last untested hypothesis: value-averaging search fails in *self-play* (M0/M5)
+because a symmetric opponent is already equilibrium-ish -- but might help against
+a *fixed, exploitable* opponent (the actual Ataraxos setting, and the human-ladder
+analogue). Paired eval: squirtle @975 (+ the Phase B+C search) **vs
+MiniOnlinePsroV1_4 @740** (a different-architecture, different-run opponent), 160
+pairs, seeds 12000-12001.
+
+| metric | value |
+|---|---|
+| paired delta | **-0.050** |
+| 95% bootstrap CI | [-0.144, +0.050] |
+| search WR / baseline WR | 0.438 / 0.488 |
+| per-side | side 0: -0.037, side 1: -0.062 |
+| McNemar b/c | 27/35 |
+
+Search WR <= baseline WR on all 4 runs. **Best-response search does not help
+either.** (Note squirtle@975 is weaker than PsroV1_4@740 -- baseline WR 0.49 < 0.5 --
+so this arm is noisier than self-play, but the direction is consistently negative,
+matching M0.)
+
+## Final summary of the kimi-search investigation
+
+Six experiments, one consistent result: **test-time search does not benefit the
+squirtle agent.**
+
+| experiment | arm | result |
+|---|---|---|
+| M0 | shaped-critic search, self-play paired | delta -0.019 (CI incl 0); 23% decisions changed, KL 0.165 |
+| M1 | higher-gamma leaf value, fixed-root gate | H2 refuted: no gamma head beats actor regret |
+| M3 | trained win-prob head, fixed-root gate | refuted at action level (Spearman 0.11, regret 0.091 vs actor 0.072) |
+| M3b | win-head capacity sweep | frozen repr is the ceiling (AUC 0.84, more capacity overfits) |
+| M4 | terminal-win distillation pilot | labels too noisy + too few to move the policy |
+| M5 | paired-CRN causal gain of d0 search | **+0.0013 terminal-win; +0.004 even on pivotal roots (n.s.)** |
+| M6 | best-response search vs fixed different opponent | delta -0.050 (CI incl 0) |
+
+**Conclusion.** The blocker was never the value target or the update operator --
+it is that squirtle's actor is already near the decision-quality ceiling of its
+own representation, and gen1ou outcomes (self-play or vs this fixed opponent) are
+driven by team matchup + accumulated play rather than a small set of pivotal,
+reliably-wrong decisions that search could fix. Ataraxos-style value-averaging
+search transfers to a game/agent only when (a) the value function is trained on
+the terminal outcome AND (b) the base policy leaves exploitable per-decision value
+on the table. Squirtle fails (b).
+
+**Deliverables of this branch (reusable regardless of the negative result):**
+- `terminal_win.py`: multi-gamma predictors (`--gamma_indices`), win-head
+  predictor (`--win_head_path`), distillation-label capture (`--save_distill`).
+- `win_head.py` / `train_win_head.py`: trainable win-probability head on frozen
+  embeddings (+ embedding cache for capacity sweeps).
+- `distill_win.py`: policy distillation toward terminal-win-best actions.
+- A validated paired-CRN methodology (`--store_per_branch` + the paired
+  per-branch gain) for measuring the *causal* per-decision effect of any
+  action-ranker -- the right tool for future search/value research here.
+
+**Recommended next directions (not test-time search):** (1) the only
+search-flavored idea with remaining upside is *opponent-modeling* search on the
+human ladder (a belief network over the opponent's hidden team/sets, then
+best-response rollouts) -- a different project from value-averaging; (2) the
+strongest lever for a better squirtle is continued/better training, not test-time
+compute.
