@@ -386,11 +386,15 @@ def add_cli(parser: argparse.ArgumentParser) -> None:
             "sampled_action",
             "root_critic_only",
             "win_head",
+            "terminal_win",
         ],
         help="policy_expectation: exact V_pi=sum_a pi(a)Q(h,a). sampled_action: "
         "legacy single-action bootstrap. root_critic_only: no rollout. "
         "win_head (kimi-search M3): terminal-aligned leaf value from a trained "
-        "win-probability head (requires --win_head_path).",
+        "win-probability head (requires --win_head_path). "
+        "terminal_win (kimi-search oracle): roll each branch to a terminal "
+        "state and use the TRUE outcome as Q(s,a) -- the strongest possible "
+        "leaf value (upper bound on any value-based search).",
     )
     parser.add_argument(
         "--root_candidate_mode",

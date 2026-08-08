@@ -201,6 +201,7 @@ class SearchConfig:
             "sampled_action",
             "root_critic_only",
             "win_head",
+            "terminal_win",
         ):
             raise ValueError(
                 f"unknown search_leaf_value_mode: {self.search_leaf_value_mode}"
@@ -209,6 +210,23 @@ class SearchConfig:
             raise ValueError(
                 "search_leaf_value_mode='win_head' requires search_win_head_path"
             )
+        if self.search_leaf_value_mode == "terminal_win":
+            # The terminal-win oracle rolls each branch to a terminal state, so
+            # the shaped intermediate reward would double-count if mixed in.
+            # Force leaf-only accounting: Q_root(a) = P(win | a) directly.
+            if self.search_include_intermediate_rewards:
+                raise ValueError(
+                    "search_leaf_value_mode='terminal_win' requires "
+                    "search_include_intermediate_rewards=False (the leaf value "
+                    "IS the terminal outcome; intermediate shaped rewards would "
+                    "double-count / mix units)"
+                )
+            if self.search_adaptive_k:
+                raise ValueError(
+                    "search_leaf_value_mode='terminal_win' does not support "
+                    "adaptive-K (the oracle is already the ground truth; use a "
+                    "fixed modest search_rollouts_per_action)"
+                )
         if self.search_root_candidate_mode not in (
             "all_legal",
             "relative_threshold",

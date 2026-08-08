@@ -986,10 +986,21 @@ class SearchEvalRunner:
             self._rollout_root(br, obs)
             opp_root_actions = self._last_opp_root_actions
 
-            for d in range(cfg.search_depth):
-                if not br.active.any():
-                    break
-                self._rollout_step(br)
+            if cfg.search_leaf_value_mode == "terminal_win":
+                # kimi-search oracle: roll BOTH sides with the frozen policy to a
+                # terminal state; the leaf value IS the actual outcome. This is
+                # the strongest oracle the search can have for a fixed rollout
+                # policy (true terminal win rate instead of a critic bootstrap).
+                n_steps = 0
+                max_steps = 250
+                while br.active.any() and n_steps < max_steps:
+                    self._rollout_step(br)
+                    n_steps += 1
+            else:
+                for d in range(cfg.search_depth):
+                    if not br.active.any():
+                        break
+                    self._rollout_step(br)
 
             q_per_branch, leaf_diag = self._leaf_values(br)
             diag.update(leaf_diag)
@@ -2075,8 +2086,16 @@ class SearchEvalRunner:
         vals = np.zeros(N, dtype=np.float64)
         diag: Dict[str, Any] = {}
         term_idx = np.where(br.terminal)[0]
-        for i in term_idx:
-            vals[i] = br.cum_reward[i]  # terminal: victory counted once, bootstrap 0
+        if cfg.search_leaf_value_mode == "terminal_win":
+            # oracle: the leaf value IS the true terminal outcome.
+            for i in term_idx:
+                bw = br.lanes[i].universal_state(self.env.eval_side).battle_won
+                vals[i] = 1.0 if bw is True else (0.0 if bw is False else 0.5)
+        else:
+            for i in term_idx:
+                vals[i] = br.cum_reward[
+                    i
+                ]  # terminal: victory counted once, bootstrap 0
         active_idx = np.where(br.active)[0]
         if active_idx.size == 0:
             diag.update(
@@ -2086,6 +2105,20 @@ class SearchEvalRunner:
                 bootstrap_mean=0.0,
                 n_settled_mean=float(br.depth_done.mean()) if N else 0.0,
                 critic_disagreement=0.0,
+            )
+            return vals, diag
+
+        if cfg.search_leaf_value_mode == "terminal_win":
+            # oracle: actual terminal outcome for non-truncated active branches
+            # (a branch still active here hit the 250-step cap -> truncated; keep
+            # the 0.5 placeholder but the Q is essentially the true win rate).
+            for i in active_idx:
+                bw = br.lanes[i].universal_state(self.env.eval_side).battle_won
+                vals[i] = 1.0 if bw is True else (0.0 if bw is False else 0.5)
+            diag["critic_disagreement"] = 0.0
+            diag["intermediate_reward_mean"] = 0.0
+            diag["bootstrap_mean"] = (
+                float(vals[active_idx].mean()) if active_idx.size else 0.0
             )
             return vals, diag
 
