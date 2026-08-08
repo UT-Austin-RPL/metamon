@@ -1066,3 +1066,15 @@ Immediate next step: M4 distillation pilot -- generate terminal-win labels on
 a few hundred squirtle roots (the `terminal_continuations` infra), fine-tune
 the policy head with a KL-to-label loss, and re-measure the actor regret on
 held-out fixed roots.
+
+
+### M3 (part 2): head-capacity sweep -- the representation is the ceiling
+
+Cached the frozen-backbone embeddings for 6000 battles (255k train turns,
+28.7k val) and swept WinHead capacity (d_hidden x n_layers). State-level val
+AUC *decreases* with capacity (256x2: 0.838, 512x2: 0.835, 1024x2: 0.835,
+512x3: 0.825, 1024x3: 0.819, 2048x3: 0.813, 1024x4: 0.802) -- pure
+overfitting. **The frozen 480-d trajectory embedding is the ceiling**: no
+head capacity decodes more win signal, let alone per-action win *differences*.
+This closes the "just train a bigger head" branch and confirms the pivot to
+M4 (move the terminal-win signal into the policy weights via distillation).

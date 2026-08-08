@@ -138,45 +138,85 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--embeddings_cache",
+        default=None,
+        help="optional .npz path: load cached (X, A, Y) splits if present, "
+        "else embed and save. Lets capacity sweeps reuse one embedding pass.",
+    )
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = args.device if torch.cuda.is_available() else "cpu"
 
-    maker = get_pretrained_model(args.agent)
-    experiment = maker.initialize_agent(checkpoint=args.checkpoint, log=False)
-    agent = experiment.policy.to(device)
-    agent.eval()
-    for p in agent.parameters():
-        p.requires_grad_(False)
+    cache_only = args.embeddings_cache and os.path.exists(args.embeddings_cache)
+    if cache_only:
+        # skip loading the 35M model when we already have embeddings
+        agent = None
+        maker = get_pretrained_model(args.agent)
+        dset = amago_dset = None
+        train_files = val_files = []
+        n_val = 0
+    else:
+        maker = get_pretrained_model(args.agent)
+        experiment = maker.initialize_agent(checkpoint=args.checkpoint, log=False)
+        agent = experiment.policy.to(device)
+        agent.eval()
+        for p in agent.parameters():
+            p.requires_grad_(False)
 
-    dset = MetamonDataset(
-        dset_root=args.buffer_root,
-        observation_space=maker.observation_space,
-        action_space=maker.action_space,
-        reward_function=maker.reward_function,
-        formats=[args.format],
-        verbose=False,
-        write_index_cache=False,
-    )
-    amago_dset = MetamonAMAGODataset(dset)
+    if not cache_only:
+        dset = MetamonDataset(
+            dset_root=args.buffer_root,
+            observation_space=maker.observation_space,
+            action_space=maker.action_space,
+            reward_function=maker.reward_function,
+            formats=[args.format],
+            verbose=False,
+            write_index_cache=False,
+        )
+        amago_dset = MetamonAMAGODataset(dset)
 
-    files = [f for f in dset.filenames if _RESULT_RE.search(os.path.basename(f))]
-    rng = np.random.default_rng(args.seed)
-    rng.shuffle(files)
-    files = files[: args.max_battles]
-    n_val = max(int(len(files) * args.val_fraction), 1)
-    val_files, train_files = files[:n_val], files[n_val:]
-    print(
-        f"train battles: {len(train_files)}, val battles: {len(val_files)}", flush=True
-    )
+        files = [f for f in dset.filenames if _RESULT_RE.search(os.path.basename(f))]
+        rng = np.random.default_rng(args.seed)
+        rng.shuffle(files)
+        files = files[: args.max_battles]
+        n_val = max(int(len(files) * args.val_fraction), 1)
+        val_files, train_files = files[:n_val], files[n_val:]
+        print(
+            f"train battles: {len(train_files)}, val battles: {len(val_files)}",
+            flush=True,
+        )
 
     t0 = time.perf_counter()
-    print("embedding train split...", flush=True)
-    Xtr, Atr, Ytr = _collect(agent, dset, amago_dset, train_files, device)
-    print("embedding val split...", flush=True)
-    Xva, Ava, Yva = _collect(agent, dset, amago_dset, val_files, device)
+    cache = args.embeddings_cache
+    if cache and os.path.exists(cache):
+        z = np.load(cache)
+        Xtr = torch.from_numpy(z["Xtr"])
+        Atr = torch.from_numpy(z["Atr"])
+        Ytr = torch.from_numpy(z["Ytr"])
+        Xva = torch.from_numpy(z["Xva"])
+        Ava = torch.from_numpy(z["Ava"])
+        Yva = torch.from_numpy(z["Yva"])
+        print(f"loaded embeddings from {cache}", flush=True)
+    else:
+        print("embedding train split...", flush=True)
+        Xtr, Atr, Ytr = _collect(agent, dset, amago_dset, train_files, device)
+        print("embedding val split...", flush=True)
+        Xva, Ava, Yva = _collect(agent, dset, amago_dset, val_files, device)
+        if cache:
+            os.makedirs(os.path.dirname(os.path.abspath(cache)), exist_ok=True)
+            np.savez(
+                cache,
+                Xtr=Xtr.numpy(),
+                Atr=Atr.numpy(),
+                Ytr=Ytr.numpy(),
+                Xva=Xva.numpy(),
+                Ava=Ava.numpy(),
+                Yva=Yva.numpy(),
+            )
+            print(f"saved embeddings -> {cache}", flush=True)
     print(
         f"embedded: train {tuple(Xtr.shape)}, val {tuple(Xva.shape)} "
         f"in {time.perf_counter()-t0:.0f}s",
