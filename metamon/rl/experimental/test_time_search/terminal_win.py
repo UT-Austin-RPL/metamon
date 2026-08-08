@@ -319,6 +319,7 @@ def benchmark_terminal_win(
     depths: List[int],
     gamma_indices: Optional[List[int]] = None,
     win_head_path: Optional[str] = None,
+    save_distill: bool = False,
     max_roots: int = 64,
     max_battles: int = 40,
     root_stride: int = 1,
@@ -401,6 +402,7 @@ def benchmark_terminal_win(
 
     records: List[TerminalWinRootRecord] = []
     manifest: List[RootManifestEntry] = []
+    distill_rows: List[Dict[str, Any]] = []
     _roots_fh = None
     _manifest_fh = None
     if output_dir is not None:
@@ -487,6 +489,26 @@ def benchmark_terminal_win(
                     rec, mentry = lane_root_this_step[i]
                     records.append(rec)
                     manifest.append(mentry)
+                    if save_distill:
+                        _obs_i = obs_list[i]
+                        distill_rows.append(
+                            {
+                                "obs": {
+                                    k: np.asarray(v).tolist() for k, v in _obs_i.items()
+                                },
+                                "legal_actions": [int(x) for x in rec.legal_actions],
+                                "label": int(
+                                    rec.legal_actions[
+                                        int(
+                                            np.nanargmax(
+                                                np.asarray(rec.terminal_win, float)
+                                            )
+                                        )
+                                    ]
+                                ),
+                                "terminal_win": [float(x) for x in rec.terminal_win],
+                            }
+                        )
                     if _roots_fh is not None:
                         try:
                             _roots_fh.write(rec.to_json() + "\n")
@@ -535,6 +557,10 @@ def benchmark_terminal_win(
             _roots_fh.close()
         if _manifest_fh is not None:
             _manifest_fh.close()
+        if save_distill and output_dir is not None:
+            with open(os.path.join(output_dir, "distill_labels.jsonl"), "w") as _fh:
+                for row in distill_rows:
+                    _fh.write(json.dumps(row) + "\n")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -1471,6 +1497,12 @@ def main() -> None:
         help="kimi-search M3: path to a trained WinHead checkpoint; adds a "
         "'win_head' predictor (per-action P(win) at the root) to the benchmark.",
     )
+    p.add_argument(
+        "--save_distill",
+        action="store_true",
+        help="kimi-search M4: also write distill_labels.jsonl (per-root obs + "
+        "terminal-win-best action label) for policy distillation.",
+    )
     p.add_argument("--store_per_branch", action="store_true")
     p.add_argument("--max_steps_to_terminal", type=int, default=250)
     p.add_argument("--progress_every", type=int, default=2)
@@ -1502,6 +1534,7 @@ def main() -> None:
             store_per_branch=args.store_per_branch,
             gamma_indices=args.gamma_indices,
             win_head_path=args.win_head_path,
+            save_distill=args.save_distill,
             progress_every=args.progress_every,
             env_seed=args.seed,
             search_seed=args.search_seed,
