@@ -1,0 +1,35 @@
+# Smogon-only online universe schedule for mini_online_smogon_v0.
+#
+# Deliberately EXCLUDES gl_05_26 from the online collection universe — the
+# learner's 60% offline floor (online_selfplay.yaml: gl-like pac-base /
+# pac-exploratory / pac-tauros self-play) provides the diverse-team grounding,
+# so the online 40% is spent entirely on the smogon target distribution.
+#
+# smogon_pass2_selected is up-weighted over time (the "higher weighted sample
+# over time" request). Epochs here are COLLECTOR epochs (the schedule's EpochRef
+# follows the collector's self.epoch, ~11/hr → ~1056 over a 4-day run).
+#
+# Component sets:
+#   smogon_pass2          — 475 competitive-breadth teams.
+#   smogon_pass2_selected — 283 battle-validated winners (sharpening target).
+schedule:
+  - epoch: 0
+    weights:
+      smogon_pass2: 1.0
+      smogon_pass2_selected: 0.0
+  - epoch: 100
+    weights:
+      smogon_pass2: 0.70
+      smogon_pass2_selected: 0.30
+  - epoch: 300
+    weights:
+      smogon_pass2: 0.50
+      smogon_pass2_selected: 0.50
+  - epoch: 600
+    weights:
+      smogon_pass2: 0.35
+      smogon_pass2_selected: 0.65
+  - epoch: 900
+    weights:
+      smogon_pass2: 0.25
+      smogon_pass2_selected: 0.75

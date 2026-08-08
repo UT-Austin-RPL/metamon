@@ -1394,6 +1394,45 @@ class V2AGroupedV2StatsAblation(PretrainedModel):
 
 
 @pretrained_model()
+class V2AGroupedV2Tauros35M(PretrainedModel):
+    """TaurosV0-inspired GroupedV2 architecture scaled to ~35M trainable params.
+
+    Same architecture family as ``TaurosV0`` (``grouped_v2_50m.gin``, ~62M
+    params) — ``MetamonMaskedActor`` + ``NCriticsTwoHot`` critic + the
+    three-stage GroupedV2 tstep encoder (pokemon / global / fusion perceivers)
+    + ``TformerTrajEncoder`` — with the per-stage widths and the traj-encoder
+    ``d_model`` reduced so the total trainable count lands at ~35M
+    (``34,936,182``). Same spaces / tokenizer / reward / battle backend as
+    ``V2AGroupedV2DataAblation`` and ``TaurosV0``.
+
+    There are no pretrained weights on HF for this config; it exists as the
+    *from-scratch* base for the smogon-only online RL run
+    ``mini_online_smogon_v0``
+    (``--base_model V2AGroupedV2Tauros35M --from_scratch``).
+    ``default_checkpoint=0`` means "untrained base, skip weight load" so
+    instantiating it never tries to download a checkpoint.
+    """
+
+    def __init__(self):
+        super().__init__(
+            model_name="v2_grouped_v2_tauros_35m",
+            model_gin_config="grouped_v2_35m.gin",
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            default_checkpoint=0,
+            action_space=get_action_space("DefaultActionSpace"),
+            observation_space=get_observation_space("GroupedObservationSpace"),
+            reward_function=get_reward_function("AggressiveShapedReward"),
+            tokenizer=get_tokenizer("DefaultObservationSpace-v1"),
+            battle_backend="metamon",
+            gin_overrides={
+                "MetamonGroupedTstepEncoderV2.tokenizer": get_tokenizer(
+                    "DefaultObservationSpace-v1"
+                ),
+            },
+        )
+
+
+@pretrained_model()
 class TaurosV0(PretrainedModel):
     def __init__(self):
         super().__init__(
@@ -1532,6 +1571,45 @@ class MiniOnlinePsroV0(LocalFinetunedModel):
             model_name="mini_online_psro_v1",
             default_checkpoint=560,
             # Same train gin stack as SmallG1OnlineV0 / online_rl.py.
+            train_gin_config="grouped_v2_large_isfilter.gin",
+            dataset_config="online_selfplay.yaml",
+        )
+
+    def get_path_to_checkpoint(self, checkpoint: int) -> str:
+        if checkpoint == LATEST_CHECKPOINT:
+            return os.path.join(self.local_ckpt_dir, "latest", "policy.pt")
+        return super().get_path_to_checkpoint(checkpoint)
+
+
+MINI_ONLINE_SMOGON_V0_SAVE_DIR = "/home/eddie/metamon_runs/mini_online_smogon_v0"
+
+
+@pretrained_model("squirtle")
+class Squirtle(LocalFinetunedModel):
+    """From-scratch smogon-only online RL run ``mini_online_smogon_v0`` (this run).
+
+    Registered under the name ``squirtle`` so it can be used directly as
+    ``--agent squirtle``. Defaults to ``LATEST_CHECKPOINT`` (the learner's
+    rolling ``ckpts/latest/policy.pt``) so playtests/evals always pick up the
+    most recent weights. Also registered so this run's own past checkpoints
+    can serve as PSRO self-play opponents (smogon-side specialists) in
+    ``hl_gen1ou.yaml``. Mirrors ``MiniOnlinePsroV1_3``. ``base_model`` is the
+    from-scratch ``V2AGroupedV2Tauros35M`` arch (no HF weights); weights come
+    from this run's own checkpoints under
+    ``{save_dir}/mini_online_smogon_v0/ckpts/policy_weights/policy_epoch_{N}.pt``
+    (saved every 25 epochs). ``checkpoint=-1`` (``LATEST_CHECKPOINT``) loads the
+    learner's rolling ``ckpts/latest/policy.pt``.
+
+    Added by the automated monitor when ``val/Average Win Rate`` vs
+    TaurosV0-competitive crosses 0.50 / hits new highs (cap 5 rows).
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=V2AGroupedV2Tauros35M,
+            amago_ckpt_dir=MINI_ONLINE_SMOGON_V0_SAVE_DIR,
+            model_name="mini_online_smogon_v0",
+            default_checkpoint=LATEST_CHECKPOINT,
             train_gin_config="grouped_v2_large_isfilter.gin",
             dataset_config="online_selfplay.yaml",
         )

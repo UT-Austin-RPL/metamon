@@ -68,3 +68,15 @@ agents:
     num_agents: 1
     team_set: smogon_pass2
     checkpoints: [1500]
+
+  # Smogon-side self-play specialist from THIS run (added by monitor at val WR >= 0.50 / new high).
+  MiniOnlineSmogonV0_500:
+    model_name: squirtle
+    num_agents: 1
+    checkpoints: [500]
+
+  # Smogon-side self-play specialist from THIS run (added by monitor at val WR >= 0.50 / new high).
+  MiniOnlineSmogonV0_825:
+    model_name: squirtle
+    num_agents: 1
+    checkpoints: [825]
