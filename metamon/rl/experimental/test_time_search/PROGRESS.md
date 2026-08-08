@@ -1078,3 +1078,43 @@ overfitting. **The frozen 480-d trajectory embedding is the ceiling**: no
 head capacity decodes more win signal, let alone per-action win *differences*.
 This closes the "just train a bigger head" branch and confirms the pivot to
 M4 (move the terminal-win signal into the policy weights via distillation).
+
+
+## kimi-search M5: the decisive paired-CRN measurement -- search has ~no causal headroom
+
+Re-ran the terminal-win benchmark with `--store_per_branch` (120 roots, k_ref=32)
+to get the per-branch win matrix W (A, G) with common random numbers. The paired
+per-branch gain `mean_k(W[d0,k] - W[actor,k])` removes chance-stream variance --
+the honest causal test of "does the search's pick beat the actor's at this root".
+
+**Result: the causal gain of d0 search over the actor is +0.0013 terminal-win
+overall** (median 0.000, positive on only 29% of roots). Stratified by
+terminal-win spread (pivotality): low-spread -0.003, mid +0.001, high-spread
+(>0.38) +0.004. Even on the most pivotal roots, the search's chosen action wins
+at most ~0.4% more than the actor's -- and that is *not* significant at n=51.
+
+**This closes the question.** Across M0 (game: 23% of decisions changed, KL
+0.165, delta ~0), M1 (gamma heads), M3 (win head), and M5 (paired CRN), every
+road to "improve squirtle by re-ranking its decisions at test time" measures a
+~zero causal effect. The earlier apparent gains (M4's +0.02 on high-spread
+roots) were selection/noise artifacts that vanish under the paired CRN design.
+
+**Why Ataraxos search doesn't transfer to squirtle:** (1) the value target is
+not the blocker -- the true terminal-win value exists and the benchmark measures
+against it; (2) the bottleneck is that squirtle's actor is already near the
+*decision-quality ceiling* of its own representation in self-play, AND gen1ou
+self-play battles are decided by team matchup + accumulated play, not by
+individual pivotal moves the way Stratego flag-play is. There is no pool of
+"actor is reliably wrong on pivotal decisions" for search to exploit.
+
+**Where this leaves the research plan:**
+- Test-time search (leaf-value or update-operator variants) is **not** a path to
+  a stronger squirtle under self-play paired eval. Recommend stopping that line.
+- If search is to help, it would have to be against *non-self-play* opponents
+  (the human ladder), where the opponent is exploitable and squirtle's
+  self-play-optimal policy is NOT the best response -- i.e. opponent-modeling /
+  best-response search (the belief-network branch, M5-original), not
+  value-averaging self-play search. That is a different (and genuinely
+  Ataraxos-like: belief network over the opponent's hidden team/set) project.
+- The strongest near-term lever for a better squirtle is more/better *training*
+  (the online run), not test-time compute.
