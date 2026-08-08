@@ -1182,3 +1182,56 @@ human ladder (a belief network over the opponent's hidden team/sets, then
 best-response rollouts) -- a different project from value-averaging; (2) the
 strongest lever for a better squirtle is continued/better training, not test-time
 compute.
+
+
+## kimi-search M7: the TERMINAL-WIN ORACLE paired eval -- the definitive answer
+
+Added `search_leaf_value_mode="terminal_win"`: each searched root rolls A*K
+branches **to a terminal state** with the frozen policy on both sides and sets
+Q(s,a) = the TRUE win rate (actual 1/0.5/0 outcomes) -- no critic, no
+bootstrap, no value estimate of any kind. This is the strongest oracle a
+value-based test-time search can have for a fixed rollout policy; it
+upper-bounds every leaf-value variant (shaped critic, gamma heads, win head).
+
+A split-half (winner's-curse-free) re-analysis of the M4b per-branch data first
+confirmed the oracle has a *real causal per-root* gain: **+0.027 terminal-win
+over the actor (95% CI [+0.003, +0.051])**, vs +0.001 for the shaped critic --
+and +0.059 on high-pivotality roots. So the oracle genuinely picks better
+actions at isolated roots (the shaped critic does not).
+
+Paired eval (squirtle @975, self-play, K=8 continuations/action, every_n=5,
+single_anchor_kl beta=0.1 on win-probability advantages, raw scale): 40 pairs,
+67 min.
+
+| metric | value |
+|---|---|
+| paired delta | **+0.0000** (20 wins / 20 wins) |
+| 95% bootstrap CI | [-0.20, +0.20] (n=40 smoke) |
+| McNemar b/c, p | 9/9, p=1.000 |
+| searched roots | 200 / 228 per 20-battle run |
+| changed argmax | 23% / 21% |
+| mean KL to base | 0.158 / 0.179 |
+
+**The oracle fires, changes ~22% of decisions with substantial KL (0.16-0.18),
+uses the TRUE win rate as its value -- and the win rate does not move
+(exactly 0.000, perfectly split discordants).**
+
+### The answer
+
+Even test-time search with **full oracle information** (true terminal win rate
+as the leaf value, true forked simulator dynamics) does not improve squirtle's
+win rate. The earlier hypothesis that "the value estimate is the bottleneck"
+is definitively ruled out: the oracle's per-root picks are genuinely better
+(+0.027 causal), but those per-root gains **do not accumulate into battle
+wins**. Changing one decision shifts the trajectory to a different state whose
+own value re-equilibrates; over a ~50-turn gen1ou battle the outcome is set by
+the team matchup and the *accumulated* quality of play, not by the ~10 searched
+decisions -- and both effects wash out in the paired comparison.
+
+This is the strongest possible evidence that **test-time search is not a path
+to a stronger squirtle**, full stop -- not a leaf-value problem, not an
+operator problem, not an information problem. The remaining lever for the
+agent is training (a better base policy / representation), and the only
+search-flavored idea with theoretical upside left is opponent-modeling
+best-response search on the human ladder (a belief network over hidden
+teams/sets) -- a different mechanism from value-averaging, untested here.
