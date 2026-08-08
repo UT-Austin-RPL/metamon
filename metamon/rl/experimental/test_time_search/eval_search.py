@@ -277,6 +277,13 @@ def build_config_from_args(args) -> SearchConfig:
         search_magnet_alpha=args.magnet_alpha,
         search_error_policy=args.error_policy,
         search_log_branch_details=args.log_branch_details,
+        search_z_gate=args.z_gate,
+        search_adaptive_beta=args.adaptive_beta,
+        search_adaptive_k=args.adaptive_k,
+        search_k_pilot=args.k_pilot,
+        search_k_max=args.k_max,
+        search_k_batch=args.k_batch,
+        search_k_z_stop=args.k_z_stop,
     )
     if getattr(args, "legacy_prototype", False):
         cfg.apply_legacy_prototype_defaults()
@@ -348,6 +355,7 @@ def add_cli(parser: argparse.ArgumentParser) -> None:
         choices=[
             "single_anchor_kl",
             "kl_anchor",
+            "confidence_gated_kl",
             "magnetic_kl",
             "argmax_q",
             "softmax_q",
@@ -391,6 +399,43 @@ def add_cli(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--global_advantage_scale", type=float, default=None)
     parser.add_argument("--magnet_alpha", type=float, default=0.0)
+    parser.add_argument(
+        "--z_gate",
+        type=float,
+        default=0.0,
+        help="Phase C (skill §37): z-score threshold for the confidence gate. "
+        "When > 0, the update is suppressed (returns pi_base) if the best "
+        "action's min paired z-score < this threshold. Requires per-branch "
+        "rollout data (not root_critic_only). 0 = no gating.",
+    )
+    parser.add_argument(
+        "--adaptive_beta",
+        type=_bool_arg,
+        default=False,
+        help="Phase C: scale beta with confidence (beta_eff = beta * z_gate / "
+        "max(min_z, z_gate)) so the update strengthens when the signal is "
+        "statistically separated. Only active when z_gate > 0.",
+    )
+    # --- Phase B: adaptive-K (skill §37) ---
+    parser.add_argument(
+        "--adaptive_k",
+        type=_bool_arg,
+        default=False,
+        help="Phase B: multi-round adaptive-K with z-score early stopping. "
+        "Starts with k_pilot rollouts/action, adds k_batch per round, stops "
+        "when the best action's paired z-score >= k_z_stop or k_max is reached. "
+        "Recommended for D=0 only.",
+    )
+    parser.add_argument(
+        "--k_pilot", type=int, default=4, help="initial rollouts/action"
+    )
+    parser.add_argument("--k_max", type=int, default=64, help="maximum rollouts/action")
+    parser.add_argument(
+        "--k_batch", type=int, default=4, help="additional rollouts/action per round"
+    )
+    parser.add_argument(
+        "--k_z_stop", type=float, default=2.0, help="z-score early-stopping threshold"
+    )
     parser.add_argument(
         "--error_policy",
         default="raise",

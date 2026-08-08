@@ -102,6 +102,11 @@ class SearchConfig:
     # ------------------------------------------------------------------
     # "single_anchor_kl" (research default; "kl_anchor" is a legacy alias)
     #   pi_search(a) ~ pi_base(a) * exp(A(a)/beta)
+    # "confidence_gated_kl" (Phase C, skill §37): single_anchor_kl with a
+    #   per-root z-score gate. Suppresses the update (returns pi_base) when
+    #   the best action's advantage over its nearest competitor is not
+    #   statistically separated (paired z-score < search_z_gate). Optionally
+    #   scales beta with confidence (search_adaptive_beta).
     # "magnetic_kl"  : single-anchor + uniform magnetic term
     #   pi_search(a) ~ rho(a)^(alpha/(alpha+beta)) pi_base(a)^(beta/(alpha+beta))
     #                  * exp(Q(a)/(alpha+beta)),  rho uniform over legal
@@ -111,6 +116,33 @@ class SearchConfig:
     search_magnet_alpha: float = 0.0  # magnetic-anchor strength (magnetic_kl)
     search_policy_prior_floor: float = 0.0  # floor on pi_base before anchoring
     search_root_selection: str = "sample"  # "sample" | "argmax"
+
+    # --- Phase C: confidence-gated update (skill §37) ---
+    # z-score threshold for the confidence gate. When > 0 (and the operator is
+    # confidence_gated_kl, or any operator with z_gate > 0), the update is
+    # suppressed if the best action's min paired z-score < this threshold.
+    # 0.0 = no gating (confidence_gated_kl == single_anchor_kl).
+    search_z_gate: float = 0.0
+    # When True, scale beta as beta_eff = beta * z_gate / max(min_z, z_gate)
+    # so the update strengthens with confidence (skill §37 Phase C).
+    search_adaptive_beta: bool = False
+
+    # --- Phase B: adaptive-K evaluation (skill §37) ---
+    # When True, the search driver uses a multi-round fork: an initial pilot of
+    # ``search_k_pilot`` rollouts per action, then batches of ``search_k_batch``
+    # additional rollouts, stopping early when the best action's paired z-score
+    # exceeds ``search_k_z_stop`` (or ``search_k_max`` is reached). This makes
+    # high-K-quality search affordable for live paired eval (Phase 2 screen):
+    # easy roots stop at K_pilot, hard roots get up to K_max. The per-``k`` branch
+    # seed is K-independent (``rng.RootSeedBank`` keys on ``(root, k)``, not on
+    # ``K``), so each round's rollouts use the same chance streams as a
+    # standalone K=K_max run at those k indices. Recommended for D=0 only (D>0
+    # deeper-rollout policy RNG keys use local k, which breaks CRN across rounds).
+    search_adaptive_k: bool = False
+    search_k_pilot: int = 4  # initial rollouts per action
+    search_k_max: int = 64  # maximum rollouts per action
+    search_k_batch: int = 4  # additional rollouts per action per round
+    search_k_z_stop: float = 2.0  # z-score early-stopping threshold
 
     # ------------------------------------------------------------------
     # rollout policy
@@ -151,6 +183,7 @@ class SearchConfig:
         )
         if ablation not in (
             "single_anchor_kl",
+            "confidence_gated_kl",
             "magnetic_kl",
             "argmax_q",
             "softmax_q",
@@ -212,6 +245,17 @@ class SearchConfig:
                 "search_value_scale_mode='global_standardized' requires a "
                 "positive search_global_advantage_scale"
             )
+        if self.search_z_gate < 0.0:
+            raise ValueError("search_z_gate must be non-negative")
+        if self.search_adaptive_k:
+            if self.search_k_pilot < 1:
+                raise ValueError("search_k_pilot must be >= 1")
+            if self.search_k_max < self.search_k_pilot:
+                raise ValueError("search_k_max must be >= search_k_pilot")
+            if self.search_k_batch < 1:
+                raise ValueError("search_k_batch must be >= 1")
+            if self.search_k_z_stop < 0.0:
+                raise ValueError("search_k_z_stop must be non-negative")
 
     # ------------------------------------------------------------------
     # derived helpers

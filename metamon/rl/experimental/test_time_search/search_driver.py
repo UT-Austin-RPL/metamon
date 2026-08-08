@@ -46,7 +46,7 @@ import torch.nn.functional as F
 
 from .branch_state import make_branch_state
 from .config import SearchConfig
-from .improvement import improve_policy
+from .improvement import improve_policy, build_return_matrix, min_z_score
 from .rng import RootSeedBank, make_rng, policy_rng_key
 
 # ---------------------------------------------------------------------------
@@ -243,6 +243,14 @@ class SearchRootRecord:
     opp_root_actions: List[int] = field(default_factory=list)
     error: str = ""
     branch_details: Optional[List[dict]] = None
+    # --- Phase C: confidence-gated update (skill §37) ---
+    z_gate: float = 0.0
+    min_z_score: float = float("inf")
+    gated: bool = False
+    effective_beta: float = 1.0
+    # --- Phase B: adaptive-K (skill §37) ---
+    adaptive_k: bool = False
+    k_effective: int = 0  # rollouts per action actually run (may be < k_max)
 
     def to_json(self) -> str:
         return json.dumps(self.__dict__)
@@ -644,9 +652,17 @@ class SearchEvalRunner:
         env_seed_hashes: List[str] = []
 
         try:
-            core = self._rollout_core(
-                trunk_lane_idx, obs, legal_arr, base_probs, emb, illegal
-            )
+            if (
+                cfg.search_adaptive_k
+                and cfg.search_leaf_value_mode != "root_critic_only"
+            ):
+                core = self._adaptive_rollout_core(
+                    trunk_lane_idx, obs, legal_arr, base_probs, emb, illegal
+                )
+            else:
+                core = self._rollout_core(
+                    trunk_lane_idx, obs, legal_arr, base_probs, emb, illegal
+                )
             q_mean = core.q_mean
             q_std = core.q_std
             counts = core.counts
@@ -654,6 +670,12 @@ class SearchEvalRunner:
             diag = core.diag
             opp_root_actions = core.opp_root_actions
             env_seed_hashes = core.env_seed_hashes
+
+            # Update K/N to the effective values (adaptive-K may use fewer than
+            # search_rollouts_per_action when the z-stop fires early).
+            if counts.size and counts.max() > 0:
+                K = int(counts.max())
+                N = int(counts.sum())
 
             # --- policy improvement (skill §12) ---
             full_q = np.full(self.action_dim, np.nan)
@@ -683,6 +705,17 @@ class SearchEvalRunner:
                 root_selection=cfg.search_root_selection,
                 rng=rng,
                 alpha=cfg.search_magnet_alpha,
+                # Phase C: pass per-branch returns for paired-SE gating (skill §37).
+                # root_critic_only has no rollouts -> core.root_action is None ->
+                # the gate falls back to independent SE (all zero for a single
+                # critic call -> min_z=inf -> always passes, which is correct:
+                # a deterministic critic ranking has no sampling uncertainty).
+                q_per_branch=core.q_per_branch,
+                root_action_pb=core.root_action,
+                rollout_index_pb=core.rollout_index,
+                K_rollouts=K,
+                z_gate=cfg.search_z_gate,
+                adaptive_beta=cfg.search_adaptive_beta,
             )
             selected = int(res.selected_action)
 
@@ -747,6 +780,14 @@ class SearchEvalRunner:
             env_seed_hashes=list(env_seed_hashes),
             opp_root_actions=list(opp_root_actions),
             error=error_msg,
+            z_gate=float(cfg.search_z_gate),
+            min_z_score=float(res.min_z_score) if res is not None else float("inf"),
+            gated=bool(res.gated) if res is not None else False,
+            effective_beta=(
+                float(res.effective_beta) if res is not None else float(cfg.search_beta)
+            ),
+            adaptive_k=bool(cfg.search_adaptive_k),
+            k_effective=int(max(counts) if counts.size else 0),
         )
         if self._log_file is not None:
             self._log_file.write(record.to_json() + "\n")
@@ -982,6 +1023,268 @@ class SearchEvalRunner:
         finally:
             if br is not None:
                 self._cleanup_branches(br)
+
+    def _adaptive_rollout_core(
+        self,
+        trunk_lane_idx: int,
+        obs: dict,
+        legal_arr: np.ndarray,
+        base_probs: np.ndarray,
+        emb: torch.Tensor,
+        illegal: torch.Tensor,
+    ) -> _RolloutResult:
+        """Multi-round adaptive-K rollout with z-score early stopping (Phase B).
+
+        Runs an initial pilot of ``search_k_pilot`` rollouts per action, then
+        batches of ``search_k_batch`` additional rollouts, stopping early when
+        the best action's paired z-score exceeds ``search_k_z_stop`` (or
+        ``search_k_max`` is reached). This makes high-K-quality search
+        affordable: easy roots stop at K_pilot, hard roots get up to K_max.
+
+        The per-``k`` branch seed is K-independent (``rng.RootSeedBank`` keys on
+        ``(root, k)``, not on ``K``), so each round's rollouts use the same
+        chance streams as a standalone K=K_max run at those k indices. A single
+        snapshot is kept alive across rounds; each round forks fresh branch
+        lanes from it (``replay_log=false``). All lanes + the snapshot are
+        released in a ``finally`` so the trunk is never left with phantom forks.
+
+        Recommended for D=0 (the Phase 1 cleaner estimator). For D>0, deeper-
+        rollout policy RNG keys use local k within each round, which does not
+        maintain CRN across rounds -- document this limitation if used.
+        """
+        cfg = self.config
+        A = int(legal_arr.size)
+        K_max = int(cfg.search_k_max)
+        K_pilot = int(cfg.search_k_pilot)
+        K_batch = int(cfg.search_k_batch)
+        z_stop = float(cfg.search_k_z_stop)
+
+        proc = self.env.proc
+        eval_side = self.env.eval_side
+
+        # Build the full K=K_max seed bank once; each round slices it for its
+        # k-range (k_offset..k_offset+K_round-1), so the per-`k` chance stream
+        # is identical to a standalone K=K_max run at those k indices.
+        if cfg.search_chance_mode == "resample_crn":
+            seed_bank_max = RootSeedBank.build(
+                cfg.search_seed,
+                self._battle_id,
+                eval_side,
+                self._decision_counter,
+                K_max,
+            )
+        else:  # inherited_trunk_rng (no branch reseeding)
+            seed_bank_max = None
+
+        all_lane_ids: List[int] = []
+        all_q_per_branch: List[np.ndarray] = []
+        all_root_action: List[np.ndarray] = []
+        all_rollout_index: List[np.ndarray] = []  # global k
+        all_terminal: List[np.ndarray] = []
+        all_cum_reward: List[np.ndarray] = []
+        all_depth_done: List[np.ndarray] = []
+
+        diag: Dict[str, Any] = {}
+        opp_root_actions: List[int] = []
+        env_seed_hashes: List[str] = []
+        K_done = 0
+        K_next = K_pilot
+        snap_id: Optional[int] = None
+
+        try:
+            proc.drain()
+            snap_id = proc.snapshot(trunk_lane_idx)
+            proc.drain()
+
+            while K_done < K_max:
+                K_round = min(K_next, K_max - K_done)
+                k_offset = K_done
+                N_round = A * K_round
+
+                # Per-round seed bank: a RootSeedBank view for k=k_offset..
+                # k_offset+K_round-1. Local k (0..K_round-1) maps to global k
+                # (k_offset+local), matching the per-round _Branches layout.
+                if seed_bank_max is not None:
+                    round_seed_bank = RootSeedBank(
+                        global_seed=cfg.search_seed,
+                        battle_id=self._battle_id,
+                        side=eval_side,
+                        decision_idx=self._decision_counter,
+                        K=K_round,
+                        env_seeds=seed_bank_max.env_seeds[
+                            k_offset : k_offset + K_round
+                        ],
+                        opp_root_keys=seed_bank_max.opp_root_keys[
+                            k_offset : k_offset + K_round
+                        ],
+                        env_seed_hashes=seed_bank_max.env_seed_hashes[
+                            k_offset : k_offset + K_round
+                        ],
+                    )
+                    branch_seeds: Optional[List[Optional[List[int]]]] = [
+                        round_seed_bank.env_seeds[b % K_round] for b in range(N_round)
+                    ]
+                else:
+                    round_seed_bank = None
+                    branch_seeds = None
+
+                branch_lane_ids = self._alloc_fork_lanes(N_round)
+                branch_lanes = []
+                for bid in branch_lane_ids:
+                    fl = copy.deepcopy(self._trunk_lane(trunk_lane_idx))
+                    fl.lane_id = bid
+                    proc.register_lane(bid, fl)
+                    branch_lanes.append(fl)
+                proc.fork_batch(
+                    snap_id, branch_lane_ids, replay_log=False, seeds=branch_seeds
+                )
+
+                eval_branch = make_branch_state(
+                    self.eval_driver, trunk_lane_idx, N_round, self.device
+                )
+                opp_branch = make_branch_state(
+                    self.opponent._driver, trunk_lane_idx, N_round, self.device
+                )
+
+                root_action = np.repeat(legal_arr, K_round)  # (N_round,)
+                rollout_index = np.tile(np.arange(K_round), A)  # local k
+
+                br = _Branches(
+                    lane_ids=branch_lane_ids,
+                    lanes=branch_lanes,
+                    root_action=root_action,
+                    rollout_index=rollout_index,
+                    active=np.ones(N_round, dtype=bool),
+                    depth_done=np.zeros(N_round, dtype=np.int64),
+                    cum_reward=np.zeros(N_round, dtype=np.float64),
+                    terminal=np.zeros(N_round, dtype=bool),
+                    eval_hidden=eval_branch.hidden,
+                    eval_rl2s=eval_branch.rl2s.copy(),
+                    eval_steps=eval_branch.step_counts.copy(),
+                    opp_hidden=opp_branch.hidden,
+                    opp_rl2s=opp_branch.rl2s.copy(),
+                    opp_steps=opp_branch.step_counts.copy(),
+                    snap_id=snap_id,  # shared -- do NOT release per round
+                    trunk_lane=trunk_lane_idx,
+                    prev_eval_state=[None] * N_round,
+                    gamma=float(
+                        self.eval_policy.gammas[cfg.critic_horizon_index].item()
+                    ),
+                    seed_bank=round_seed_bank,
+                )
+
+                # Run root settle + depth + leaf for this round (same validated
+                # path as _rollout_core).
+                self._rollout_root(br, obs)
+                round_opp = self._last_opp_root_actions
+                if K_done == 0:
+                    opp_root_actions = list(round_opp)
+                    diag.update({})  # diag will be filled by _leaf_values below
+                else:
+                    opp_root_actions.extend(round_opp)
+
+                for d in range(cfg.search_depth):
+                    if not br.active.any():
+                        break
+                    self._rollout_step(br)
+                q_per_branch, leaf_diag = self._leaf_values(br)
+                if K_done == 0:
+                    diag.update(leaf_diag)
+
+                # Accumulate (global rollout index for the R matrix).
+                all_q_per_branch.append(q_per_branch)
+                all_root_action.append(root_action)
+                all_rollout_index.append(rollout_index + k_offset)
+                all_terminal.append(br.terminal.copy())
+                all_cum_reward.append(br.cum_reward.copy())
+                all_depth_done.append(br.depth_done.copy())
+                all_lane_ids.extend(branch_lane_ids)
+
+                # Free this round's GPU hidden states (lanes are reset below).
+                br.eval_hidden = None
+                br.opp_hidden = None
+
+                # Reset this round's lanes (but NOT the shared snapshot).
+                for bid in branch_lane_ids:
+                    try:
+                        proc.reset(bid)
+                    except Exception:
+                        pass
+                    if bid in self._active_fork_lanes:
+                        self._active_fork_lanes.remove(bid)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                K_done += K_round
+
+                # Check z-stop criterion from accumulated per-branch data.
+                if K_done >= K_max:
+                    break
+                q_pb_acc = np.concatenate(all_q_per_branch)
+                ra_acc = np.concatenate(all_root_action)
+                ri_acc = np.concatenate(all_rollout_index)
+                R = build_return_matrix(q_pb_acc, ra_acc, ri_acc, legal_arr, K_done)
+                q_mean_acc = np.nanmean(R, axis=1)
+                z = min_z_score(R, q_mean_acc)
+                if not np.isnan(z) and z >= z_stop:
+                    break
+
+                K_next = K_batch
+
+            # --- aggregate across all rounds ---
+            if seed_bank_max is not None:
+                env_seed_hashes = list(seed_bank_max.env_seed_hashes[:K_done])
+            q_pb_all = np.concatenate(all_q_per_branch)
+            ra_all = np.concatenate(all_root_action)
+            ri_all = np.concatenate(all_rollout_index)
+            term_all = np.concatenate(all_terminal)
+            cum_all = np.concatenate(all_cum_reward)
+            dd_all = np.concatenate(all_depth_done)
+
+            R = build_return_matrix(q_pb_all, ra_all, ri_all, legal_arr, K_done)
+            q_mean = np.nanmean(R, axis=1)
+            if K_done > 1:
+                q_std = np.nanstd(R, axis=1, ddof=1)
+            else:
+                q_std = np.zeros(A)
+            counts = np.array(
+                [int(np.sum(ra_all == a)) for a in legal_arr], dtype=np.int64
+            )
+            term_frac = np.array(
+                [float(np.mean(term_all[ra_all == a])) for a in legal_arr]
+            )
+
+            return _RolloutResult(
+                q_mean=q_mean,
+                q_std=q_std,
+                counts=counts,
+                term_frac=term_frac,
+                diag=diag,
+                opp_root_actions=opp_root_actions,
+                env_seed_hashes=env_seed_hashes,
+                root_action=ra_all,
+                rollout_index=ri_all,
+                q_per_branch=q_pb_all,
+                terminal_pb=term_all,
+                cum_reward_pb=cum_all,
+                depth_done_pb=dd_all,
+            )
+        finally:
+            # Release any lanes not yet reset (error path) + the shared snapshot.
+            for bid in all_lane_ids:
+                try:
+                    proc.reset(bid)
+                except Exception:
+                    pass
+                if bid in self._active_fork_lanes:
+                    self._active_fork_lanes.remove(bid)
+            if snap_id is not None:
+                try:
+                    proc.release_snapshot(snap_id)
+                except Exception:
+                    pass
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def estimate_root(
         self,
