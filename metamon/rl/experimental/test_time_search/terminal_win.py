@@ -195,6 +195,9 @@ class TerminalWinRootRecord:
     mean_steps_to_terminal: float
     latency_ms_shaped: float
     latency_ms_terminal: float
+    # kimi-search M1: extra gamma-head predictors (e.g. "root_critic_g4" /
+    # "d0_g5" -> per-action Q at that critic horizon):
+    gamma_predictor_q: Optional[Dict[str, List[float]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -265,9 +268,21 @@ def _terminal_config(
 
 
 def _shaped_q_configs(
-    k_ref: int, depths: List[int], search_seed: int
+    k_ref: int,
+    depths: List[int],
+    search_seed: int,
+    gamma_indices: Optional[List[int]] = None,
 ) -> Dict[str, SearchConfig]:
-    """Shaped-Q estimator grid (the predictors). Reuses build_grid_configs shape."""
+    """Shaped-Q estimator grid (the predictors). Reuses build_grid_configs shape.
+
+    ``gamma_indices`` (kimi-search M1): additional critic gamma-head indices to
+    evaluate as predictors, e.g. ``[4, 5]`` adds ``root_critic_g4`` /
+    ``root_critic_g5`` (root-critic at those horizons) and ``d0_g4`` / ``d0_g5``
+    (D=0 K_ref leaf value at those horizons). The primary head (None ->
+    ``critic_horizon_index = -1``) is always included as ``root_critic_only`` /
+    ``d{d}``. This measures whether the higher-gamma heads are better aligned
+    with terminal win than the primary shaped head (H2 of RESEARCH_PLAN_KIMI).
+    """
     grid: Dict[str, SearchConfig] = {}
     grid["root_critic_only"] = _base_search_config(
         search_leaf_value_mode="root_critic_only", search_seed=search_seed
@@ -278,6 +293,19 @@ def _shaped_q_configs(
             search_depth=d,
             search_seed=search_seed,
         )
+    for g in gamma_indices or []:
+        grid[f"root_critic_g{g}"] = _base_search_config(
+            search_leaf_value_mode="root_critic_only",
+            search_seed=search_seed,
+            search_critic_horizon=int(g),
+        )
+        for d in depths:
+            grid[f"d{d}_g{g}"] = _base_search_config(
+                search_rollouts_per_action=k_ref,
+                search_depth=d,
+                search_seed=search_seed,
+                search_critic_horizon=int(g),
+            )
     return grid
 
 
@@ -287,6 +315,7 @@ def benchmark_terminal_win(
     k_ref: int,
     derived_ks: List[int],
     depths: List[int],
+    gamma_indices: Optional[List[int]] = None,
     max_roots: int = 64,
     max_battles: int = 40,
     root_stride: int = 1,
@@ -350,7 +379,7 @@ def benchmark_terminal_win(
         reward_multiplier=bundle.reward_multiplier,
     )
 
-    shaped_cfgs = _shaped_q_configs(k_ref, depths, search_seed)
+    shaped_cfgs = _shaped_q_configs(k_ref, depths, search_seed, gamma_indices)
     term_cfg = _terminal_config(k_ref, search_seed)
     derived_ks_sorted = sorted(k for k in derived_ks if k <= k_ref)
     if not derived_ks_sorted:
@@ -428,6 +457,7 @@ def benchmark_terminal_win(
                             action_history=list(lane_history[i]),
                             store_per_branch=store_per_branch,
                             max_steps_to_terminal=max_steps_to_terminal,
+                            gamma_indices=gamma_indices,
                         )
                         lane_root_this_step[i] = (rec, mentry)
                     except Exception as exc:  # noqa: BLE001
@@ -520,6 +550,7 @@ def _benchmark_one_root_terminal(
     action_history: List[List[int]],
     store_per_branch: bool,
     max_steps_to_terminal: int,
+    gamma_indices: Optional[List[int]] = None,
 ) -> Tuple[TerminalWinRootRecord, RootManifestEntry]:
     """Run shaped-Q predictors + terminal-win ground truth at one fixed root."""
     env = bundle.env
@@ -534,7 +565,10 @@ def _benchmark_one_root_terminal(
     base_probs = None
     base_argmax = None
     t_shaped = time.perf_counter()
+    gamma_indices = gamma_indices or []
     order = ["root_critic_only"] + [f"d{d}" for d in depths]
+    order += [f"root_critic_g{g}" for g in gamma_indices]
+    order += [f"d{d}_g{g}" for g in gamma_indices for d in depths]
     for name in order:
         if name not in shaped_cfgs:
             continue
@@ -574,6 +608,14 @@ def _benchmark_one_root_terminal(
         for kp in derived_ks:
             if kp <= k_ref:
                 derived_shaped_q[f"D0:K{kp}"] = prefix_q(R0, kp).tolist()
+
+    # kimi-search M1: per-action Q for the extra gamma-head predictors
+    gamma_predictor_q: Dict[str, List[float]] = {}
+    for name, est in estimates.items():
+        if name in ("root_critic_only",) or name in {f"d{d}" for d in depths}:
+            continue
+        if est.q_mean.size:
+            gamma_predictor_q[name] = np.asarray(est.q_mean, dtype=np.float64).tolist()
 
     # --- terminal-win ground truth: one to-terminal continuation per action ---
     t_term = time.perf_counter()
@@ -671,6 +713,7 @@ def _benchmark_one_root_terminal(
         d0_q_sem=d0_sem.tolist(),
         d1_q=(d1_q.tolist() if d1_q is not None else None),
         derived_shaped_q=derived_shaped_q,
+        gamma_predictor_q=gamma_predictor_q or None,
         terminal_win=terminal_win.tolist(),
         terminal_win_sem=terminal_win_sem.tolist(),
         n_truncated=n_trunc.tolist(),
@@ -792,6 +835,17 @@ def aggregate_terminal_win(
     n_no_opportunity = 0  # all-tied terminal-win (action doesn't matter)
     n_meaningful = 0
 
+    # kimi-search M1: collect the union of extra gamma-head predictor names
+    gamma_pred_names: List[str] = sorted(
+        {name for r in records for name in (r.gamma_predictor_q or {})}
+    )
+    for gname in gamma_pred_names:
+        spearman_by_pred[gname] = []
+        kendall_by_pred[gname] = []
+        top1_match_by_pred[gname] = []
+        regret_by_sel[gname] = []
+        decrease_freq_by_pred[gname] = []
+
     for r in records:
         legal = r.legal_actions
         A = r.n_legal
@@ -823,6 +877,10 @@ def aggregate_terminal_win(
         pred_arrays = {"root_critic": rc, "d0_k_ref": d0}
         if d1 is not None:
             pred_arrays["d1"] = d1
+        for gname in gamma_pred_names:
+            gq = (r.gamma_predictor_q or {}).get(gname)
+            if gq is not None:
+                pred_arrays[gname] = np.asarray(gq, dtype=np.float64)
         for kp in derived_ks:
             dq = r.derived_shaped_q.get(f"D0:K{kp}")
             if dq is not None:
@@ -861,6 +919,9 @@ def aggregate_terminal_win(
         }
         if d1 is not None:
             sel_idx["d1"] = int(np.nanargmax(d1))
+        for gname in gamma_pred_names:
+            if gname in pred_arrays:
+                sel_idx[gname] = int(np.nanargmax(pred_arrays[gname]))
         for kp in derived_ks:
             dq = r.derived_shaped_q.get(f"D0:K{kp}")
             if dq is not None:
@@ -886,8 +947,10 @@ def aggregate_terminal_win(
 
         # does shaped-search argmax decrease terminal win vs actor?
         actor_sel = actor_idx_in_legal
-        for pname in ("root_critic", "d0_k_ref", "d1") + tuple(
-            f"d0_K{kp}" for kp in derived_ks
+        for pname in (
+            ("root_critic", "d0_k_ref", "d1")
+            + tuple(f"d0_K{kp}" for kp in derived_ks)
+            + tuple(gamma_pred_names)
         ):
             if pname not in pred_arrays:
                 continue
@@ -1181,10 +1244,14 @@ def report_markdown(
         "| predictor | mean Spearman | median | top-1 match vs terminal | n |",
         "|---|---|---|---|---|",
     ]
+    gamma_preds = sorted(
+        p for p in sp if p.startswith("root_critic_g") or p.startswith("d0_g")
+    )
     for p in (
         ["root_critic", "d0_k_ref"]
         + [f"d0_K{k}" for k in derived_ks]
         + (["d1"] if "d1" in sp else [])
+        + gamma_preds
         + [f"term_G{k}" for k in derived_ks]
     ):
         if p not in sp:
@@ -1206,6 +1273,7 @@ def report_markdown(
         ["actor", "root_critic", "d0_k_ref"]
         + [f"d0_K{k}" for k in derived_ks]
         + (["d1"] if "d1" in reg else [])
+        + gamma_preds
         + [f"term_G{k}" for k in derived_ks]
     ):
         if s not in reg:
@@ -1225,6 +1293,7 @@ def report_markdown(
         ["root_critic", "d0_k_ref"]
         + [f"d0_K{k}" for k in derived_ks]
         + (["d1"] if "d1" in dec else [])
+        + gamma_preds
     ):
         if p not in dec:
             continue
@@ -1355,6 +1424,16 @@ def main() -> None:
     )
     p.add_argument("--min_decision", type=int, default=0)
     p.add_argument("--max_decision", type=int, default=None)
+    p.add_argument(
+        "--gamma_indices",
+        type=int,
+        nargs="*",
+        default=None,
+        help="kimi-search M1: extra critic gamma-head indices to evaluate as "
+        "predictors (e.g. --gamma_indices 4 5 adds root_critic_g4 / d0_g4 / "
+        "root_critic_g5 / d0_g5 alongside the primary head). Measures whether "
+        "higher-gamma heads are better aligned with terminal win (H2).",
+    )
     p.add_argument("--store_per_branch", action="store_true")
     p.add_argument("--max_steps_to_terminal", type=int, default=250)
     p.add_argument("--progress_every", type=int, default=2)
@@ -1384,6 +1463,7 @@ def main() -> None:
             min_decision=args.min_decision,
             max_decision=args.max_decision,
             store_per_branch=args.store_per_branch,
+            gamma_indices=args.gamma_indices,
             progress_every=args.progress_every,
             env_seed=args.seed,
             search_seed=args.search_seed,
