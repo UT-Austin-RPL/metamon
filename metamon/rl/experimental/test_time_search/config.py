@@ -150,6 +150,10 @@ class SearchConfig:
     search_rollout_temperature: float = 1.0  # rollout actor temperature
     search_critic_horizon: Optional[int] = None  # gamma index; None=primary (-1)
     search_include_intermediate_rewards: bool = True  # MC return vs leaf-only
+    # kimi-search M3: path to a trained WinHead checkpoint. When
+    # search_leaf_value_mode="win_head", leaf values come from the win
+    # head's policy-expectation P(win) instead of the shaped critic.
+    search_win_head_path: Optional[str] = None
 
     # ------------------------------------------------------------------
     # execution / logging / errors (skill §15, §19)
@@ -196,9 +200,14 @@ class SearchConfig:
             "policy_expectation",
             "sampled_action",
             "root_critic_only",
+            "win_head",
         ):
             raise ValueError(
                 f"unknown search_leaf_value_mode: {self.search_leaf_value_mode}"
+            )
+        if self.search_leaf_value_mode == "win_head" and not self.search_win_head_path:
+            raise ValueError(
+                "search_leaf_value_mode='win_head' requires search_win_head_path"
             )
         if self.search_root_candidate_mode not in (
             "all_legal",

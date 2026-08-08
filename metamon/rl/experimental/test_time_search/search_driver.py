@@ -432,6 +432,9 @@ class SearchEvalRunner:
         self._battle_counter = 0
         self._battle_id = ""
         self._log_file = None
+        # kimi-search M3: lazily loaded win-probability head (terminal-aligned
+        # leaf value). Loaded on first use so non-win-head configs pay nothing.
+        self._win_head = None
         if config.search_log_roots:
             os.makedirs(os.path.dirname(config.search_log_roots) or ".", exist_ok=True)
             self._log_file = open(config.search_log_roots, "a")
@@ -2054,6 +2057,16 @@ class SearchEvalRunner:
             # convention (reward in slot 0; action part left as-is/zeroed).
             br.eval_rl2s[i, 0] = r_env
 
+    def _get_win_head(self):
+        """Lazy-load the trained win head (kimi-search M3)."""
+        if self._win_head is None:
+            from .win_head import load_win_head
+
+            self._win_head = load_win_head(
+                self.config.search_win_head_path, device=str(self.device)
+            )
+        return self._win_head
+
     def _leaf_values(self, br: _Branches) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Leaf values: discounted bootstrap for nonterminal branches; cum_reward
         (no bootstrap) for terminal branches (skill §5/§10)."""
@@ -2089,7 +2102,27 @@ class SearchEvalRunner:
         illegal = torch_obs["illegal_actions"].to(self.device)  # (n_active, 1, A)
         horizon = cfg.critic_horizon_index
 
-        if cfg.search_leaf_value_mode == "policy_expectation":
+        if cfg.search_leaf_value_mode == "win_head":
+            # kimi-search M3: terminal-aligned leaf value from the trained win
+            # head. V_win(s) = sum_a pi_base(a|s) * Q_win(s, a); the win head's
+            # per-action Q replaces the shaped critic so the search advantage
+            # is in win-probability units (calibrated for the KL beta).
+            win_head = self._get_win_head()
+            probs_t = _primary_probs(self.eval_policy, emb, illegal)  # (B, A)
+            with torch.no_grad():
+                emb_2d = emb.squeeze(1) if emb.ndim == 3 else emb
+                q_win = win_head.q_win(emb_2d)  # (B, A)
+            legal_f = (~illegal[:, 0, :]).float()
+            p = probs_t * legal_f
+            p = p / p.sum(-1, keepdim=True).clamp_min(1e-12)
+            v_pi = (p * q_win).sum(-1)  # (B,)
+            v = v_pi.cpu().numpy()
+            diag["critic_disagreement"] = 0.0
+            for j, i in enumerate(active_idx):
+                vals[i] = br.cum_reward[i] + (
+                    br.gamma ** int(br.depth_done[i])
+                ) * float(v[j])
+        elif cfg.search_leaf_value_mode == "policy_expectation":
             v_pi, q_all, probs, q_per_head = _exact_leaf_v_pi(
                 self.eval_policy, emb, illegal, self.action_dim, horizon
             )

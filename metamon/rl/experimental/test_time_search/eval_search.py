@@ -284,6 +284,7 @@ def build_config_from_args(args) -> SearchConfig:
         search_k_max=args.k_max,
         search_k_batch=args.k_batch,
         search_k_z_stop=args.k_z_stop,
+        search_win_head_path=args.win_head_path,
     )
     if getattr(args, "legacy_prototype", False):
         cfg.apply_legacy_prototype_defaults()
@@ -380,9 +381,16 @@ def add_cli(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--leaf_value_mode",
         default="policy_expectation",
-        choices=["policy_expectation", "sampled_action", "root_critic_only"],
+        choices=[
+            "policy_expectation",
+            "sampled_action",
+            "root_critic_only",
+            "win_head",
+        ],
         help="policy_expectation: exact V_pi=sum_a pi(a)Q(h,a). sampled_action: "
-        "legacy single-action bootstrap. root_critic_only: no rollout.",
+        "legacy single-action bootstrap. root_critic_only: no rollout. "
+        "win_head (kimi-search M3): terminal-aligned leaf value from a trained "
+        "win-probability head (requires --win_head_path).",
     )
     parser.add_argument(
         "--root_candidate_mode",
@@ -398,6 +406,12 @@ def add_cli(parser: argparse.ArgumentParser) -> None:
         help="advantage units beta is expressed in (skill §11).",
     )
     parser.add_argument("--global_advantage_scale", type=float, default=None)
+    parser.add_argument(
+        "--win_head_path",
+        default=None,
+        help="kimi-search M3: path to a trained WinHead checkpoint. Required "
+        "when --leaf_value_mode win_head.",
+    )
     parser.add_argument("--magnet_alpha", type=float, default=0.0)
     parser.add_argument(
         "--z_gate",

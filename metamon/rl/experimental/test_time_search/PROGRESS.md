@@ -1016,3 +1016,53 @@ in-distribution for the final policy). Head: logistic on the per-turn
 embedding (or light 2-layer MLP), binary cross-entropy vs battle outcome.
 Wire in as `search_leaf_value_mode="win_head"` (leaf value = predicted
 P(win); advantages in probability units, naturally calibrated for beta).
+
+
+## kimi-search M3 (part 1): trained win-probability head -- also misaligned at the action level
+
+Trained a per-action win-probability head (`win_head.WinHead`: frozen
+traj-encoder embedding (480) -> 2x512 MLP -> per-action logits, BCE on the
+taken action vs battle outcome) on the run's own 50k-battle FIFO buffer.
+`train_win_head.py`: 4000 battles (3600 train / 400 val), 171k train turns,
+val AUC 0.840, Brier 0.156. Wired into search as
+`search_leaf_value_mode="win_head"` (+ `--win_head_path`) and into the
+terminal-win benchmark as a `win_head` predictor (+ `--win_head_path`).
+
+M3 gate (24 fixed roots, same protocol as M1): **the win head is NOT better
+aligned at the action level** -- mean Spearman 0.110 (vs root_critic 0.224,
+d0_k_ref 0.149), mean regret 0.091 (vs actor 0.072). The actor remains the
+best non-terminal selector.
+
+**Interpretation (the real diagnosis).** Three value targets -- shaped critic,
+higher-gamma heads, and a trained win-probability head -- all fail action-level
+alignment on squirtle (Spearman 0.11-0.22, none beats the actor's regret). The
+bottleneck is not the value target; it is the **frozen representation**: the
+per-action win-probability *differences* that matter for choosing a move are
+not linearly decodable from squirtle's embeddings. State-level prediction
+works fine (win-head val AUC 0.84; ladder V AUC 0.80) because "is this side
+winning" is easy; action ranking ("which move changes P(win)") is not.
+
+Ataraxos can do value-averaging search because its move network is a strong
+supervised+RL model whose value head IS trained on game outcomes AND whose
+representation is good enough that action-value differences are decodable. Our
+from-scratch 35M squirtle is not there yet.
+
+**Implication for the plan:** a leaf-value fix (M1/M2/M3-as-written) cannot
+close the gap. The remaining routes to a positive paired delta are:
+
+1. **Deeper / more-rollout search is not the answer** (estimator already
+   converges; the target is wrong).
+2. **Distill the terminal-win signal into the policy** (M4): we have a
+   selector (term_G16) with regret 0.014 vs the actor's 0.072 on fixed roots.
+   Use `terminal_continuations` to generate (state -> terminal-win-best action)
+   labels and fine-tune squirtle toward them. This moves the improvement into
+   the *weights* (where the representation can adapt), not the leaf value.
+3. **Train the value head with a larger / non-frozen head** (attention over
+   the full turn, or fine-tune the encoder's last layers) -- more capacity to
+   decode action-conditional win probability. More expensive; try only if M4
+   shows the fixed-root signal generalizes.
+
+Immediate next step: M4 distillation pilot -- generate terminal-win labels on
+a few hundred squirtle roots (the `terminal_continuations` infra), fine-tune
+the policy head with a KL-to-label loss, and re-measure the actor regret on
+held-out fixed roots.

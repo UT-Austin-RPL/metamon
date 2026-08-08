@@ -198,6 +198,8 @@ class TerminalWinRootRecord:
     # kimi-search M1: extra gamma-head predictors (e.g. "root_critic_g4" /
     # "d0_g5" -> per-action Q at that critic horizon):
     gamma_predictor_q: Optional[Dict[str, List[float]]] = None
+    # kimi-search M3: trained win-head per-action Q(s,a) at the root:
+    win_head_q: Optional[List[float]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -316,6 +318,7 @@ def benchmark_terminal_win(
     derived_ks: List[int],
     depths: List[int],
     gamma_indices: Optional[List[int]] = None,
+    win_head_path: Optional[str] = None,
     max_roots: int = 64,
     max_battles: int = 40,
     root_stride: int = 1,
@@ -380,6 +383,11 @@ def benchmark_terminal_win(
     )
 
     shaped_cfgs = _shaped_q_configs(k_ref, depths, search_seed, gamma_indices)
+    win_head = None
+    if win_head_path:
+        from .win_head import load_win_head
+
+        win_head = load_win_head(win_head_path, device=str(bundle.device))
     term_cfg = _terminal_config(k_ref, search_seed)
     derived_ks_sorted = sorted(k for k in derived_ks if k <= k_ref)
     if not derived_ks_sorted:
@@ -458,6 +466,7 @@ def benchmark_terminal_win(
                             store_per_branch=store_per_branch,
                             max_steps_to_terminal=max_steps_to_terminal,
                             gamma_indices=gamma_indices,
+                            win_head=win_head,
                         )
                         lane_root_this_step[i] = (rec, mentry)
                     except Exception as exc:  # noqa: BLE001
@@ -551,6 +560,7 @@ def _benchmark_one_root_terminal(
     store_per_branch: bool,
     max_steps_to_terminal: int,
     gamma_indices: Optional[List[int]] = None,
+    win_head=None,
 ) -> Tuple[TerminalWinRootRecord, RootManifestEntry]:
     """Run shaped-Q predictors + terminal-win ground truth at one fixed root."""
     env = bundle.env
@@ -608,6 +618,19 @@ def _benchmark_one_root_terminal(
         for kp in derived_ks:
             if kp <= k_ref:
                 derived_shaped_q[f"D0:K{kp}"] = prefix_q(R0, kp).tolist()
+
+    # kimi-search M3: trained win-head per-action Q(s, a) at the root. Uses the
+    # runner's _root_distribution to get the root embedding + base policy, then
+    # evaluates the frozen win head on the legal actions.
+    win_head_q: Optional[List[float]] = None
+    if win_head is not None:
+        import torch as _torch
+
+        _bp, _la, _emb, _il, _ba = runner._root_distribution(lane_idx, obs, legal)
+        with _torch.no_grad():
+            _e = _emb.squeeze(1) if _emb.ndim == 3 else _emb
+            _q = win_head.q_win(_e)[0].cpu().numpy()  # (A_full,)
+        win_head_q = [float(_q[int(a)]) for a in legal_arr]
 
     # kimi-search M1: per-action Q for the extra gamma-head predictors
     gamma_predictor_q: Dict[str, List[float]] = {}
@@ -714,6 +737,7 @@ def _benchmark_one_root_terminal(
         d1_q=(d1_q.tolist() if d1_q is not None else None),
         derived_shaped_q=derived_shaped_q,
         gamma_predictor_q=gamma_predictor_q or None,
+        win_head_q=win_head_q,
         terminal_win=terminal_win.tolist(),
         terminal_win_sem=terminal_win_sem.tolist(),
         n_truncated=n_trunc.tolist(),
@@ -839,6 +863,9 @@ def aggregate_terminal_win(
     gamma_pred_names: List[str] = sorted(
         {name for r in records for name in (r.gamma_predictor_q or {})}
     )
+    # kimi-search M3: the trained win head, when present, is an extra predictor
+    if any(r.win_head_q is not None for r in records):
+        gamma_pred_names = gamma_pred_names + ["win_head"]
     for gname in gamma_pred_names:
         spearman_by_pred[gname] = []
         kendall_by_pred[gname] = []
@@ -878,6 +905,10 @@ def aggregate_terminal_win(
         if d1 is not None:
             pred_arrays["d1"] = d1
         for gname in gamma_pred_names:
+            if gname == "win_head":
+                if r.win_head_q is not None:
+                    pred_arrays["win_head"] = np.asarray(r.win_head_q, dtype=np.float64)
+                continue
             gq = (r.gamma_predictor_q or {}).get(gname)
             if gq is not None:
                 pred_arrays[gname] = np.asarray(gq, dtype=np.float64)
@@ -1246,7 +1277,7 @@ def report_markdown(
     ]
     gamma_preds = sorted(
         p for p in sp if p.startswith("root_critic_g") or p.startswith("d0_g")
-    )
+    ) + (["win_head"] if "win_head" in sp else [])
     for p in (
         ["root_critic", "d0_k_ref"]
         + [f"d0_K{k}" for k in derived_ks]
@@ -1434,6 +1465,12 @@ def main() -> None:
         "root_critic_g5 / d0_g5 alongside the primary head). Measures whether "
         "higher-gamma heads are better aligned with terminal win (H2).",
     )
+    p.add_argument(
+        "--win_head_path",
+        default=None,
+        help="kimi-search M3: path to a trained WinHead checkpoint; adds a "
+        "'win_head' predictor (per-action P(win) at the root) to the benchmark.",
+    )
     p.add_argument("--store_per_branch", action="store_true")
     p.add_argument("--max_steps_to_terminal", type=int, default=250)
     p.add_argument("--progress_every", type=int, default=2)
@@ -1464,6 +1501,7 @@ def main() -> None:
             max_decision=args.max_decision,
             store_per_branch=args.store_per_branch,
             gamma_indices=args.gamma_indices,
+            win_head_path=args.win_head_path,
             progress_every=args.progress_every,
             env_seed=args.seed,
             search_seed=args.search_seed,
