@@ -120,9 +120,7 @@ def main() -> None:
         illegal = obs["illegal_actions"].bool()
         dist = policy.actor(emb, straight_from_obs={"illegal_actions": illegal})
         # dist.probs: (B, L=1, G, A); take primary gamma (-1) and squeeze to (A,)
-        logp = torch.log(
-            dist.probs[..., -1, :].squeeze(1)[0].clamp_min(1e-12)
-        )  # (A,)
+        logp = torch.log(dist.probs[..., -1, :].squeeze(1)[0].clamp_min(1e-12))  # (A,)
         y = torch.zeros_like(logp)
         y[label] = 1.0
         ce = -(y * logp).sum()

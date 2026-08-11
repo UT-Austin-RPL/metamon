@@ -120,9 +120,7 @@ class PsroConfig:
         )
 
 
-def _scan_recent_files(
-    fmt_dir: str, window: int
-) -> List[Tuple[float, str]]:
+def _scan_recent_files(fmt_dir: str, window: int) -> List[Tuple[float, str]]:
     """Return the ``window`` most-recently-modified ``.json(.lz4)`` files.
 
     Falls back to *all* files if fewer than ``window`` exist. One ``scandir``
@@ -211,9 +209,7 @@ def compute_prioritized_weights(
     n_games: Dict[str, int] = {name: 0 for name in agent_names}
     wins: Dict[str, int] = {name: 0 for name in agent_names}
     # per_teamset[agent][teamset] = [n, wins] — teamset None buckets as "_unknown".
-    per_teamset: Dict[str, Dict[str, List[int]]] = {
-        name: {} for name in agent_names
-    }
+    per_teamset: Dict[str, Dict[str, List[int]]] = {name: {} for name in agent_names}
     unmatched = 0
     for _, path in files:
         parsed = parse_trajectory_filename(path)

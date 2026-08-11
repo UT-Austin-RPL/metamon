@@ -115,7 +115,7 @@ def _parse_teamset_weights(spec: Optional[str]) -> Optional[dict[str, float]]:
 
     Returns ``None`` when ``spec`` is falsy (teamset up-sampling disabled).
     Mirrors the ``parse_team_mix_spec`` format but the numbers are multipliers
-    (not normalized sampling weights).", """
+    (not normalized sampling weights).","""
     if not spec:
         return None
     out: dict[str, float] = {}
@@ -124,17 +124,24 @@ def _parse_teamset_weights(spec: Optional[str]) -> Optional[dict[str, float]]:
         if not part:
             continue
         if ":" not in part:
-            raise ValueError(f"--fifo_teamset_weights: bad entry {part!r} (expected 'set:mult')")
+            raise ValueError(
+                f"--fifo_teamset_weights: bad entry {part!r} (expected 'set:mult')"
+            )
         name, _, val = part.partition(":")
         name = name.strip()
         try:
             mult = float(val.strip())
         except ValueError:
-            raise ValueError(f"--fifo_teamset_weights: bad multiplier {val!r} for {name!r}")
+            raise ValueError(
+                f"--fifo_teamset_weights: bad multiplier {val!r} for {name!r}"
+            )
         if mult <= 0.0 or mult != mult:  # NaN
-            raise ValueError(f"--fifo_teamset_weights: multiplier for {name!r} must be positive")
+            raise ValueError(
+                f"--fifo_teamset_weights: multiplier for {name!r} must be positive"
+            )
         out[name] = mult
     return out or None
+
 
 # W&B defaults — override via METAMON_WANDB_PROJECT / METAMON_WANDB_ENTITY env vars
 # (same env vars already used by make_placeholder_experiment for opponents).
@@ -489,7 +496,9 @@ def create_online_experiment(
         if seq_floor_warmup_epochs is not None
         else lr_warmup_epochs
     )
-    seq_floor_warmup_steps = int(round(steps_per_epoch * grad_accum * seq_warmup_epochs))
+    seq_floor_warmup_steps = int(
+        round(steps_per_epoch * grad_accum * seq_warmup_epochs)
+    )
     try:
         gin.bind_parameter(
             "custom_agent.ISAdvantageFilter.seq_floor_warmup_steps",
@@ -577,7 +586,9 @@ def create_online_experiment(
 
     # The shared EpochRef (if a schedule is set) is stored on the experiment so
     # it can bump it each collection cycle, advancing the curriculum.
-    epoch_ref = train_team_schedule_state.epoch_ref if train_team_schedule_state else None
+    epoch_ref = (
+        train_team_schedule_state.epoch_ref if train_team_schedule_state else None
+    )
 
     experiment = MetamonOnlineExperiment(
         run_name=run_name,
@@ -723,9 +734,7 @@ def run_online_rl(args) -> None:
     sidecar_path = psro_sidecar_path(args.buffer_dir, battle_format)
     opponent_weights_path = sidecar_path if args.psro_weighting else None
     opponent_weight_provider = (
-        make_opponent_weight_provider(sidecar_path)
-        if args.psro_fifo_reweight
-        else None
+        make_opponent_weight_provider(sidecar_path) if args.psro_fifo_reweight else None
     )
     opponent_quota_min_games, opponent_quota_window = resolve_quota(args)
     log_psro_status(
@@ -742,8 +751,10 @@ def run_online_rl(args) -> None:
     # named teamsets, so the policy trains on those compositions more intensively.
     teamset_weights = _parse_teamset_weights(args.fifo_teamset_weights)
     if teamset_weights is not None:
-        print(f"  FIFO teamset up-sampling: {teamset_weights} "
-              f"(default={args.fifo_teamset_default_weight})")
+        print(
+            f"  FIFO teamset up-sampling: {teamset_weights} "
+            f"(default={args.fifo_teamset_default_weight})"
+        )
 
     # Team-mix schedule: required when the training pool uses "@schedule"; the
     # collector's player team set and the pool's "@schedule" agents both follow
@@ -854,7 +865,9 @@ def run_online_rl(args) -> None:
             if args.resume_epoch is not None
             else latest_training_state_epoch(experiment.ckpt_dir, args.run_name)
         )
-        print(f"  Resuming full accelerate training state from epoch {resume_epoch} ...")
+        print(
+            f"  Resuming full accelerate training state from epoch {resume_epoch} ..."
+        )
         experiment.load_checkpoint(resume_epoch, resume_training_state=True)
         print(
             f"  Resumed at epoch {experiment.epoch}; continuing to {args.epochs} "

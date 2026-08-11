@@ -17,7 +17,6 @@ from poke_env.player.battle_order import BattleOrder
 
 from metamon.interface import UniversalAction
 
-
 CHOOSE_PREFIX = "/choose "
 DEFAULT_CHOICE = "default"
 

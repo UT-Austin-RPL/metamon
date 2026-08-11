@@ -280,6 +280,7 @@ class PretrainedModel:
         if changed:
             return normalized
         return ckpt_state
+
     def _migrate_legacy_perceiver_ff_keys(ckpt_state: dict, model_state: dict) -> dict:
         """Remap pre-``metamon-dev sync`` perceiver feed-forward keys.
 
@@ -291,9 +292,12 @@ class PretrainedModel:
         checkpoint has the old keys and the model expects the new ones.
         """
         needed = {
-            k for k in model_state
-            if ".cross_ff1." in k or ".cross_ff2." in k
-            or ".self_ff1." in k or ".self_ff2." in k
+            k
+            for k in model_state
+            if ".cross_ff1." in k
+            or ".cross_ff2." in k
+            or ".self_ff1." in k
+            or ".self_ff2." in k
         }
         if not needed:
             return ckpt_state
@@ -314,7 +318,9 @@ class PretrainedModel:
                     break
             new_state[nk] = v
         if migrated:
-            print(f"Migrated {migrated} legacy perceiver FF keys (cross_ff/self_ff Sequential -> split Linear).")
+            print(
+                f"Migrated {migrated} legacy perceiver FF keys (cross_ff/self_ff Sequential -> split Linear)."
+            )
         return new_state
 
     @staticmethod
@@ -1453,9 +1459,7 @@ class TaurosV0(PretrainedModel):
         )
 
 
-ONLINE_TAUROS_V1_SAVE_DIR = (
-    "/mnt/nfs_client/jake/metamon_scratchpad/online_tauros_v1"
-)
+ONLINE_TAUROS_V1_SAVE_DIR = "/mnt/nfs_client/jake/metamon_scratchpad/online_tauros_v1"
 
 # Sentinel checkpoint id that resolves to the learner's rolling ``latest/policy.pt``
 # instead of a saved ``policy_epoch_{N}.pt``. Lets us eval exactly what the

@@ -87,9 +87,9 @@ def add_schedule_cli_args(parser) -> None:
         default=None,
         help="Path to a team-mix schedule YAML (epoch-driven, no restart needed). "
         "The collector's player team set and any opponent-pool agent whose "
-        "team_set is \"@schedule\" both follow this schedule via a shared "
+        'team_set is "@schedule" both follow this schedule via a shared '
         "EpochRef. See docs/teamset_curriculum_proposal.md. Required when the "
-        "training opponent pool uses \"@schedule\"; optional otherwise.",
+        'training opponent pool uses "@schedule"; optional otherwise.',
     )
 
 
@@ -128,7 +128,9 @@ def resolve_train_team_set(
     return get_metamon_team_set_or_mix(battle_format, team_set_name)
 
 
-def log_schedule_start(schedule_state: Optional[ScheduleState], *, resume_epoch: Optional[int]) -> None:
+def log_schedule_start(
+    schedule_state: Optional[ScheduleState], *, resume_epoch: Optional[int]
+) -> None:
     """Print the v1-style ``"Team mix schedule: starting at epoch N"`` banner.
 
     ``resume_epoch`` is the resumed epoch (from ``--resume_training_state``) when

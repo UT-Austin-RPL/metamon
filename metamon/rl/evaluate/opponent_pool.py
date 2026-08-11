@@ -106,8 +106,7 @@ class OpponentPoolConfig:
             return
         if len(weights) != len(self.agents):
             raise ValueError(
-                f"weights length {len(weights)} != agents length "
-                f"{len(self.agents)}"
+                f"weights length {len(weights)} != agents length " f"{len(self.agents)}"
             )
         w = [float(x) for x in weights]
         if any(not math.isfinite(x) or x < 0.0 for x in w) or sum(w) <= 0.0:
@@ -125,9 +124,7 @@ class OpponentPoolConfig:
         if self._weights is None:
             name, merged = self.rng.choice(self.agents)
         else:
-            name, merged = self.rng.choices(
-                self.agents, weights=self._weights, k=1
-            )[0]
+            name, merged = self.rng.choices(self.agents, weights=self._weights, k=1)[0]
         return sample_policy_from_merged(name, merged)
 
     def sample_opponent_for_agent(self, name: str) -> PolicySpec:
@@ -209,5 +206,8 @@ def load_opponent_pool(
 ) -> OpponentPoolConfig:
     raw = load_config(config_path, template_vars=template_vars)
     return OpponentPoolConfig.from_dict(
-        raw, battle_format=battle_format, team_schedule=team_schedule, epoch_ref=epoch_ref
+        raw,
+        battle_format=battle_format,
+        team_schedule=team_schedule,
+        epoch_ref=epoch_ref,
     )

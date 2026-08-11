@@ -1080,7 +1080,9 @@ class MetamonPokemonSlotTstepEncoder(amago.nets.tstep_encoders.TstepEncoder):
             global_token_inputs=obs["global_text_tokens"],
             global_numerical_inputs=global_numbers,
         )
-        add_activation_log("MetamonPokemonSlotTstepEncoder/turn_emb", turn_emb, log_dict)
+        add_activation_log(
+            "MetamonPokemonSlotTstepEncoder/turn_emb", turn_emb, log_dict
+        )
         return turn_emb
 
 
@@ -1882,7 +1884,9 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         matched = 0
         for i, fn in enumerate(filenames):
             parsed = parse_trajectory_filename(fn)
-            opp_label, teamset, _result = parsed if parsed is not None else (None, None, None)
+            opp_label, teamset, _result = (
+                parsed if parsed is not None else (None, None, None)
+            )
             # Base weight: opponent weight if the provider is set, else uniform.
             if provider is not None:
                 if parsed is None:
@@ -1899,7 +1903,11 @@ class MetamonFIFODataset(MetamonAMAGODataset):
                 w = uniform
             # Teamset multiplier (composes multiplicatively with opponent weight).
             if ts_weights is not None:
-                ts_w = ts_weights.get(teamset, self._default_teamset_weight) if teamset is not None else self._default_teamset_weight
+                ts_w = (
+                    ts_weights.get(teamset, self._default_teamset_weight)
+                    if teamset is not None
+                    else self._default_teamset_weight
+                )
                 w *= float(ts_w)
             if w > 0.0 and math.isfinite(w):
                 matched += 1
@@ -1933,7 +1941,10 @@ class MetamonFIFODataset(MetamonAMAGODataset):
         experiment.accelerator.wait_for_everyone()
         self.parsed_replay_dset.refresh_files()
         new_size = len(self.parsed_replay_dset)
-        if self._opponent_weight_provider is not None or self._teamset_weights is not None:
+        if (
+            self._opponent_weight_provider is not None
+            or self._teamset_weights is not None
+        ):
             self._rebuild_weighted_index()
         return {
             "FIFO Buffer Size": new_size,
@@ -2100,6 +2111,7 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
         self._psro: Optional["PsroLite"] = None
         if psro_config is not None:
             from metamon.rl.psro_lite import PsroLite
+
             self._psro = PsroLite(config=psro_config)
         self._psro_trimmed = False
         # Team-mix schedule: a shared EpochRef (from a ScheduleState) held so the
@@ -2233,9 +2245,7 @@ class MetamonOnlineExperiment(MetamonAMAGOExperiment):
                     ts_wr if ts_wr is not None else 0.0
                 )
         log_dict["weight_entropy"] = diag.get("_weight_entropy", 0.0)
-        log_dict["sidecar_write_ok"] = int(
-            bool(diag.get("_sidecar_write_ok", False))
-        )
+        log_dict["sidecar_write_ok"] = int(bool(diag.get("_sidecar_write_ok", False)))
         try:
             self.log(log_dict, key="psro")
         except Exception:

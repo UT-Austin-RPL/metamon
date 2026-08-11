@@ -1570,9 +1570,7 @@ class Gen1PokemonSlotObservationSpace(DefaultObservationSpace):
                 "pokemon_numbers": gym.spaces.Box(
                     low=-10.0,
                     high=10.0,
-                    shape=(
-                        self.NUM_POKEMON_SLOTS * self.POKEMON_NUMERIC_FEATURES,
-                    ),
+                    shape=(self.NUM_POKEMON_SLOTS * self.POKEMON_NUMERIC_FEATURES,),
                     dtype=np.float32,
                 ),
                 "global_numbers": gym.spaces.Box(

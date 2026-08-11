@@ -229,7 +229,9 @@ class TeamMixSchedule:
         parts = []
         for boundary, row in zip(self._epochs, self._weight_rows):
             w = dict(zip(self._set_names, row))
-            parts.append(f"e{boundary}: " + ",".join(f"{k}={v:.0%}" for k, v in w.items()))
+            parts.append(
+                f"e{boundary}: " + ",".join(f"{k}={v:.0%}" for k, v in w.items())
+            )
         return " | ".join(parts)
 
     # -- construction ------------------------------------------------------
@@ -256,9 +258,7 @@ class TeamMixSchedule:
                     f"TeamMixSchedule: each entry needs 'epoch' and 'weights'; "
                     f"got {e!r} in {path!r}"
                 )
-            normalized.append(
-                {"epoch": int(e["epoch"]), "weights": dict(e["weights"])}
-            )
+            normalized.append({"epoch": int(e["epoch"]), "weights": dict(e["weights"])})
         return cls(normalized, source=path)
 
 
@@ -345,9 +345,7 @@ class WeightedMixedTeamSet(TeamSet):
         raw = [w_dict.get(name, 0.0) for name in self._schedule.set_names]
         total = sum(raw)
         if total <= 0:
-            raise ValueError(
-                f"TeamMixSchedule at epoch {epoch} has all-zero weights"
-            )
+            raise ValueError(f"TeamMixSchedule at epoch {epoch} has all-zero weights")
         self.weights = [w / total for w in raw]
         self._last_epoch = epoch
 
@@ -479,9 +477,7 @@ def get_metamon_team_mix(
         set_type: TeamSet subclass to use for each component (default TeamSet).
     """
     pairs = parse_team_mix_spec(spec)
-    team_sets = [
-        get_metamon_teams(battle_format, name, set_type) for name, _ in pairs
-    ]
+    team_sets = [get_metamon_teams(battle_format, name, set_type) for name, _ in pairs]
     weights = [w for _, w in pairs]
     return WeightedMixedTeamSet(team_sets=team_sets, weights=weights)
 
@@ -828,7 +824,7 @@ class PokeEnvWrapper(OpenAIGymEnv):
                 result = "WIN" if info["won"] == 1 else "LOSS"
                 # Use the actual Showdown battle ID to enable matching both perspectives
                 # battle_tag format: "battle-gen1ou-12345" -> extract just the number
-                showdown_battle_id = self.current_battle.battle_tag.split('-')[-1]
+                showdown_battle_id = self.current_battle.battle_tag.split("-")[-1]
                 battle_id = showdown_battle_id
                 timestamp = datetime.now().strftime("%m-%d-%Y-%H:%M:%S")
                 opponent_name = (

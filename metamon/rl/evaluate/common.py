@@ -301,9 +301,7 @@ def merge_defaults(defaults: dict, overrides: dict) -> dict:
     return merged
 
 
-def expand_agent_pool_entries(
-    base_name: str, merged: dict
-) -> List[Tuple[str, dict]]:
+def expand_agent_pool_entries(base_name: str, merged: dict) -> List[Tuple[str, dict]]:
     """Expand one merged agent config into weighted pool rows.
 
     ``num_agents: 1`` (or omitted) yields a single ``(base_name, merged)`` row.

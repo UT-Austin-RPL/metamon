@@ -53,7 +53,8 @@ def test_search_mode_none_takes_baseline_actions(frozen_env_bundle):
 
         obs_list = unstack_obs_dicts(obs)
         legal = info["legal_actions"][0]
-        active = np.zeros(n, dtype=bool); active[0] = True
+        active = np.zeros(n, dtype=bool)
+        active[0] = True
         base_action = int(bundle.eval_driver.act(active, obs_list)[0])
         # search disabled -> runner is never called; the baseline action stands
         assert 0 <= base_action < bundle.action_dim
@@ -87,7 +88,8 @@ def test_base_only_through_search_infra_returns_actor_policy(frozen_env_bundle):
         if lane.ended or not lane.needs_agent_decision(bundle.env.eval_side):
             pytest.skip("lane 0 has no decision at reset")
         legal = info["legal_actions"][0]
-        runner._battle_id = "equiv0"; runner._decision_counter = 1
+        runner._battle_id = "equiv0"
+        runner._decision_counter = 1
         action, rec = runner.search_root(0, obs_list[0], legal)
         assert action in legal, "base_only selected an illegal action"
         assert rec.operator == "base_only"
@@ -116,7 +118,8 @@ def test_no_branch_leaks_after_search_root(frozen_env_bundle):
         if lane.ended or not lane.needs_agent_decision(bundle.env.eval_side):
             pytest.skip("lane 0 has no decision at reset")
         legal = info["legal_actions"][0]
-        runner._battle_id = "leak0"; runner._decision_counter = 1
+        runner._battle_id = "leak0"
+        runner._decision_counter = 1
         runner.search_root(0, obs_list[0], legal)
         assert runner._active_fork_lanes == [], "fork lanes leaked after search_root"
     finally:
@@ -141,12 +144,15 @@ def test_error_policy_raise_propagates_and_base_fallback_logs(frozen_env_bundle)
 
     # base_fallback: an internal error is caught, recorded, and a base action returned
     cfg_fb = SearchConfig(
-        search_mode="oracle-root-mc", search_error_policy="base_fallback",
-        search_rollouts_per_action=2, search_depth=0,
+        search_mode="oracle-root-mc",
+        search_error_policy="base_fallback",
+        search_rollouts_per_action=2,
+        search_depth=0,
     )
     runner_fb = bundle.make_runner(cfg_fb)
     try:
-        runner_fb._battle_id = "err0"; runner_fb._decision_counter = 1
+        runner_fb._battle_id = "err0"
+        runner_fb._decision_counter = 1
         # Force an error inside search_root by passing an empty legal list (no
         # candidates) -- _root_distribution -> _select_candidates -> improve_policy
         # raises ValueError on no legal actions.
@@ -161,12 +167,15 @@ def test_error_policy_raise_propagates_and_base_fallback_logs(frozen_env_bundle)
 
     # raise policy: the same failure must propagate (no silent fallback)
     cfg_raise = SearchConfig(
-        search_mode="oracle-root-mc", search_error_policy="raise",
-        search_rollouts_per_action=2, search_depth=0,
+        search_mode="oracle-root-mc",
+        search_error_policy="raise",
+        search_rollouts_per_action=2,
+        search_depth=0,
     )
     runner_raise = bundle.make_runner(cfg_raise)
     try:
-        runner_raise._battle_id = "err0"; runner_raise._decision_counter = 1
+        runner_raise._battle_id = "err0"
+        runner_raise._decision_counter = 1
         with pytest.raises(Exception):
             runner_raise.search_root(0, obs_list[0], [])
     finally:

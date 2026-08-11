@@ -26,7 +26,6 @@ from metamon.rl.psro_lite import (
 )
 from metamon.rl.evaluate.opponent_pool import OpponentPoolConfig
 
-
 # ---------------------------------------------------------------------------
 # Filename helpers
 # ---------------------------------------------------------------------------
@@ -56,7 +55,11 @@ def test_parse_trajectory_filename_underscore_teamset():
     """Team sets like ``gl_05_26`` contain underscores — the regex must not split
     on them (it anchors on the fixed-shape timestamp)."""
     fn = _make_filename("gen1ou", "SomeAgent-ckpt5-t2.0-gl_05_26", "WIN")
-    assert parse_trajectory_filename(fn) == ("SomeAgent-ckpt5-t2.0-gl_05_26", None, "WIN")
+    assert parse_trajectory_filename(fn) == (
+        "SomeAgent-ckpt5-t2.0-gl_05_26",
+        None,
+        "WIN",
+    )
 
 
 def test_parse_trajectory_filename_teamset_token():
@@ -73,7 +76,9 @@ def test_parse_trajectory_filename_teamset_token():
 
 def test_parse_trajectory_filename_teamset_underscore():
     fn = _make_filename(
-        "gen1ou", "Alakazam-ckpt4-t1.5-@schedule", "LOSS",
+        "gen1ou",
+        "Alakazam-ckpt4-t1.5-@schedule",
+        "LOSS",
         teamset="smogon_pass2_selected",
     )
     assert parse_trajectory_filename(fn) == (
@@ -85,7 +90,10 @@ def test_parse_trajectory_filename_teamset_underscore():
 
 def test_parse_trajectory_filename_non_metamon_returns_none():
     # Human replay filenames have a different shape.
-    assert parse_trajectory_filename("gen1ou-1234_1500_p1_vs_p2_01-02-2025_WIN.json") is None
+    assert (
+        parse_trajectory_filename("gen1ou-1234_1500_p1_vs_p2_01-02-2025_WIN.json")
+        is None
+    )
 
 
 def test_parse_trajectory_filename_json_no_lz4():
@@ -127,11 +135,15 @@ def _write_files(d, opp_counts, fmt="gen1ou"):
     """Write ``opp_counts = {label: (n_wins, n_losses)}`` dummy files into ``d``."""
     for label, (nw, nl) in opp_counts.items():
         for _ in range(nw):
-            fn = _make_filename(fmt, label, "WIN", bid="".join(random.choices("0123456789", k=10)))
+            fn = _make_filename(
+                fmt, label, "WIN", bid="".join(random.choices("0123456789", k=10))
+            )
             with open(os.path.join(d, fn), "wb") as f:
                 f.write(b"")
         for _ in range(nl):
-            fn = _make_filename(fmt, label, "LOSS", bid="".join(random.choices("0123456789", k=10)))
+            fn = _make_filename(
+                fmt, label, "LOSS", bid="".join(random.choices("0123456789", k=10))
+            )
             with open(os.path.join(d, fn), "wb") as f:
                 f.write(b"")
 
@@ -320,24 +332,47 @@ def test_diagnostics_per_teamset_breakdown():
         # 20 W / 80 L vs AgentA on gl_05_26; 60 W / 40 L on smogon_pass2_selected;
         # plus one old untagged file → _unknown bucket.
         for _ in range(20):
-            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "WIN", teamset="gl_05_26",
-                                bid="".join(random.choices("0123456789", k=10)))
+            fn = _make_filename(
+                "gen1ou",
+                "AgentA-ckpt1-@schedule",
+                "WIN",
+                teamset="gl_05_26",
+                bid="".join(random.choices("0123456789", k=10)),
+            )
             open(os.path.join(fmt_dir, fn), "wb").close()
         for _ in range(80):
-            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "LOSS", teamset="gl_05_26",
-                                bid="".join(random.choices("0123456789", k=10)))
+            fn = _make_filename(
+                "gen1ou",
+                "AgentA-ckpt1-@schedule",
+                "LOSS",
+                teamset="gl_05_26",
+                bid="".join(random.choices("0123456789", k=10)),
+            )
             open(os.path.join(fmt_dir, fn), "wb").close()
         for _ in range(60):
-            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "WIN",
-                                teamset="smogon_pass2_selected",
-                                bid="".join(random.choices("0123456789", k=10)))
+            fn = _make_filename(
+                "gen1ou",
+                "AgentA-ckpt1-@schedule",
+                "WIN",
+                teamset="smogon_pass2_selected",
+                bid="".join(random.choices("0123456789", k=10)),
+            )
             open(os.path.join(fmt_dir, fn), "wb").close()
         for _ in range(40):
-            fn = _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "LOSS",
-                                teamset="smogon_pass2_selected",
-                                bid="".join(random.choices("0123456789", k=10)))
+            fn = _make_filename(
+                "gen1ou",
+                "AgentA-ckpt1-@schedule",
+                "LOSS",
+                teamset="smogon_pass2_selected",
+                bid="".join(random.choices("0123456789", k=10)),
+            )
             open(os.path.join(fmt_dir, fn), "wb").close()
-        open(os.path.join(fmt_dir, _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "WIN")), "wb").close()
+        open(
+            os.path.join(
+                fmt_dir, _make_filename("gen1ou", "AgentA-ckpt1-@schedule", "WIN")
+            ),
+            "wb",
+        ).close()
         _, diag = compute_prioritized_weights(
             buffer_dir=buf,
             battle_format="gen1ou",
@@ -532,6 +567,7 @@ def test_config_batched_opponent_uniform_when_no_sidecar():
 # opponents whose rolling-window count dips below min_games)
 # ---------------------------------------------------------------------------
 
+
 def test_dominated_cold_opponent_stays_at_floor():
     """A dominated opponent with n < min_games must NOT spike to 1/n_agents.
 
@@ -572,12 +608,24 @@ def test_novelty_bonus_boosts_never_played():
         os.makedirs(fmt_dir)
         _write_files(fmt_dir, {"AgentA": (0, 0)})  # never played
         w0, diag0 = compute_prioritized_weights(
-            buffer_dir=buf, battle_format="gen1ou", agent_names=agents,
-            window=0, min_games=20, ema=0.0, floor=0.05, novelty_gamma=0.0,
+            buffer_dir=buf,
+            battle_format="gen1ou",
+            agent_names=agents,
+            window=0,
+            min_games=20,
+            ema=0.0,
+            floor=0.05,
+            novelty_gamma=0.0,
         )
         w_g, diag_g = compute_prioritized_weights(
-            buffer_dir=buf, battle_format="gen1ou", agent_names=agents,
-            window=0, min_games=20, ema=0.0, floor=0.05, novelty_gamma=0.5,
+            buffer_dir=buf,
+            battle_format="gen1ou",
+            agent_names=agents,
+            window=0,
+            min_games=20,
+            ema=0.0,
+            floor=0.05,
+            novelty_gamma=0.5,
         )
     # Without novelty: both cold → floor → uniform.
     assert w0["AgentA"] == pytest.approx(0.5)
@@ -596,8 +644,14 @@ def test_cap_ratio_bounds_raw_weight():
         # AgentB: learner loses all → max score. floor=0.05, cap R=4 → max 0.20.
         _write_files(fmt_dir, {"AgentA": (100, 0), "AgentB": (0, 100)})
         w, diag = compute_prioritized_weights(
-            buffer_dir=buf, battle_format="gen1ou", agent_names=agents,
-            window=0, min_games=20, ema=0.0, floor=0.05, cap_ratio=4.0,
+            buffer_dir=buf,
+            battle_format="gen1ou",
+            agent_names=agents,
+            window=0,
+            min_games=20,
+            ema=0.0,
+            floor=0.05,
+            cap_ratio=4.0,
         )
     assert diag["AgentB"]["raw_weight"] <= 4.0 * 0.05 + 1e-9
 
@@ -605,6 +659,7 @@ def test_cap_ratio_bounds_raw_weight():
 # ---------------------------------------------------------------------------
 # Quota-based sampling in ConfigBatchedOpponent
 # ---------------------------------------------------------------------------
+
 
 def _dummy_pool_multi(agents):
     rows = [(name, {"model_name": name, "team_set": "competitive"}) for name in agents]

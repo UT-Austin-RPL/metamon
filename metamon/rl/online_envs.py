@@ -59,6 +59,7 @@ DEFAULT_VAL_TEAM_SET = "competitive"
 # Resolution helpers
 # ---------------------------------------------------------------------------
 
+
 def resolve_dataset_config_path(path: str) -> str:
     if os.path.isabs(path) and os.path.exists(path):
         return path
@@ -93,8 +94,12 @@ def latest_training_state_epoch(ckpt_dir: str, run_name: str) -> int:
 def resolve_checkpoint_path(args, pretrained) -> str:
     """Return the path to the policy weights file to load."""
     if args.prev_run_dir is not None:
-        assert args.prev_run_name is not None, "--prev_run_name required with --prev_run_dir"
-        assert args.prev_checkpoint is not None, "--prev_checkpoint required with --prev_run_dir"
+        assert (
+            args.prev_run_name is not None
+        ), "--prev_run_name required with --prev_run_dir"
+        assert (
+            args.prev_checkpoint is not None
+        ), "--prev_checkpoint required with --prev_run_dir"
         return os.path.join(
             args.prev_run_dir,
             args.prev_run_name,
@@ -139,6 +144,7 @@ def resolve_val_opponent_config(
 # ---------------------------------------------------------------------------
 # Stats dropout (online FIFO only)
 # ---------------------------------------------------------------------------
+
 
 class StatsDropoutObservationSpace(ObservationSpace):
     """Online-only wrapper that randomly hides computed battle stats.
@@ -204,6 +210,7 @@ class StatsDropoutObservationSpace(ObservationSpace):
 # ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
+
 
 def build_online_mixture_dataset(
     *,
@@ -278,6 +285,7 @@ def build_online_mixture_dataset(
 # ---------------------------------------------------------------------------
 # Env factories
 # ---------------------------------------------------------------------------
+
 
 def make_collect_train_env(
     pretrained,

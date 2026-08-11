@@ -42,7 +42,9 @@ def main():
     pool = load_opponent_pool(args.train_pool, battle_format=args.battle_format)
     agent_names = [row[0] for row in pool.agents]
     print(f"Pool agents ({len(agent_names)}): {agent_names}")
-    print(f"Buffer: {os.path.join(os.path.abspath(args.buffer_dir), args.battle_format)}")
+    print(
+        f"Buffer: {os.path.join(os.path.abspath(args.buffer_dir), args.battle_format)}"
+    )
     print()
 
     weights, diag = compute_prioritized_weights(
@@ -69,10 +71,14 @@ def main():
     print("-" * 60)
     unmatched = diag.get("_unmatched_files", 0)
     print(f"unmatched files in window: {unmatched}")
-    print(f"weight_entropy: {weight_entropy(weights):.4f}  (uniform={len(agent_names)} agents → {__import__('math').log(len(agent_names)):.4f})")
+    print(
+        f"weight_entropy: {weight_entropy(weights):.4f}  (uniform={len(agent_names)} agents → {__import__('math').log(len(agent_names)):.4f})"
+    )
     print()
     print("These are the weights the FIRST prioritized update would produce.")
-    print("No sidecar was written. Relaunch the collector with --psro_weighting to apply.")
+    print(
+        "No sidecar was written. Relaunch the collector with --psro_weighting to apply."
+    )
 
 
 if __name__ == "__main__":
